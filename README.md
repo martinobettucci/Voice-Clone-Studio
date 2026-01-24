@@ -1,5 +1,7 @@
 # Voice Clone Studio
 
+**Version 0.1**
+
 A Gradio-based web UI for voice cloning and voice design, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS).
 
 ![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-Powered%20by%20Qwen3--TTS-blue)

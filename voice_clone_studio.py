@@ -5,17 +5,14 @@ from qwen_tts import Qwen3TTSModel
 from pathlib import Path
 from datetime import datetime
 import numpy as np
-import pickle
 import hashlib
 
 # Directories
 SAMPLES_DIR = Path(__file__).parent / "samples"
-
 OUTPUT_DIR = Path(__file__).parent / "output"
-DESIGNS_DIR = Path(__file__).parent / "designs"
 TEMP_DIR = Path(__file__).parent / "temp"
+SAMPLES_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
-DESIGNS_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # Clear temp folder on launch
@@ -491,7 +488,7 @@ Text: {text_to_generate.strip()}
         return None, f"❌ Error generating audio: {str(e)}"
 
 
-def generate_voice_design(text_to_generate, language, instruct, seed, progress=gr.Progress()):
+def generate_voice_design(text_to_generate, language, instruct, seed, progress=gr.Progress(), save_to_output=False):
     """Generate audio using voice design with natural language instructions."""
     if not text_to_generate or not text_to_generate.strip():
         return None, "❌ Please enter text to generate."
@@ -521,14 +518,17 @@ def generate_voice_design(text_to_generate, language, instruct, seed, progress=g
             instruct=instruct.strip(),
         )
 
-        progress(0.8, desc="Saving audio (temp)...")
+        progress(0.8, desc=f"Saving audio ({'output' if save_to_output else 'temp'})...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        temp_file = TEMP_DIR / f"voice_design_{timestamp}.wav"
-        sf.write(str(temp_file), wavs[0], sr)
+        if save_to_output:
+            out_file = OUTPUT_DIR / f"voice_design_{timestamp}.wav"
+        else:
+            out_file = TEMP_DIR / f"voice_design_{timestamp}.wav"
+        sf.write(str(out_file), wavs[0], sr)
 
-        # User must save to samples explicitly; return temp file path
+        # User must save to samples explicitly; return file path
         progress(1.0, desc="Done!")
-        return str(temp_file), f"✅ Voice design generated. Save to samples to keep.\n{seed_msg}"
+        return str(out_file), f"✅ Voice design generated. Save to samples to keep.\n{seed_msg}"
 
     except Exception as e:
         return None, f"❌ Error generating audio: {str(e)}"
@@ -819,52 +819,6 @@ def save_designed_voice(audio_file, name, instruct, language, seed, ref_text):
         return f"❌ Error saving: {str(e)}", gr.update()
 
 
-# def load_design_info(design_name):
-#     """Load info for a selected design."""
-#     if not design_name:
-#         return None, ""
-
-#     designs = get_available_designs()
-#     for d in designs:
-#         if d["name"] == design_name:
-#             meta = d.get("meta", {})
-#             info = f"""**{design_name}**
-
-# **Instruct:** {meta.get('instruct', 'N/A')}
-# **Language:** {meta.get('language', 'N/A')}
-# **Seed:** {meta.get('seed', 'N/A')}
-# **Reference Text:** {meta.get('ref_text', 'N/A')}
-# **Created:** {meta.get('created', 'N/A')}"""
-#             return d["wav_path"], info
-#     return None, ""
-
-
-# def refresh_designs():
-#     """Refresh the designs dropdown."""
-#     choices = get_design_choices()
-#     return gr.update(choices=choices, value=choices[0] if choices else None)
-
-
-# def delete_design(design_name):
-#     """Delete a saved design."""
-#     if not design_name:
-#         return "❌ No design selected.", gr.update()
-
-#     wav_file = DESIGNS_DIR / f"{design_name}.wav"
-#     json_file = DESIGNS_DIR / f"{design_name}.json"
-
-#     try:
-#         if wav_file.exists():
-#             wav_file.unlink()
-#         if json_file.exists():
-#             json_file.unlink()
-
-#         choices = get_design_choices()
-#         return f"✅ Deleted: {design_name}", gr.update(choices=choices, value=choices[0] if choices else None)
-#     except Exception as e:
-#         return f"❌ Error: {str(e)}", gr.update()
-
-
 def refresh_samples():
     """Refresh the sample dropdown."""
     choices = get_sample_choices()
@@ -1126,13 +1080,16 @@ def create_ui():
     with gr.Blocks(title="Voice Clone Studio") as app:
         gr.Markdown("""
         # 🎙️ Voice Clone Studio
-
-        Clone voices using Qwen3-TTS. Select a voice sample, enter your text, and generate speech!
         """)
 
         with gr.Tabs():
             # ============== TAB 1: Voice Clone ==============
-            with gr.TabItem("🎤 Voice Clone"):
+            with gr.TabItem("Voice Clone"):
+                gr.Markdown("""
+                ### Clone Voices from Your Samples
+
+                Select a prepared voice sample and generate speech in that voice. Use the Prep Samples tab to add or edit your samples.
+                """)
                 with gr.Row():
                     # Left column - Sample selection (1/3 width)
                     with gr.Column(scale=1):
@@ -1176,7 +1133,7 @@ def create_ui():
                         with gr.Row():
                             language_dropdown = gr.Dropdown(
                                 choices=LANGUAGES,
-                                value="English",
+                                value="Auto",
                                 label="Language",
                                 info="Language of the text to generate",
                                 scale=2
@@ -1205,29 +1162,7 @@ def create_ui():
                             type="filepath"
                         )
 
-                gr.Markdown("---")
-                gr.Markdown("### 📂 Output History")
-
-                output_dropdown = gr.Dropdown(
-                    choices=get_output_files(),
-                    label="Previous Outputs",
-                    info="Select a previously generated file to play"
-                )
-
-                with gr.Row():
-                    load_output_btn = gr.Button("▶️ Play", size="sm")
-                    refresh_outputs_btn = gr.Button("🔄 Refresh", size="sm")
-
-                history_audio = gr.Audio(
-                    label="Playback",
-                    type="filepath"
-                )
-
-                history_metadata = gr.Textbox(
-                    label="Generation Info",
-                    interactive=False,
-                    lines=5
-                )
+                # ...existing code...
 
                 # Event handlers for Voice Clone tab
                 def load_selected_sample(sample_name):
@@ -1249,51 +1184,8 @@ def create_ui():
                             return s["wav_path"], s["ref_text"], info
                     return None, "", ""
 
-                sample_dropdown.change(
-                    load_selected_sample,
-                    inputs=[sample_dropdown],
-                    outputs=[sample_audio, sample_text, sample_info]
-                )
-
-                load_sample_btn.click(
-                    load_selected_sample,
-                    inputs=[sample_dropdown],
-                    outputs=[sample_audio, sample_text, sample_info]
-                )
-
-                refresh_samples_btn.click(
-                    refresh_samples,
-                    outputs=[sample_dropdown]
-                )
-
-                generate_btn.click(
-                    generate_audio,
-                    inputs=[sample_dropdown, text_input, language_dropdown, seed_input, clone_model_size],
-                    outputs=[output_audio, status_text]
-                ).then(
-                    refresh_outputs,
-                    outputs=[output_dropdown]
-                )
-
-                refresh_outputs_btn.click(
-                    refresh_outputs,
-                    outputs=[output_dropdown]
-                )
-
-                output_dropdown.change(
-                    load_output_audio,
-                    inputs=[output_dropdown],
-                    outputs=[history_audio, history_metadata]
-                )
-
-                load_output_btn.click(
-                    load_output_audio,
-                    inputs=[output_dropdown],
-                    outputs=[history_audio, history_metadata]
-                )
-
             # ============== TAB 2: Voice Design ==============
-            with gr.TabItem("🎨 Voice Design"):
+            with gr.TabItem("Voice Design"):
                 gr.Markdown("""
                 ### Design a Voice with Natural Language
 
@@ -1321,7 +1213,7 @@ def create_ui():
                         with gr.Row():
                             design_language = gr.Dropdown(
                                 choices=LANGUAGES,
-                                value="English",
+                                value="Auto",
                                 label="Language",
                                 info="Language of the text to generate",
                                 scale=2
@@ -1333,6 +1225,11 @@ def create_ui():
                                 info="-1 for random",
                                 scale=1
                             )
+
+                        save_to_output_checkbox = gr.Checkbox(
+                            label="Save to Output folder instead of Temp",
+                            value=False
+                        )
 
                         design_generate_btn = gr.Button("🎨 Generate Voice", variant="primary", size="lg")
                         design_status = gr.Textbox(label="Status", interactive=False)
@@ -1357,9 +1254,12 @@ def create_ui():
                         design_save_status = gr.Textbox(label="Save Status", interactive=False)
 
                 # Voice Design event handlers
+                def generate_voice_design_with_checkbox(text, language, instruct, seed, save_to_output, progress=gr.Progress()):
+                    return generate_voice_design(text, language, instruct, seed, progress=progress, save_to_output=save_to_output)
+
                 design_generate_btn.click(
-                    generate_voice_design,
-                    inputs=[design_text_input, design_language, design_instruct_input, design_seed],
+                    generate_voice_design_with_checkbox,
+                    inputs=[design_text_input, design_language, design_instruct_input, design_seed, save_to_output_checkbox],
                     outputs=[design_output_audio, design_status]
                 )
 
@@ -1371,10 +1271,8 @@ def create_ui():
                     outputs=[design_save_status]
                 )
 
-            # (Clone Design tab removed)
-
-            # ============== TAB 4: Custom Voice ==============
-            with gr.TabItem("🎭 Custom Voice"):
+            # ============== TAB 3: Custom Voice ==============
+            with gr.TabItem("Custom Voice"):
                 gr.Markdown("""
                 ### Generate with Premium Voices
 
@@ -1396,11 +1294,19 @@ def create_ui():
                         )
 
                         gr.Markdown("""
-                        **Speaker Guide:**
-                        - 🇨🇳 **Chinese**: Vivian, Serena, Uncle_Fu, Dylan (Beijing), Eric (Sichuan)
-                        - 🇺🇸 **English**: Ryan, Aiden
-                        - 🇯🇵 **Japanese**: Ono_Anna
-                        - 🇰🇷 **Korean**: Sohee
+                        **Available Speakers:**
+
+                        | Speaker | Voice | Language |
+                        |---------|-------|----------|
+                        | Vivian | Bright young female | 🇨🇳 Chinese |
+                        | Serena | Warm gentle female | 🇨🇳 Chinese |
+                        | Uncle_Fu | Seasoned mellow male | 🇨🇳 Chinese |
+                        | Dylan | Youthful Beijing male | 🇨🇳 Chinese |
+                        | Eric | Lively Chengdu male | 🇨🇳 Chinese |
+                        | Ryan | Dynamic male | 🇺🇸 English |
+                        | Aiden | Sunny American male | 🇺🇸 English |
+                        | Ono_Anna | Playful female | 🇯🇵 Japanese |
+                        | Sohee | Warm female | 🇰🇷 Korean |
 
                         *Tip: Each speaker works best in their native language but can speak any supported language.*
                         """)
@@ -1466,8 +1372,8 @@ def create_ui():
                     outputs=[custom_output_audio, custom_status]
                 )
 
-            # ============== TAB 5: Conversation ==============
-            with gr.TabItem("💬 Conversation"):
+            # ============== TAB 4: Conversation ==============
+            with gr.TabItem("Conversation"):
                 gr.Markdown("""
                 ### Create Multi-Speaker Conversations
 
@@ -1499,15 +1405,17 @@ Aiden: Mind if I join this conversation?""",
 
                         | Speaker | Voice | Language |
                         |---------|-------|----------|
-                        | Vivian | Bright young female | Chinese |
-                        | Serena | Warm gentle female | Chinese |
-                        | Uncle_Fu | Seasoned mellow male | Chinese |
-                        | Dylan | Youthful Beijing male | Chinese |
-                        | Eric | Lively Chengdu male | Chinese |
-                        | Ryan | Dynamic male | English |
-                        | Aiden | Sunny American male | English |
-                        | Ono_Anna | Playful female | Japanese |
-                        | Sohee | Warm female | Korean |
+                        | Vivian | Bright young female | 🇨🇳 Chinese |
+                        | Serena | Warm gentle female | 🇨🇳 Chinese |
+                        | Uncle_Fu | Seasoned mellow male | 🇨🇳 Chinese |
+                        | Dylan | Youthful Beijing male | 🇨🇳 Chinese |
+                        | Eric | Lively Chengdu male | 🇨🇳 Chinese |
+                        | Ryan | Dynamic male | 🇺🇸 English |
+                        | Aiden | Sunny American male | 🇺🇸 English |
+                        | Ono_Anna | Playful female | 🇯🇵 Japanese |
+                        | Sohee | Warm female | 🇰🇷 Korean |
+
+                        *Tip: Each speaker works best in their native language but can speak any supported language.*
                         """)
 
                     # Right - Settings and output
@@ -1543,15 +1451,14 @@ Aiden: Mind if I join this conversation?""",
                             label="Model",
                             info="CustomVoice model size"
                         )
-
                         conv_generate_btn = gr.Button("🎬 Generate Conversation", variant="primary", size="lg")
-                        conv_status = gr.Textbox(label="Status", interactive=False)
 
                         gr.Markdown("### 🔊 Output")
                         conv_output_audio = gr.Audio(
                             label="Generated Conversation",
                             type="filepath"
                         )
+                        conv_status = gr.Textbox(label="Status", interactive=False)
 
                 # Conversation event handlers
                 conv_generate_btn.click(
@@ -1560,8 +1467,127 @@ Aiden: Mind if I join this conversation?""",
                     outputs=[conv_output_audio, conv_status]
                 )
 
+            # ============== TAB 5: Output History ==============
+            with gr.TabItem("Output History"):
+                gr.Markdown("""
+                ### Browse Previous Outputs
+
+                View, play back, and manage your previously generated audio files.
+                """)
+                gr.Markdown("### 📂 Output History")
+
+                output_dropdown = gr.Dropdown(
+                    choices=get_output_files(),
+                    label="Previous Outputs",
+                    info="Select a previously generated file to play"
+                )
+
+                with gr.Row():
+                    load_output_btn = gr.Button("▶️ Play", size="sm")
+                    refresh_outputs_btn = gr.Button("🔄 Refresh", size="sm")
+                    delete_output_btn = gr.Button("🗑️ Delete", size="sm", variant="stop")
+
+                history_audio = gr.Audio(
+                    label="Playback",
+                    type="filepath"
+                )
+
+                history_metadata = gr.Textbox(
+                    label="Generation Info",
+                    interactive=False,
+                    lines=5
+                )
+
+                def delete_output_file(selected_file):
+                    if not selected_file:
+                        # Also reset playback window
+                        return gr.update(), gr.update(value=None), gr.update(value="❌ No file selected."), None, ""
+                    try:
+                        audio_path = Path(selected_file)
+                        txt_path = audio_path.with_suffix(".txt")
+                        deleted = []
+                        if audio_path.exists():
+                            audio_path.unlink()
+                            deleted.append("audio")
+                        if txt_path.exists():
+                            txt_path.unlink()
+                            deleted.append("text")
+                        # Refresh dropdown
+                        choices = get_output_files()
+                        msg = f"✅ Deleted: {audio_path.name} ({', '.join(deleted)})" if deleted else "❌ Files not found"
+                        # Reset playback window: clear audio and metadata
+                        return gr.update(choices=choices, value=choices[0] if choices else None), gr.update(value=None), gr.update(value=msg), None, ""
+                    except Exception as e:
+                        return gr.update(), gr.update(value=None), gr.update(value=f"❌ Error: {str(e)}"), None, ""
+
+                output_dropdown.change(
+                    load_output_audio,
+                    inputs=[output_dropdown],
+                    outputs=[history_audio, history_metadata]
+                )
+
+                load_output_btn.click(
+                    load_output_audio,
+                    inputs=[output_dropdown],
+                    outputs=[history_audio, history_metadata]
+                )
+
+                refresh_outputs_btn.click(
+                    refresh_outputs,
+                    outputs=[output_dropdown]
+                )
+
+                delete_output_btn.click(
+                    delete_output_file,
+                    inputs=[output_dropdown],
+                    outputs=[output_dropdown, history_audio, history_metadata]
+                )
+
+                sample_dropdown.change(
+                    load_selected_sample,
+                    inputs=[sample_dropdown],
+                    outputs=[sample_audio, sample_text, sample_info]
+                )
+
+                load_sample_btn.click(
+                    load_selected_sample,
+                    inputs=[sample_dropdown],
+                    outputs=[sample_audio, sample_text, sample_info]
+                )
+
+                refresh_samples_btn.click(
+                    refresh_samples,
+                    outputs=[sample_dropdown]
+                )
+
+                generate_btn.click(
+                    generate_audio,
+                    inputs=[sample_dropdown, text_input, language_dropdown, seed_input, clone_model_size],
+                    outputs=[output_audio, status_text]
+                ).then(
+                    refresh_outputs,
+                    outputs=[output_dropdown]
+                )
+
+                refresh_outputs_btn.click(
+                    refresh_outputs,
+                    outputs=[output_dropdown]
+                )
+
+                output_dropdown.change(
+                    load_output_audio,
+                    inputs=[output_dropdown],
+                    outputs=[history_audio, history_metadata]
+                )
+
+                load_output_btn.click(
+                    load_output_audio,
+                    inputs=[output_dropdown],
+                    outputs=[history_audio, history_metadata]
+                )
+
             # ============== TAB 6: Prep Samples ==============
-            with gr.TabItem("🎛️ Prep Samples"):
+            with gr.TabItem("Prep Samples"):
                 gr.Markdown("""
                 ### Prepare Voice Samples
 
@@ -1581,8 +1607,10 @@ Aiden: Mind if I join this conversation?""",
                         )
 
                         with gr.Row():
+                            preview_sample_btn = gr.Button("🔊 Preview Sample", size="sm")
+                            refresh_preview_btn = gr.Button("🔄 Refresh Preview", size="sm")
                             load_sample_btn = gr.Button("📂 Load to Editor", size="sm")
-                            clear_cache_btn = gr.Button("🔄 Clear Cache", size="sm")
+                            clear_cache_btn = gr.Button("🧹 Clear Cache", size="sm")
                             delete_sample_btn = gr.Button("🗑️ Delete", size="sm", variant="stop")
 
                         existing_sample_audio = gr.Audio(
@@ -1601,6 +1629,9 @@ Aiden: Mind if I join this conversation?""",
                             label="Info",
                             interactive=False
                         )
+
+                        gr.Markdown("---")
+                        save_status = gr.Textbox(label="Save Status", interactive=False)
 
                     # Right column - Audio editing
                     with gr.Column(scale=2):
@@ -1622,48 +1653,33 @@ Aiden: Mind if I join this conversation?""",
                             label="Audio Info",
                             interactive=False
                         )
+                        with gr.Column(scale=2):
+                            gr.Markdown("### 💬 Transcription / Reference Text")
+                            transcription_output = gr.Textbox(
+                                label="Text",
+                                lines=4,
+                                interactive=True,
+                                placeholder="Transcription will appear here, or enter/edit text manually...",
+                            )
+                            whisper_language = gr.Dropdown(
+                                choices=["Auto-detect"] + LANGUAGES[1:],
+                                value="Auto-detect",
+                                label="Language",
+                            )
 
-                gr.Markdown("---")
+                            transcribe_btn = gr.Button("📝 Transcribe Audio", variant="primary")
 
-                with gr.Row():
-                    # Transcription section
-                    with gr.Column(scale=1):
-                        gr.Markdown("### 📝 Transcribe")
+                        gr.Markdown("---")
 
-                        whisper_language = gr.Dropdown(
-                            choices=["Auto-detect"] + LANGUAGES[1:],
-                            value="Auto-detect",
-                            label="Language Hint",
-                            info="Optional: specify language for better accuracy"
-                        )
-
-                        transcribe_btn = gr.Button("📝 Transcribe Audio", variant="primary")
-
-                    with gr.Column(scale=2):
-                        gr.Markdown("### 💬 Transcription / Reference Text")
-
-                        transcription_output = gr.Textbox(
-                            label="Text",
-                            lines=4,
-                            interactive=True,
-                            placeholder="Transcription will appear here, or enter/edit text manually...",
-                            info="This will be saved as the reference text for the sample"
-                        )
-
-                gr.Markdown("---")
-                gr.Markdown("### 💾 Save as New Sample")
-
-                with gr.Row():
-                    new_sample_name = gr.Textbox(
-                        label="Sample Name",
-                        placeholder="Enter a name for this voice sample...",
-                        scale=2
-                    )
-                    save_sample_btn = gr.Button("💾 Save Sample", variant="primary", scale=1)
-
-                save_status = gr.Textbox(label="Save Status", interactive=False)
-
-                # ---- Event handlers for Prep Samples tab ----
+                        with gr.Column():
+                            # Save as new sample
+                            gr.Markdown("### 💾 Save as New Sample")
+                            new_sample_name = gr.Textbox(
+                                label="Sample Name",
+                                placeholder="Enter a name for this voice sample...",
+                                scale=2
+                            )
+                            save_sample_btn = gr.Button("💾 Save Sample", variant="primary")                                
 
                 # Load existing sample to editor
                 def load_sample_to_editor(sample_name):
@@ -1686,6 +1702,20 @@ Aiden: Mind if I join this conversation?""",
 
                 # Preview on dropdown change
                 existing_sample_dropdown.change(
+                    load_existing_sample,
+                    inputs=[existing_sample_dropdown],
+                    outputs=[existing_sample_audio, existing_sample_text, existing_sample_info]
+                )
+
+                # Preview button
+                preview_sample_btn.click(
+                    load_existing_sample,
+                    inputs=[existing_sample_dropdown],
+                    outputs=[existing_sample_audio, existing_sample_text, existing_sample_info]
+                )
+
+                # Refresh preview button
+                refresh_preview_btn.click(
                     load_existing_sample,
                     inputs=[existing_sample_dropdown],
                     outputs=[existing_sample_audio, existing_sample_text, existing_sample_info]
@@ -1743,12 +1773,12 @@ Aiden: Mind if I join this conversation?""",
         gr.Markdown("""
         ---
         **Tips:**
-        - **Voice Clone**: Clone from your own audio samples (3-10 seconds of clear audio)
-        - **Voice Design**: Create voices from text descriptions, save designs you like!
-        - **Clone Design**: Use saved designs to generate new content consistently
-        - **Custom Voice**: Use premium pre-built voices with style control (emotion, tone, speed)
-        - **Conversation**: Create multi-speaker dialogues - just write a script!
-        - Use the **Prep Samples** tab to trim, clean, and transcribe audio before saving
+        - **Voice Clone**    : Clone from your own audio samples (3-10 seconds of clear audio)
+        - **Voice Design**   : Create voices from text descriptions, save designs you like!
+        - **Custom Voice**   : Use premium pre-built voices with style control (emotion, tone, speed)
+        - **Conversation**   : Create multi-speaker dialogues - just write a script!
+        - **Output History** : Browse, play, and manage your generated audio files
+        - **Prep Samples**   : Trim, clean, and transcribe audio and save as voice samples
         - ⚡ **Voice prompts are cached!** First generation processes the sample, subsequent ones are faster
         """)
 
