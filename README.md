@@ -296,7 +296,10 @@ This project is based on and uses code from:
 
 ## Versions
 
-**Version 0.3** - Enhanced Media Support
+**Version 0.3.5** - Style Instructions
+- Added Style Instructions support in Conversation for Qwen model. (Unsupported by VibeVoice)
+
+**Version 0.30** - Enhanced Media Support
 - Video File Support - Upload video files (.mp4, .mov, .avi, .mkv, etc.) to Prep Samples tab
 - Automatic Audio Extraction - Uses ffmpeg to extract audio from video files for voice cloning
 - Improved Workflow - Added Clear button to quickly reset the audio editor
