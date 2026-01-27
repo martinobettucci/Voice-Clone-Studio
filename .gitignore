@@ -41,6 +41,7 @@ temp/*
 samples/*
 datasets/*
 trained_models/*
+models/*
 *.wav
 *.mp3
 *.prompt

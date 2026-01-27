@@ -2,10 +2,8 @@ import os
 import sys
 from pathlib import Path
 
-# Add modules directories to Python path
+# Add modules directory to Python path
 MODULES_DIR = Path(__file__).parent / "modules"
-
-# Add modules to path (contains both 'vibevoice_tts' and 'vibevoice_asr' packages)
 if str(MODULES_DIR) not in sys.path:
     sys.path.insert(0, str(MODULES_DIR))
 
@@ -21,8 +19,14 @@ import json
 import shutil
 import re
 from textwrap import dedent
-import ui_help
+from modules.ui_components import ui_help
 import markdown
+from modules.ui_components.confirmation_modal import (
+    CONFIRMATION_MODAL_CSS,
+    CONFIRMATION_MODAL_HEAD,
+    CONFIRMATION_MODAL_HTML,
+    show_confirmation_modal_js
+)
 
 # Directories
 SAMPLES_DIR = Path(__file__).parent / "samples"
@@ -342,8 +346,8 @@ def get_vibe_voice_model():
 
         try:
             # Import from renamed vibevoice_asr package (no conflict with TTS)
-            from vibevoice_asr.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
-            from vibevoice_asr.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
+            from modules.vibevoice_asr.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
+            from modules.vibevoice_asr.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
 
             model_path = "microsoft/VibeVoice-ASR"
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -491,7 +495,7 @@ def get_vibevoice_tts_model(model_size="1.5B"):
     if _vibevoice_tts_model is None:
         print(f"Loading VibeVoice TTS model ({model_size})...")
         try:
-            from vibevoice_tts.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
+            from modules.vibevoice_tts.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
             import warnings
 
             # Map size to HuggingFace model path
@@ -719,10 +723,10 @@ def get_sample_choices():
 def get_output_files():
     """Get list of generated output files with None as first option."""
     if not OUTPUT_DIR.exists():
-        return ["(Select a file)"]
+        return []
     files = sorted(OUTPUT_DIR.glob("*.wav"), key=lambda x: x.stat().st_mtime, reverse=True)
     # Return just filenames instead of full paths
-    return ["(Select a file)"] + [f.name for f in files]
+    return [f.name for f in files]
 
 
 def get_audio_duration(audio_path):
@@ -833,7 +837,7 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
             progress(0.1, desc=f"Loading VibeVoice model ({model_size})...")
             model = get_vibevoice_tts_model(model_size)
 
-            from vibevoice_tts.processor.vibevoice_processor import VibeVoiceProcessor
+            from modules.vibevoice_tts.processor.vibevoice_processor import VibeVoiceProcessor
             import warnings
             import logging
 
@@ -1290,7 +1294,7 @@ def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5
         model = get_vibevoice_tts_model(model_size)
 
         # Import processor
-        from vibevoice_tts.processor.vibevoice_processor import VibeVoiceProcessor
+        from modules.vibevoice_tts.processor.vibevoice_processor import VibeVoiceProcessor
         import warnings
         import logging
 
@@ -1588,28 +1592,29 @@ def refresh_samples():
 def refresh_outputs():
     """Refresh the output file list."""
     files = get_output_files()
-    return gr.update(choices=files, value=files[0] if files else None)
+    return gr.update(choices=files, value=None)
 
 
 def load_output_audio(file_path):
     """Load a selected output file for playback and show metadata."""
-    if file_path and file_path != "(Select a file)":
-        # Convert filename to full path if needed
-        if not Path(file_path).is_absolute():
-            file_path = OUTPUT_DIR / file_path
-        else:
-            file_path = Path(file_path)
+    if not file_path:
+        return None, ""
 
-        if file_path.exists():
-            # Check for metadata file
-            metadata_file = file_path.with_suffix(".txt")
-            if metadata_file.exists():
-                try:
-                    metadata = metadata_file.read_text(encoding="utf-8")
-                    return str(file_path), metadata
-                except:
-                    pass
-            return str(file_path), "No metadata available"
+    if not Path(file_path).is_absolute():
+        file_path = OUTPUT_DIR / file_path
+    else:
+        file_path = Path(file_path)
+
+    if file_path.exists():
+        # Check for metadata file
+        metadata_file = file_path.with_suffix(".txt")
+        if metadata_file.exists():
+            try:
+                metadata = metadata_file.read_text(encoding="utf-8")
+                return str(file_path), metadata
+            except:
+                pass
+        return str(file_path), "No metadata available"
     return None, ""
 
 
@@ -1995,10 +2000,22 @@ def load_existing_sample(sample_name):
     return None, "", "Sample not found"
 
 
-def delete_sample(sample_name):
+def delete_sample(action, sample_name):
     """Delete a sample (wav, txt, and prompt cache files)."""
+    # Ignore empty calls or actions not for this callback
+    if not action or not action.strip() or not action.startswith("sample_"):
+        return gr.update(), gr.update(), gr.update(), gr.update()
+
+    # If cancelled, return without doing anything
+    if "cancel" in action:
+        return "❌ Deletion cancelled", gr.update(), gr.update(), action
+
+    # Only process confirm actions
+    if "confirm" not in action:
+        return gr.update(), gr.update(), gr.update(), action
+
     if not sample_name:
-        return "❌ No sample selected", gr.update(), gr.update()
+        return "❌ No sample selected", gr.update(), gr.update(), action
 
     try:
         wav_path = SAMPLES_DIR / f"{sample_name}.wav"
@@ -2025,13 +2042,14 @@ def delete_sample(sample_name):
             return (
                 f"✅ Deleted {sample_name} ({', '.join(deleted)} files)",
                 gr.update(choices=choices, value=choices[0] if choices else None),
-                gr.update(choices=choices, value=choices[0] if choices else None)
+                gr.update(choices=choices, value=choices[0] if choices else None),
+                action
             )
         else:
-            return "❌ Files not found", gr.update(), gr.update()
+            return "❌ Files not found", gr.update(), gr.update(), action
 
     except Exception as e:
-        return f"❌ Error deleting: {str(e)}", gr.update(), gr.update()
+        return f"❌ Error deleting: {str(e)}", gr.update(), gr.update(), action
 
 
 def clear_sample_cache(sample_name):
@@ -2067,26 +2085,57 @@ def clear_sample_cache(sample_name):
 # ============== Training Dataset Functions ==============
 
 def get_trained_models():
-    """Get list of trained custom voice models from trained_models directory."""
-    trained_models_dir = Path("trained_models")
+    """Get list of trained custom voice models from models directory.
+
+    Returns a flat list of model entries with format:
+    - "ModelName" for direct models (folder with model.safetensors)
+    - "ModelName - Epoch N" for checkpoint-based models
+
+    Each entry includes the full path for loading.
+    """
+    trained_models_dir = Path("models")
     if not trained_models_dir.exists():
         return []
 
     models = []
-    for speaker_dir in trained_models_dir.iterdir():
-        if speaker_dir.is_dir():
-            # Check if there are checkpoint folders
-            checkpoints = list(speaker_dir.glob("checkpoint-epoch-*"))
-            if checkpoints:
-                # Sort by epoch number
-                sorted_checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[-1]))
-                checkpoint_list = [{"epoch": int(cp.name.split("-")[-1]), "path": str(cp)} for cp in sorted_checkpoints]
+
+    for folder in trained_models_dir.iterdir():
+        if not folder.is_dir():
+            continue
+
+        # Check if this folder directly contains model.safetensors
+        if (folder / "model.safetensors").exists():
+            models.append({
+                "display_name": folder.name,
+                "path": str(folder),
+                "speaker_name": folder.name
+            })
+        else:
+            # Check for checkpoint subfolders
+            checkpoints = []
+            for subfolder in folder.iterdir():
+                if subfolder.is_dir() and (subfolder / "model.safetensors").exists():
+                    # Extract epoch number from "checkpoint-epoch-N" format
+                    if subfolder.name.startswith("checkpoint-epoch-"):
+                        try:
+                            epoch_num = int(subfolder.name.split("-")[-1])
+                            checkpoints.append({
+                                "epoch": epoch_num,
+                                "path": str(subfolder),
+                                "display_name": f"{folder.name} - Epoch {epoch_num}"
+                            })
+                        except ValueError:
+                            continue
+
+            # Add all checkpoints to the models list
+            for cp in sorted(checkpoints, key=lambda x: x["epoch"]):
                 models.append({
-                    "name": speaker_dir.name,
-                    "checkpoints": checkpoint_list
+                    "display_name": cp["display_name"],
+                    "path": cp["path"],
+                    "speaker_name": folder.name
                 })
 
-    return sorted(models, key=lambda x: x["name"])
+    return sorted(models, key=lambda x: x["display_name"])
 
 
 def get_dataset_folders():
@@ -2165,10 +2214,22 @@ def save_dataset_transcript(folder, filename, transcript):
         return f"❌ Error saving: {str(e)}"
 
 
-def delete_dataset_item(folder, filename):
+def delete_dataset_item(action, folder, filename):
     """Delete both audio and transcript files."""
+    # Ignore empty calls or actions not for this callback
+    if not action or not action.strip() or not action.startswith("finetune_"):
+        return gr.update(), gr.update(), gr.update()
+
+    # If cancelled, return without doing anything
+    if "cancel" in action:
+        return "❌ Deletion cancelled", gr.update(), action
+
+    # Only process confirm actions
+    if "confirm" not in action:
+        return gr.update(), gr.update(), action
+
     if not filename:
-        return "❌ No file selected", []
+        return "❌ No file selected", gr.update(), action
 
     try:
         # Determine the directory
@@ -2190,9 +2251,9 @@ def delete_dataset_item(folder, filename):
 
         files = get_dataset_files(folder)
         msg = f"✅ Deleted {filename} ({', '.join(deleted)})" if deleted else "❌ File not found"
-        return msg, files
+        return msg, gr.update(choices=files, value=None), action
     except Exception as e:
-        return f"❌ Error: {str(e)}", get_dataset_files(folder)
+        return f"❌ Error: {str(e)}", gr.update(choices=get_dataset_files(folder), value=None), action
 
 
 def auto_transcribe_finetune(folder, filename, transcribe_model="Whisper", language="Auto-detect", progress=gr.Progress()):
@@ -2413,7 +2474,7 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
 
     # Create output directory - use absolute path
     project_root = Path(__file__).parent
-    output_dir = project_root / "trained_models" / speaker_name.strip()
+    output_dir = project_root / "models" / speaker_name.strip()
     if output_dir.exists():
         return f"❌ Output folder already exists: {output_dir}\n\nPlease choose a different speaker name or delete the existing folder."
 
@@ -2561,7 +2622,8 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
     progress(0.3, desc="Step 2/3: Extracting audio codes...")
 
     train_with_codes_path = base_dir / "train_with_codes.jsonl"
-    prepare_script = Path(__file__).parent / "modules" / "qwen_finetune" / "prepare_data.py"
+    modules_dir = Path(__file__).parent / "modules"
+    prepare_script = modules_dir / "qwen_finetune" / "prepare_data.py"
 
     if not prepare_script.exists():
         status_log.append("❌ Qwen3-TTS finetuning scripts not found!")
@@ -2627,7 +2689,8 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
     status_log.append("=" * 60)
     progress(0.5, desc="Step 3/3: Training model (this may take a while)...")
 
-    sft_script = Path(__file__).parent / "modules" / "qwen_finetune" / "sft_12hz.py"
+    modules_dir = Path(__file__).parent / "modules"
+    sft_script = modules_dir / "qwen_finetune" / "sft_12hz.py"
 
     if not sft_script.exists():
         status_log.append("❌ sft_12hz.py not found!")
@@ -2750,7 +2813,48 @@ def create_ui():
     """Create the Gradio interface."""
 
     # Load custom theme from local theme.json (colors pre-configured with orange)
-    theme = gr.themes.Base.load('theme.json')
+    theme = gr.themes.Base.load('modules/ui_components/theme.json')
+
+    # Custom CSS for vertical file list
+    custom_css = """
+    #confirm-trigger {
+        display: none !important;
+    }
+    #finetune-files-group > div {
+        display: grid !important;
+    }
+    #finetune-files-container {
+        max-height: 400px;
+        overflow-y: auto;
+    }
+    #finetune-files-group label {
+        background: none !important;
+        border: none !important;
+        padding: 4px 8px !important;
+        margin: 2px 0 !important;
+        box-shadow: none !important;
+    }
+    #finetune-files-group label:hover {
+        background: rgba(255, 255, 255, 0.05) !important;
+    }
+    #output-files-group > div {
+        display: grid !important;
+    }
+    #output-files-container {
+        max-height: 600px;
+        overflow-y: auto;
+    }
+    #output-files-group label {
+        background: none !important;
+        border: none !important;
+        padding: 4px 8px !important;
+        margin: 2px 0 !important;
+        box-shadow: none !important;
+    }
+    #output-files-group label:hover {
+        background: rgba(255, 255, 255, 0.05) !important;
+    }
+    """
 
     # Helper function to format help content with markdown
     def format_help_html(markdown_text, height="70vh"):
@@ -2780,6 +2884,12 @@ def create_ui():
         """
 
     with gr.Blocks(title="Voice Clone Studio") as app:
+        # Add confirmation modal HTML
+        gr.HTML(CONFIRMATION_MODAL_HTML)
+
+        # Hidden trigger for confirmation modal - visible but hidden via CSS
+        confirm_trigger = gr.Textbox(label="Confirm Trigger", value="", elem_id="confirm-trigger")
+
         gr.Markdown("""
         # 🎙️ Voice Clone Studio
         <p style="font-size: 0.9em; color: #ffffff; margin-top: -10px;">  Powered by Qwen3-TTS, VibeVoice and Whisper</p>
@@ -2865,7 +2975,7 @@ def create_ui():
                             type="filepath"
                         )
 
-                        status_text = gr.Textbox(label="Status", interactive=False, max_lines=3)
+                        status_text = gr.Textbox(label="Status", interactive=False, max_lines=5)
 
                 # Event handlers for Voice Clone tab
                 def load_selected_sample(sample_name):
@@ -2985,41 +3095,23 @@ def create_ui():
 
                         # Trained models dropdown
                         with gr.Column(visible=False) as trained_section:
-                            def get_initial_speaker_list():
-                                """Get initial list of trained speakers for dropdown initialization."""
+                            def get_initial_model_list():
+                                """Get initial list of trained models for dropdown initialization."""
                                 models = get_trained_models()
                                 if not models:
                                     return ["(No trained models found)"]
-                                # Add placeholder at the beginning
-                                return ["(Select Model)"] + [m['name'] for m in models]
+                                return ["(Select Model)"] + [m['display_name'] for m in models]
 
-                            def refresh_trained_speakers():
-                                """Refresh both dropdowns - model list and checkpoints."""
+                            def refresh_trained_models():
+                                """Refresh model list."""
                                 models = get_trained_models()
                                 if not models:
-                                    return gr.update(choices=["(No trained models found)"], value="(No trained models found)"), gr.update(choices=[], value=None)
+                                    return gr.update(choices=["(No trained models found)"], value="(No trained models found)")
+                                choices = ["(Select Model)"] + [m['display_name'] for m in models]
+                                return gr.update(choices=choices, value="(Select Model)")
 
-                                # Add placeholder at the beginning
-                                choices = ["(Select Model)"] + [m['name'] for m in models]
-
-                                return gr.update(choices=choices, value="(Select Model)"), gr.update(choices=[], value=None)
-
-                            def get_checkpoint_choices(speaker_name):
-                                """Get checkpoint choices for selected speaker."""
-                                if not speaker_name or speaker_name in ["(No trained models found)", "(Select Model)"]:
-                                    return gr.update(choices=[], value=None)
-
-                                models = get_trained_models()
-                                for model in models:
-                                    if model["name"] == speaker_name:
-                                        choices = [f"Epoch {cp['epoch']}" for cp in model["checkpoints"]]
-                                        # Default to latest (last in list)
-                                        return gr.update(choices=choices, value=choices[-1] if choices else None)
-
-                                return gr.update(choices=[], value=None)
-
-                            trained_speaker_dropdown = gr.Dropdown(
-                                choices=get_initial_speaker_list(),
+                            trained_model_dropdown = gr.Dropdown(
+                                choices=get_initial_model_list(),
                                 value="(Select Model)",
                                 label="Trained Model",
                                 info="Select your custom trained voice"
@@ -3027,17 +3119,13 @@ def create_ui():
 
                             refresh_trained_btn = gr.Button("Refresh", size="sm")
 
-                            trained_checkpoint_dropdown = gr.Dropdown(
-                                choices=[],
-                                label="Checkpoint Epoch",
-                                info="Select which training epoch to use (latest is usually best)"
-                            )
-
                             trained_models_tip = dedent("""\
                             **Trained Models:**
 
                             Custom voices you've trained in the Train Model tab.
-                            Select the model, then choose which checkpoint (epoch) to use.
+                            Models are listed as:
+                            - "ModelName" for standalone models
+                            - "ModelName - Epoch N" for checkpoint-based models
 
                             *Tip: Later epochs are usually better trained*
                             """)
@@ -3103,15 +3191,7 @@ def create_ui():
                         trained_section: gr.update(visible=not is_premium)
                     }
 
-                def refresh_trained_models():
-                    """Refresh the list of trained models."""
-                    models = get_trained_models()
-                    if not models:
-                        return gr.update(choices=["(No trained models found)"], value=None)
-                    choices = [f"{m['name']} ({m['checkpoints']} checkpoints)" for m in models]
-                    return gr.update(choices=choices, value=None)
-
-                def generate_with_voice_type(text, lang, speaker_sel, instruct, seed, model_size, voice_type, premium_speaker, trained_speaker, trained_checkpoint, progress=gr.Progress()):
+                def generate_with_voice_type(text, lang, speaker_sel, instruct, seed, model_size, voice_type, premium_speaker, trained_model, progress=gr.Progress()):
                     """Generate audio with either premium or trained voice."""
 
                     if voice_type == "Premium Speakers":
@@ -3126,20 +3206,26 @@ def create_ui():
                             progress
                         )
                     else:
-                        # Use trained model checkpoint
-                        if not trained_speaker or trained_speaker in ["(No trained models found)", "(Select Model)"]:
+                        # Use trained model
+                        if not trained_model or trained_model in ["(No trained models found)", "(Select Model)"]:
                             return None, "❌ Please select a trained model or train one first"
 
-                        if not trained_checkpoint:
-                            return None, "❌ Please select a checkpoint epoch"
+                        # Find the model path from the model list
+                        models = get_trained_models()
+                        model_path = None
+                        speaker_name = None
+                        for model in models:
+                            if model['display_name'] == trained_model:
+                                model_path = model['path']
+                                speaker_name = model['speaker_name']
+                                break
 
-                        # Extract epoch number from checkpoint selection
-                        epoch = int(trained_checkpoint.split(" ")[1])  # "Epoch 2"
-                        checkpoint_path = f"trained_models/{trained_speaker}/checkpoint-epoch-{epoch}"
+                        if not model_path:
+                            return None, f"❌ Model not found: {trained_model}"
 
                         # Generate with trained model
                         return generate_with_trained_model(
-                            text, lang, trained_speaker, checkpoint_path, instruct, seed, progress
+                            text, lang, speaker_name, model_path, instruct, seed, progress
                         )
 
                 voice_type_radio.change(
@@ -3148,15 +3234,9 @@ def create_ui():
                     outputs=[premium_section, trained_section]
                 )
 
-                trained_speaker_dropdown.change(
-                    get_checkpoint_choices,
-                    inputs=[trained_speaker_dropdown],
-                    outputs=[trained_checkpoint_dropdown]
-                )
-
                 refresh_trained_btn.click(
-                    refresh_trained_speakers,
-                    outputs=[trained_speaker_dropdown, trained_checkpoint_dropdown]
+                    refresh_trained_models,
+                    outputs=[trained_model_dropdown]
                 )
 
                 custom_generate_btn.click(
@@ -3164,7 +3244,7 @@ def create_ui():
                     inputs=[
                         custom_text_input, custom_language, custom_speaker_dropdown,
                         custom_instruct_input, custom_seed, custom_model_size,
-                        voice_type_radio, custom_speaker_dropdown, trained_speaker_dropdown, trained_checkpoint_dropdown
+                        voice_type_radio, custom_speaker_dropdown, trained_model_dropdown
                     ],
                     outputs=[custom_output_audio, custom_status]
                 )
@@ -3480,7 +3560,6 @@ def create_ui():
                         )
 
                         design_save_btn = gr.Button("Save Sample", variant="primary")
-                        design_save_status = gr.Textbox(label="Save Status", interactive=False)
 
                 # Voice Design event handlers
                 def generate_voice_design_with_checkbox(text, language, instruct, seed, save_to_output, progress=gr.Progress()):
@@ -3497,7 +3576,7 @@ def create_ui():
                 design_save_btn.click(
                     lambda *args: save_designed_voice(*args)[0],  # Only return status, ignore dropdown update
                     inputs=[design_output_audio, design_save_name, design_instruct_input, design_language, design_seed, design_text_input],
-                    outputs=[design_save_status]
+                    outputs=[design_status]
                 )
 
             # ============== TAB 5: Prep Samples ==============
@@ -3521,7 +3600,7 @@ def create_ui():
                             refresh_preview_btn = gr.Button("Refresh Preview", size="sm")
                             load_sample_btn = gr.Button("Load to Editor", size="sm")
                             clear_cache_btn = gr.Button("Clear Cache", size="sm")
-                            delete_sample_btn = gr.Button("Delete", size="sm", variant="stop")
+                            delete_sample_btn = gr.Button("Delete", size="sm", variant="primary")
 
                         existing_sample_audio = gr.Audio(
                             label="Sample Preview",
@@ -3540,7 +3619,7 @@ def create_ui():
                             interactive=False
                         )
 
-                        save_status = gr.Textbox(label="Save Status", interactive=False, scale=1)
+                        save_status = gr.Textbox(label="Status", interactive=False, scale=1)
 
                     # Right column - Audio/Video editing
                     with gr.Column(scale=2):
@@ -3652,10 +3731,24 @@ def create_ui():
                 )
 
                 # Delete sample
+                # Show modal on delete button click
                 delete_sample_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=None,
+                    js=show_confirmation_modal_js(
+                        title="Delete Sample?",
+                        message="This will permanently delete the sample audio, text, and cached files. This action cannot be undone.",
+                        confirm_button_text="Delete",
+                        context="sample_"
+                    )
+                )
+
+                # Process confirmation
+                confirm_trigger.change(
                     delete_sample,
-                    inputs=[existing_sample_dropdown],
-                    outputs=[save_status, existing_sample_dropdown, sample_dropdown]
+                    inputs=[confirm_trigger, existing_sample_dropdown],
+                    outputs=[save_status, existing_sample_dropdown, sample_dropdown, confirm_trigger]
                 )
 
                 # Clear cache
@@ -3717,31 +3810,42 @@ def create_ui():
             with gr.TabItem("Output History"):
                 gr.Markdown("Browse and manage previously generated audio files")
                 with gr.Row():
-                    output_dropdown = gr.Dropdown(
-                        choices=get_output_files(),
-                        label="Previous Outputs",
-                        info="Select a previously generated file to play",
-                        scale=20
-                    )
-                    with gr.Column(scale=0):
-                        load_output_btn = gr.Button("Load", size="sm")
+                    with gr.Column(scale=1):
+                        with gr.Column(scale=1, elem_id="output-files-container"):
+                            output_dropdown = gr.Radio(
+                                choices=get_output_files(),
+                                show_label=False,
+                                interactive=True,
+                                elem_id="output-files-group"
+                            )
                         refresh_outputs_btn = gr.Button("Refresh", size="sm")
-                        delete_output_btn   = gr.Button("Delete", size="sm")
 
-                history_audio = gr.Audio(
-                    label="Playback",
-                    type="filepath"
-                )
+                    with gr.Column(scale=1):
+                        history_audio = gr.Audio(
+                            label="Playback",
+                            type="filepath"
+                        )
 
-                history_metadata = gr.Textbox(
-                    label="Generation Info",
-                    interactive=False,
-                    lines=5
-                )
+                        history_metadata = gr.Textbox(
+                            label="Generation Info",
+                            interactive=False,
+                            max_lines=10
+                        )
+                        delete_output_btn   = gr.Button("Delete", size="sm", variant="primary")
 
-                def delete_output_file(selected_file):
-                    if not selected_file or selected_file == "(Select a file)":
-                        return gr.update(), gr.update(value=None), gr.update(value="❌ No file selected.")
+                def delete_output_file(action, selected_file):
+                    # Ignore empty calls or actions not for this callback
+                    if not action or not action.strip() or not action.startswith("output_"):
+                        return gr.update(), gr.update(), gr.update(), gr.update()
+
+                    # If cancelled, return without doing anything
+                    if "cancel" in action:
+                        return gr.update(), gr.update(), gr.update(value="❌ Deletion cancelled"), action
+
+                    # Only process confirm actions
+                    if "confirm" not in action:
+                        return gr.update(), gr.update(), gr.update(), action
+
                     try:
                         # Convert filename to full path if needed
                         if not Path(selected_file).is_absolute():
@@ -3761,14 +3865,29 @@ def create_ui():
                         choices = get_output_files()
                         msg = f"✅ Deleted: {audio_path.name} ({', '.join(deleted)})" if deleted else "❌ Files not found"
 
-                        # Set to None placeholder to force reset
-                        return gr.update(choices=choices, value="(Select a file)"), gr.update(value=None), gr.update(value=msg)
+                        # Refresh list and clear selection
+                        return gr.update(choices=choices, value=None), gr.update(value=None), gr.update(value=msg), action
                     except Exception as e:
-                        return gr.update(), gr.update(value=None), gr.update(value=f"❌ Error: {str(e)}")
+                        return gr.update(), gr.update(value=None), gr.update(value=f"❌ Error: {str(e)}"), action
+
+                # Show modal on delete button click
                 delete_output_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=None,
+                    js=show_confirmation_modal_js(
+                        title="Delete Output File?",
+                        message="This will permanently delete the generated audio and its metadata. This action cannot be undone.",
+                        confirm_button_text="Delete",
+                        context="output_"
+                    )
+                )
+
+                # Process confirmation
+                confirm_trigger.change(
                     delete_output_file,
-                    inputs=[output_dropdown],
-                    outputs=[output_dropdown, history_audio, history_metadata]
+                    inputs=[confirm_trigger, output_dropdown],
+                    outputs=[output_dropdown, history_audio, history_metadata, confirm_trigger]
                 )
 
                 refresh_outputs_btn.click(
@@ -3776,13 +3895,7 @@ def create_ui():
                     outputs=[output_dropdown]
                 )
 
-                load_output_btn.click(
-                    load_output_audio,
-                    inputs=[output_dropdown],
-                    outputs=[history_audio, history_metadata]
-                )
-
-                # Simple load on dropdown change or button click
+                # Load on dropdown change
                 output_dropdown.change(
                     load_output_audio,
                     inputs=[output_dropdown],
@@ -3800,24 +3913,24 @@ def create_ui():
                         finetune_folder_dropdown = gr.Dropdown(
                             choices=get_dataset_folders(),
                             label="Dataset Folder",
-                            info="Subfolders in datasets/",
+                            info="Subfolders in datasets",
                             interactive=True,
                             value=None
                         )
 
                         refresh_folder_btn = gr.Button("Refresh Folders", size="sm")
 
-                        finetune_dropdown = gr.Dropdown(
-                            choices=[],
-                            label="Audio Files",
-                            info="Files in selected folder",
-                            interactive=True
-                        )
+                        with gr.Column(elem_id="finetune-files-container"):
+                            finetune_dropdown = gr.Radio(
+                                choices=[],
+                                show_label=False,
+                                interactive=True,
+                                elem_id="finetune-files-group"
+                            )
 
                         with gr.Row():
-                            load_finetune_btn = gr.Button("Load", size="sm", scale=1)
                             refresh_finetune_btn = gr.Button("Refresh", size="sm", scale=1)
-                            delete_finetune_btn = gr.Button("Delete", size="sm", scale=1)
+                            delete_finetune_btn = gr.Button("Delete", size="sm", scale=1, variant="primary")
 
                         finetune_audio_preview = gr.Audio(
                             label="Audio Preview & Trim",
@@ -3825,7 +3938,7 @@ def create_ui():
                             interactive=True
                         )
 
-                        save_trimmed_btn = gr.Button("Save Trimmed Audio", variant="secondary")
+                        save_trimmed_btn = gr.Button("Save Trimmed Audio")
 
                         gr.Markdown("### Transcription Settings")
 
@@ -3859,12 +3972,6 @@ def create_ui():
                             auto_transcribe_btn = gr.Button("Auto-Transcribe", variant="primary", scale=1)
                             save_transcript_btn = gr.Button("Save Transcript", variant="primary", scale=1)
 
-                        finetune_status = gr.Textbox(
-                            label="Status",
-                            interactive=False,
-                            max_lines=3
-                        )
-
                         with gr.Column(scale=1):
                             gr.Markdown("**Batch Transcribe Folder**")
 
@@ -3873,14 +3980,13 @@ def create_ui():
                                 value=False
                             )
 
-                            batch_status = gr.Textbox(
-                                label="Batch Status",
-                                interactive=False,
-                                max_lines=3,
-                                show_label=False,
-                                placeholder="Results will appear here..."
-                            )
                             batch_transcribe_btn = gr.Button("Batch Transcribe", variant="primary", size="lg")
+
+                            finetune_status = gr.Textbox(
+                                label="Status",
+                                interactive=False,
+                                max_lines=15
+                            )
 
                             finetune_quick_guide = dedent("""\
                             **Quick Guide:**
@@ -3936,22 +4042,30 @@ def create_ui():
                     outputs=[finetune_audio_preview, finetune_transcript]
                 )
 
-                load_finetune_btn.click(
-                    load_dataset_item,
-                    inputs=[finetune_folder_dropdown, finetune_dropdown],
-                    outputs=[finetune_audio_preview, finetune_transcript]
-                )
-
                 save_transcript_btn.click(
                     save_dataset_transcript,
                     inputs=[finetune_folder_dropdown, finetune_dropdown, finetune_transcript],
                     outputs=[finetune_status]
                 )
 
+                # Show modal on delete button click
                 delete_finetune_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=None,
+                    js=show_confirmation_modal_js(
+                        title="Delete Dataset Item?",
+                        message="This will permanently delete the audio file and its transcript. This action cannot be undone.",
+                        confirm_button_text="Delete",
+                        context="finetune_"
+                    )
+                )
+
+                # Process confirmation
+                confirm_trigger.change(
                     delete_dataset_item,
-                    inputs=[finetune_folder_dropdown, finetune_dropdown],
-                    outputs=[finetune_status, finetune_dropdown]
+                    inputs=[confirm_trigger, finetune_folder_dropdown, finetune_dropdown],
+                    outputs=[finetune_status, finetune_dropdown, confirm_trigger]
                 )
 
                 auto_transcribe_btn.click(
@@ -3963,7 +4077,7 @@ def create_ui():
                 batch_transcribe_btn.click(
                     batch_transcribe_folder,
                     inputs=[finetune_folder_dropdown, batch_replace_existing, finetune_transcribe_lang, finetune_transcribe_model],
-                    outputs=[batch_status]
+                    outputs=[finetune_status]
                 )
 
                 def save_and_reload(folder, filename, audio):
@@ -4098,14 +4212,14 @@ def create_ui():
                         learning_rate_slider = gr.Slider(
                             minimum=1e-6,
                             maximum=1e-4,
-                            value=2e-5,
+                            value=2e-6,
                             label="Learning Rate",
-                            info="Default: 2e-5"
+                            info="Default: 2e-6"
                         )
 
                         num_epochs_slider = gr.Slider(
                             minimum=1,
-                            maximum=50,
+                            maximum=100,
                             value=5,
                             step=1,
                             label="Number of Epochs",
@@ -4190,8 +4304,9 @@ def create_ui():
                         "Tips & Tricks"
                     ],
                     value="Voice Clone",
-                    label="Select Help Topic",
-                    interactive=True
+                    show_label=False,
+                    interactive=True,
+                    container=False
                 )
 
                 help_content = gr.HTML(
@@ -4296,19 +4411,16 @@ def create_ui():
             outputs=[]
         )
 
-    return app, theme
-
-
+    return app, theme, custom_css, CONFIRMATION_MODAL_CSS, CONFIRMATION_MODAL_HEAD
 if __name__ == "__main__":
-    print(f"Samples directory: {SAMPLES_DIR}")
-    print(f"Output directory: {OUTPUT_DIR}")
-    print(f"Found {len(get_sample_choices())} samples")
 
-    app, theme = create_ui()
+    app, theme, custom_css, modal_css, modal_head = create_ui()
     app.launch(
         server_name="127.0.0.1",
         server_port=7860,
         share=False,
         inbrowser=True,
-        theme=theme
+        theme=theme,
+        css=custom_css + modal_css,
+        head=modal_head
     )

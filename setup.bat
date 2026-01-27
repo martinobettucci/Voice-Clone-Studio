@@ -94,7 +94,7 @@ echo.
 
 REM Install requirements
 echo [6/6] Installing requirements...
-pip install -r requirements.txt
+pip install -r requirements-windows.txt
 if %errorlevel% neq 0 (
     echo ERROR: Failed to install requirements!
     pause
