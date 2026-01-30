@@ -17,6 +17,8 @@ import argparse
 import json
 import os
 import shutil
+import platform
+from pathlib import Path
 
 import torch
 from accelerate import Accelerator
@@ -35,7 +37,7 @@ def get_attention_implementation():
     Priority: flash_attention_2 → sdpa → eager
     """
     mechanisms = ["flash_attention_2", "sdpa", "eager"]
-    
+
     for mechanism in mechanisms:
         try:
             # Test if mechanism is available with a minimal config
@@ -43,7 +45,7 @@ def get_attention_implementation():
             return mechanism
         except Exception:
             continue
-    
+
     return "eager"  # Fallback to eager (always works)
 
 def train():
@@ -58,7 +60,7 @@ def train():
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--save_interval", type=int, default=5, help="Save checkpoint every N epochs (0 = save every epoch)")
     parser.add_argument("--speaker_name", type=str, default="speaker_test")
-    parser.add_argument("--attn_implementation", type=str, default="auto", 
+    parser.add_argument("--attn_implementation", type=str, default="auto",
                         choices=["auto", "flash_attention_2", "sdpa", "eager"],
                         help="Attention implementation (auto = try flash_attention_2 → sdpa → eager)")
     args = parser.parse_args()
@@ -80,12 +82,12 @@ def train():
                     attn_implementation=mechanism,
                 )
                 attn_impl = mechanism
-                print(f"✓ Successfully loaded with {mechanism}")
+                print(f"[OK] Successfully loaded with {mechanism}")
                 break
             except Exception as e:
-                print(f"✗ {mechanism} not available: {e}")
+                print(f"[SKIP] {mechanism} not available: {e}")
                 continue
-        
+
         if attn_impl is None:
             raise RuntimeError("Failed to load model with any attention mechanism")
     else:
@@ -214,6 +216,17 @@ def train():
             state_dict['talker.model.codec_embedding.weight'][3000] = target_speaker_embedding[0].detach().to(weight.device).to(weight.dtype)
             save_path = os.path.join(output_dir, "model.safetensors")
             save_file(state_dict, save_path)
+
+    # Play completion notification
+    if accelerator.is_main_process:
+        print("\n=== Training Complete! ===\n")
+        try:
+            notification_path = Path(__file__).parent.parent / "core_components" / "notification.wav"
+            if notification_path.exists() and platform.system() == "Windows":
+                import winsound
+                winsound.PlaySound(str(notification_path), winsound.SND_FILENAME)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     train()

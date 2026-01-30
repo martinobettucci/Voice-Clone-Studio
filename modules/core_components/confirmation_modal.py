@@ -15,6 +15,11 @@ Note: The callback will be triggered twice per button click (once with action, o
 """
 
 CONFIRMATION_MODAL_CSS = """
+/* Hide the trigger textbox */
+#confirm-trigger {
+  display: none !important;
+}
+
 /* Confirmation Modal Styles */
 #delete-modal-overlay {
   position: fixed;

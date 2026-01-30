@@ -1,6 +1,6 @@
 # Vendored Dependencies
 
-This directory contains third-party code included directly in our repository for stability and independence.
+This directory contains our core_componets, as well as third-party code included directly in our repository for stability and independence.
 
 ## vibevoice/
 
@@ -25,13 +25,6 @@ This directory contains third-party code included directly in our repository for
 
 ### Models
 
-**ASR Model:**
-- `microsoft/VibeVoice-ASR` - Hosted on HuggingFace
-
-**TTS Models:**
-- `FranckyB/VibeVoice-1.5B` - Faster, good quality
-- `FranckyB/VibeVoice-Large` - More stable, best quality
-
 Models automatically download from HuggingFace on first use and are cached locally.
 
 ### Usage in App
@@ -45,6 +38,44 @@ VibeVoice is licensed under MIT License. Original copyright:
 - Copyright (c) Microsoft Corporation
 
 See LICENSE file in vibevoice/ directory for full license text.
+
+## qwen_finetune/
+
+**Source:** https://github.com/QwenLM/Qwen3-TTS/tree/main/finetuning  
+**License:** Apache 2.0  
+**Purpose:** Training scripts for fine-tuning Qwen3-TTS models with custom voice samples  
+**Reason for vendoring:** Enables user training of custom voice models
+
+### Features
+
+- Fine-tune Qwen3-TTS-Base models (0.6B, 1.7B) with custom voice data
+- Train on 24kHz, 16-bit mono audio samples
+- Generate custom speaker embeddings
+- Automatic audio code extraction and dataset preparation
+- Checkpoint-based training with configurable save intervals
+
+### Training Process
+
+1. **Dataset Preparation:** Audio samples (WAV) + transcriptions (TXT)
+2. **Code Extraction:** `prepare_data.py` - Extracts audio codes using Qwen3-TTS-Tokenizer
+3. **Fine-tuning:** `sft_12hz.py` - Trains model with custom speaker embedding
+
+### Models
+
+Currently supports training with 1.7B Base model only (0.6B support removed due to architecture incompatibility).
+
+### Usage in App
+
+- **Train Model Tab:** Complete training pipeline with validation, preparation, and fine-tuning
+- Output models saved to `trained_models_folder` (configurable in settings)
+- Trained models available in **Voice Presets Tab** → Trained Models
+
+### Attribution
+
+Qwen3-TTS is licensed under Apache 2.0. Original copyright:
+- Copyright 2026 The Alibaba Qwen team
+
+See LICENSE file in qwen_finetune/ directory for full license text.
 
 ## Installation
 

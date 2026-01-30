@@ -2,6 +2,10 @@
 
 ## January 30, 2026
 
+#### Version 0.7.5 - Advanced Parameters & Emotion Presets
+- **Added option to save Emotions** - Improved Emotion system by allowing the user to create and save their own preset.
+- **Moved the Emotion Manager to Modules** - Plans are to split the app into modules, the emotion manager is the first one.
+
 #### Version 0.7.0 - Advanced Parameters & Emotion Presets
 - **Advanced Parameter Controls** - Full access to sampling parameters (temperature, top_k, top_p, repetition_penalty, max_new_tokens) across all tabs
 - **Voice Clone Tab** - Emotion presets with intensity slider for Qwen models

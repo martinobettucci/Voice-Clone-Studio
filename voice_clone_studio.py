@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-# Add modules directory to Python path
+# Add modules directory to Python path for vibevoice components
 MODULES_DIR = Path(__file__).parent / "modules"
 if str(MODULES_DIR) not in sys.path:
     sys.path.insert(0, str(MODULES_DIR))
@@ -20,21 +20,82 @@ import shutil
 import re
 import time
 from textwrap import dedent
-from modules.ui_components import ui_help
 import markdown
-from modules.ui_components.confirmation_modal import (
+import platform
+
+from modules.core_components import (
+    ui_help,
     CONFIRMATION_MODAL_CSS,
     CONFIRMATION_MODAL_HEAD,
     CONFIRMATION_MODAL_HTML,
-    show_confirmation_modal_js
+    INPUT_MODAL_CSS,
+    INPUT_MODAL_HEAD,
+    INPUT_MODAL_HTML,
+    CORE_EMOTIONS,
+    show_confirmation_modal_js,
+    show_input_modal_js,
+    load_emotions_from_config,
+    get_emotion_choices,
+    calculate_emotion_values,
+    handle_save_emotion,
+    handle_delete_emotion
 )
+
+# Audio notification helper
+def play_completion_beep():
+    """Play audio notification when generation completes (uses notification.wav file)."""
+    try:
+        # Check if notifications are enabled in settings
+        config = load_config()
+        if not config.get("browser_notifications", True):
+            return  # User disabled notifications
+
+        # Print completion message to console
+        print("\n=== Generation Complete! ===\n", flush=True)
+
+        # Play notification sound from audio file
+        notification_path = Path(__file__).parent / "modules" / "core_components" / "notification.wav"
+
+        if notification_path.exists():
+            try:
+                if platform.system() == "Windows":
+                    # Windows: Use winsound.PlaySound with audio file (synchronous to ensure it plays)
+                    import winsound
+                    winsound.PlaySound(str(notification_path), winsound.SND_FILENAME)
+                elif platform.system() == "Darwin":
+                    # macOS: Use afplay
+                    import subprocess
+                    subprocess.Popen(["afplay", str(notification_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    # Linux: Try aplay (ALSA), fallback to paplay (PulseAudio)
+                    import subprocess
+                    try:
+                        subprocess.Popen(["aplay", "-q", str(notification_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except FileNotFoundError:
+                        subprocess.Popen(["paplay", str(notification_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                # Fallback to ASCII bell if audio playback fails
+                print(f"⚠ Audio playback failed: {e}", flush=True)
+                print('\a', end='', flush=True)
+        else:
+            # Notification file missing, use ASCII bell
+            print('\a', end='', flush=True)
+    except Exception as outer_e:
+        # Final fallback - at least print the message
+        try:
+            print("\n=== Generation Complete! ===\n", flush=True)
+            print(f"(Notification error: {outer_e})", flush=True)
+        except:
+            pass
 
 # Supported/Built-in Models - these should NOT appear in trained models list (all lowercase for efficient matching)
 SUPPORTED_MODELS = {
-    # Qwen3-TTS models
+    # Qwen3-TTS models (with and without 12hz for flexibility)
     "qwen3-tts-12hz-1.7b-base",
     "qwen3-tts-12hz-1.7b-customvoice",
     "qwen3-tts-12hz-1.7b-voicedesign",
+    "qwen3-tts-12hz-0.6b-base",
+    "qwen3-tts-12hz-0.6b-customvoice",
     "qwen3-tts-0.6b-base",
     "qwen3-tts-0.6b-customvoice",
     "qwen3-tts-tokenizer-12hz",
@@ -62,11 +123,14 @@ def load_config():
         "low_cpu_mem_usage": False,
         "attention_mechanism": "auto",
         "offline_mode": False,
+        "browser_notifications": True,
         "samples_folder": "samples",
         "output_folder": "output",
         "datasets_folder": "datasets",
         "temp_folder": "temp",
-        "models_folder": "models"
+        "models_folder": "models",
+        "trained_models_folder": "models",
+        "emotions": None  # Will be initialized to CORE_EMOTIONS on first load
     }
 
     try:
@@ -77,6 +141,17 @@ def load_config():
                 default_config.update(saved_config)
     except Exception as e:
         print(f"Warning: Could not load config: {e}")
+
+    # Initialize emotions if not present (first launch)
+    if not default_config.get("emotions"):
+        # Sort alphabetically (case-insensitive)
+        default_config["emotions"] = dict(sorted(CORE_EMOTIONS.items(), key=lambda x: x[0].lower()))
+        # Save config with emotions
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(default_config, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save initial emotions: {e}")
 
     return default_config
 
@@ -92,6 +167,9 @@ def save_config(config):
 
 # Load config first
 _user_config = load_config()
+
+# Load active emotions from config
+_active_emotions = load_emotions_from_config(_user_config)
 
 # Initialize directories from config
 SAMPLES_DIR = Path(__file__).parent / _user_config.get("samples_folder", "samples")
@@ -148,55 +226,9 @@ LANGUAGES = [
     "German", "French", "Russian", "Portuguese", "Spanish", "Italian"
 ]
 
-# Emotion parameter adjustments for expression control
-EMOTION_DICT = {
-    # Core emotions
-    "happy": {"temp": 0.18, "penalty": 0.06, "top_p": 0.04},
-    "sad": {"temp": -0.18, "penalty": -0.06, "top_p": -0.08},
-    "angry": {"temp": 0.28, "penalty": 0.12, "top_p": 0.06},
-    "scared": {"temp": 0.22, "penalty": 0.14, "top_p": 0.02},
-    "surprised": {"temp": 0.32, "penalty": 0.12, "top_p": 0.08},
-    # Intensity variations
-    "furious": {"temp": 0.52, "penalty": 0.22, "top_p": 0.12},
-    "irritated": {"temp": 0.14, "penalty": 0.04, "top_p": 0.02},
-    "melancholic": {"temp": -0.26, "penalty": -0.08, "top_p": -0.12},
-    "disappointed": {"temp": -0.14, "penalty": -0.04, "top_p": -0.06},
-    "ecstatic": {"temp": 0.46, "penalty": 0.18, "top_p": 0.14},
-    "content": {"temp": -0.08, "penalty": 0.02, "top_p": 0.02},
-    "terrified": {"temp": 0.36, "penalty": 0.22, "top_p": 0.06},
-    "anxious": {"temp": 0.18, "penalty": 0.14, "top_p": 0.02},
-    # Social interactions
-    "sarcastic": {"temp": 0.16, "penalty": 0.06, "top_p": 0.02},
-    "dismissive": {"temp": 0.08, "penalty": 0.02, "top_p": -0.08},
-    "sympathetic": {"temp": -0.08, "penalty": -0.04, "top_p": 0.02},
-    "apologetic": {"temp": -0.12, "penalty": -0.04, "top_p": -0.04},
-    "pleading": {"temp": 0.14, "penalty": 0.12, "top_p": 0.02},
-    # Confidence range
-    "confident": {"temp": -0.08, "penalty": -0.04, "top_p": 0.02},
-    "arrogant": {"temp": 0.04, "penalty": 0.02, "top_p": -0.08},
-    "hesitant": {"temp": 0.14, "penalty": 0.12, "top_p": 0.02},
-    "timid": {"temp": -0.16, "penalty": 0.08, "top_p": -0.08},
-    "defeated": {"temp": -0.22, "penalty": -0.08, "top_p": -0.08},
-    # Energy states
-    "excited": {"temp": 0.36, "penalty": 0.14, "top_p": 0.08},
-    "energetic": {"temp": 0.32, "penalty": 0.14, "top_p": 0.08},
-    "bored": {"temp": -0.18, "penalty": -0.08, "top_p": -0.08},
-    "tired": {"temp": -0.24, "penalty": -0.08, "top_p": -0.08},
-    "exhausted": {"temp": -0.28, "penalty": -0.12, "top_p": -0.12},
-    "calm": {"temp": -0.26, "penalty": -0.08, "top_p": -0.12},
-    # Tension levels
-    "nervous": {"temp": 0.22, "penalty": 0.18, "top_p": 0.04},
-    "panicked": {"temp": 0.42, "penalty": 0.24, "top_p": 0.08},
-    "frantic": {"temp": 0.48, "penalty": 0.28, "top_p": 0.12},
-    "relaxed": {"temp": -0.22, "penalty": -0.08, "top_p": -0.08},
-    # Attitude/mood
-    "playful": {"temp": 0.24, "penalty": 0.08, "top_p": 0.04},
-    "mysterious": {"temp": -0.08, "penalty": 0.02, "top_p": -0.04},
-    "menacing": {"temp": 0.14, "penalty": 0.08, "top_p": -0.04},
-    # Complex states
-    "bitter": {"temp": 0.12, "penalty": 0.06, "top_p": -0.04},
-    "desperate": {"temp": 0.28, "penalty": 0.18, "top_p": 0.04},
-}
+# Emotion system now managed by modules/emotion_manager.py
+# CORE_EMOTIONS contains the hardcoded defaults
+# _active_emotions contains the user's current emotion presets (loaded from config)
 
 # Custom Voice speakers
 CUSTOM_VOICE_SPEAKERS = [
@@ -1393,6 +1425,7 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
         metadata_file.write_text(metadata, encoding="utf-8")
 
         progress(1.0, desc="Done!")
+        play_completion_beep()
         if engine == "qwen":
             cache_msg = "⚡ Used cached prompt" if was_cached else "💾 Created & cached prompt"
             return str(output_file), f"✅ Audio saved to: {output_file.name}\n{cache_msg} | {seed_msg} | 🤖 {engine_display}"
@@ -1407,7 +1440,7 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
 
 
 def generate_voice_design(text_to_generate, language, instruct, seed,
-                          do_sample=True, temperature=0.9, top_k=50, top_p=1.0, 
+                          do_sample=True, temperature=0.9, top_k=50, top_p=1.0,
                           repetition_penalty=1.05, max_new_tokens=2048,
                           progress=gr.Progress(), save_to_output=False):
     """Generate audio using voice design with natural language instructions."""
@@ -1454,6 +1487,7 @@ def generate_voice_design(text_to_generate, language, instruct, seed,
 
         # User must save to samples explicitly; return file path
         progress(1.0, desc="Done!")
+        play_completion_beep()
         return str(out_file), f"✅ Voice design generated. Save to samples to keep.\n{seed_msg}"
 
     except Exception as e:
@@ -1591,6 +1625,7 @@ def generate_custom_voice(text_to_generate, language, speaker, instruct, seed, m
 
         progress(1.0, desc="Done!")
         instruct_msg = f" with style: {instruct.strip()[:30]}..." if instruct and instruct.strip() else ""
+        play_completion_beep()
         return str(output_file), f"✅ Audio saved to: {output_file.name}\n🎭 Speaker: {speaker}{instruct_msg}\n{seed_msg} | 🤖 {model_size}"
 
     except Exception as e:
@@ -1673,6 +1708,7 @@ def generate_with_trained_model(text_to_generate, language, speaker_name, checkp
 
         progress(1.0, desc="Done!")
         instruct_msg = f" with style: {instruct.strip()[:30]}..." if instruct and instruct.strip() else ""
+        play_completion_beep()
         return str(output_file), f"✅ Audio saved to: {output_file.name}\n🎭 Speaker: {speaker_name}{instruct_msg}\n{seed_msg} | 🤖 Trained Model"
 
     except Exception as e:
@@ -1874,6 +1910,7 @@ def generate_conversation(conversation_data, pause_linebreak, pause_period, paus
 
         progress(1.0, desc="Done!")
         duration = len(final_audio) / sr
+        play_completion_beep()
         return str(output_file), f"✅ Conversation saved: {output_file.name}\n📝 {len(lines)} lines | ⏱️ {duration:.1f}s | 🎲 Seed: {seed} | 🤖 {model_size}"
 
     except Exception as e:
@@ -1882,7 +1919,7 @@ def generate_conversation(conversation_data, pause_linebreak, pause_period, paus
 
 def generate_conversation_base(conversation_data, voice_samples_dict, pause_linebreak, pause_period, pause_comma, pause_question, pause_hyphen, language, seed, model_size="0.6B",
                                do_sample=True, temperature=0.9, top_k=50, top_p=1.0, repetition_penalty=1.05, max_new_tokens=2048,
-                               progress=gr.Progress()):
+                               emotion_intensity=1.0, progress=gr.Progress()):
     """Generate a multi-speaker conversation using Qwen Base model with custom voice samples and granular pause control.
 
     Similar to DialogueInferenceNode - uses voice cloning with custom samples (up to 8 speakers).
@@ -1943,10 +1980,30 @@ def generate_conversation_base(conversation_data, voice_samples_dict, pause_line
 
         for i, (speaker_key, voice_sample_path, ref_text, text) in enumerate(lines):
             progress_val = 0.1 + (0.8 * i / len(lines))
-            progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
 
-            # Remove style instructions in parentheses (Base model doesn't use them)
-            text = re.sub(r'\s*\([^)]+\)\s*', ' ', text).strip()
+            # Extract emotion keywords from parentheses and apply adjustments
+            clean_text, detected_emotion = extract_style_instructions(text)
+
+            # Check if detected emotion matches our emotion presets
+            emotion_key = detected_emotion.lower().replace(" ", "_").replace(",", "").strip() if detected_emotion else None
+            applied_emotion = None
+            line_temp = temperature
+            line_top_p = top_p
+            line_rep_pen = repetition_penalty
+
+            if emotion_key and emotion_key in _active_emotions:
+                # Apply emotion adjustments to baseline parameters with intensity scaling
+                adjustments = _active_emotions[emotion_key]
+                line_temp = max(0.1, min(2.0, temperature + (adjustments["temp"] * emotion_intensity)))
+                line_top_p = max(0.0, min(1.0, top_p + (adjustments["top_p"] * emotion_intensity)))
+                line_rep_pen = max(1.0, min(2.0, repetition_penalty + (adjustments["penalty"] * emotion_intensity)))
+                applied_emotion = emotion_key
+                progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key}) [{emotion_key}]")
+            else:
+                progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
+
+            # Use cleaned text (emotion keywords removed)
+            text = clean_text
 
             # Insert pause markers based on punctuation
             if pause_period > 0:
@@ -1972,17 +2029,17 @@ def generate_conversation_base(conversation_data, voice_samples_dict, pause_line
                 if not segment_text:
                     continue
 
-                # Generate audio for this segment using voice cloning
+                # Generate audio for this segment using voice cloning with emotion-adjusted parameters
                 wavs, sr = model.generate_voice_clone(
                     text=segment_text,
                     language=language if language != "Auto" else "auto",
                     ref_audio=voice_sample_path,
                     ref_text=ref_text,
                     do_sample=do_sample,
-                    temperature=temperature,
+                    temperature=line_temp,
                     top_k=top_k,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
+                    top_p=line_top_p,
+                    repetition_penalty=line_rep_pen,
                     max_new_tokens=max_new_tokens
                 )
 
@@ -2051,6 +2108,7 @@ def generate_conversation_base(conversation_data, voice_samples_dict, pause_line
 
         progress(1.0, desc="Done!")
         duration = len(final_audio) / sr
+        play_completion_beep()
         return str(output_file), f"✅ Conversation saved: {output_file.name}\n📝 {len(lines)} lines | ⏱️ {duration:.1f}s | 🎲 Seed: {seed} | 🤖 Base {model_size}"
 
     except Exception as e:
@@ -2259,6 +2317,8 @@ def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5
             metadata_file.write_text(metadata, encoding="utf-8")
 
             progress(1.0, desc="Done!")
+            duration = len(final_audio) / sr
+            play_completion_beep()
             return str(output_file), f"✅ Generated: {output_file.name}\n⏱️ {duration:.1f}s ({duration / 60:.1f} min) | 🎲 Seed: {seed} | 🤖 {model_size}"
         else:
             return None, "❌ No audio generated."
@@ -2889,7 +2949,7 @@ def clear_sample_cache(sample_name):
 # ============== Training Dataset Functions ==============
 
 def get_trained_models():
-    """Get list of trained custom voice models from models directory.
+    """Get list of trained custom voice models from trained models directory.
 
     Returns a flat list of model entries with format:
     - "ModelName" for direct models (folder with model.safetensors)
@@ -2900,7 +2960,7 @@ def get_trained_models():
     Note: Excludes all official/built-in models (Qwen, VibeVoice, Whisper).
     Only returns user-trained models.
     """
-    trained_models_dir = Path("models")
+    trained_models_dir = Path(__file__).parent / _user_config.get("trained_models_folder", "models")
     if not trained_models_dir.exists():
         return []
 
@@ -3266,7 +3326,7 @@ def convert_all_finetune_audio(folder, progress=gr.Progress()):
 
 # ============== Training Functions ==============
 
-def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size, learning_rate, num_epochs, save_interval, progress=gr.Progress()):
+def train_model(folder, speaker_name, ref_audio_filename, batch_size, learning_rate, num_epochs, save_interval, progress=gr.Progress()):
     """Complete training workflow: validate, prepare data, and train model."""
     import subprocess
     import json
@@ -3288,9 +3348,10 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
     if save_interval is None:
         save_interval = 5  # Default value
 
-    # Create output directory - use absolute path
+    # Create output directory - use trained models folder from config
     project_root = Path(__file__).parent
-    output_dir = project_root / "models" / speaker_name.strip()
+    trained_models_folder = _user_config.get("trained_models_folder", "models")
+    output_dir = project_root / trained_models_folder / speaker_name.strip()
     if output_dir.exists():
         return f"❌ Output folder already exists: {output_dir}\n\nPlease choose a different speaker name or delete the existing folder."
 
@@ -3513,10 +3574,8 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
         return "\n".join(status_log)
 
     # Determine base model path and ensure it's cached
-    if "Large" in model_size or "1.7B" in model_size:
-        base_model_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-    else:
-        base_model_id = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    # Training only supports 1.7B model
+    base_model_id = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
     # Get the cached model path (downloads if not cached)
     status_log.append(f"Locating base model: {base_model_id}")
@@ -3636,11 +3695,10 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
 # ============================================
 
 def apply_emotion_preset(emotion_name, intensity, baseline_temp=0.9, baseline_top_p=1.0, baseline_penalty=1.05):
-    """
-    Adjust generation parameters based on selected emotion and intensity.
+    """Wrapper for emotion calculation that returns Gradio updates.
 
     Args:
-        emotion_name: Name of emotion from EMOTION_DICT or "(None)"
+        emotion_name: Name of emotion from _active_emotions or empty string
         intensity: Multiplier for emotion strength (0-2.0)
         baseline_temp: Default temperature value
         baseline_top_p: Default top_p value
@@ -3649,49 +3707,62 @@ def apply_emotion_preset(emotion_name, intensity, baseline_temp=0.9, baseline_to
     Returns:
         Tuple of gr.update() objects for (temperature, top_p, repetition_penalty, intensity)
     """
-    import gradio as gr
-
-    # Check if using defaults - reset everything
-    if emotion_name == "(None)":
-        return (
-            gr.update(value=baseline_temp),
-            gr.update(value=baseline_top_p),
-            gr.update(value=baseline_penalty),
-            gr.update(value=1.0)  # Reset intensity to 1.0
-        )
-
-    # Extract emotion key from dropdown selection
-    emotion_key = emotion_name.split(" (")[0] if " (" in emotion_name else emotion_name
-
-    # Baseline values
-    baseline_values = {"temp": baseline_temp, "top_p": baseline_top_p, "penalty": baseline_penalty}
-
-    # Retrieve adjustment values or use zero adjustments
-    adjustments = EMOTION_DICT.get(emotion_key, {"temp": 0.0, "penalty": 0.0, "top_p": 0.0})
-
-    # Calculate adjusted values with intensity scaling
-    adjusted_temp = baseline_values["temp"] + (adjustments["temp"] * intensity)
-    adjusted_top_p = baseline_values["top_p"] + (adjustments["top_p"] * intensity)
-    adjusted_penalty = baseline_values["penalty"] + (adjustments["penalty"] * intensity)
-
-    # Clamp to valid ranges
-    final_temp = min(max(adjusted_temp, 0.1), 2.0)
-    final_top_p = min(max(adjusted_top_p, 0.0), 1.0)
-    final_penalty = min(max(adjusted_penalty, 1.0), 2.0)
-
-    return (
-        gr.update(value=final_temp),
-        gr.update(value=final_top_p),
-        gr.update(value=final_penalty),
-        gr.update()  # Keep intensity as-is for regular emotions
+    # Call emotion_manager function to calculate values
+    temp, top_p, penalty, display_intensity = calculate_emotion_values(
+        _active_emotions, emotion_name, intensity,
+        baseline_temp, baseline_top_p, baseline_penalty
     )
+
+    # Return as Gradio updates
+    return (
+        gr.update(value=temp),
+        gr.update(value=top_p),
+        gr.update(value=penalty),
+        gr.update(value=display_intensity)
+    )
+
+
+def save_emotion_handler(emotion_name, intensity, temp, penalty, top_p):
+    """Handle saving an emotion preset."""
+    global _active_emotions, _user_config
+
+    # Call emotion_manager handler
+    success, message, updated_emotions, new_choices, emotion_to_select = handle_save_emotion(
+        _active_emotions, _user_config, CONFIG_FILE,
+        emotion_name, intensity, temp, penalty, top_p
+    )
+
+    if success:
+        _active_emotions = updated_emotions
+        return gr.update(choices=new_choices, value=emotion_to_select), message
+    else:
+        return gr.update(), message
+
+
+def delete_emotion_handler(confirm_value, emotion_name):
+    """Handle deleting an emotion preset (called after confirmation)."""
+    global _active_emotions, _user_config
+
+    # Call emotion_manager handler
+    success, message, updated_emotions, new_choices, clear_trigger = handle_delete_emotion(
+        _active_emotions, _user_config, CONFIG_FILE,
+        confirm_value, emotion_name
+    )
+
+    if success:
+        _active_emotions = updated_emotions
+        return gr.update(choices=new_choices, value=""), message, clear_trigger
+    elif message:  # Error message
+        return gr.update(), message, clear_trigger
+    else:  # Cancelled
+        return gr.update(), "", clear_trigger
 
 
 def create_ui():
     """Create the Gradio interface."""
 
     # Load custom theme from local theme.json (colors pre-configured with orange)
-    theme = gr.themes.Base.load('modules/ui_components/theme.json')
+    theme = gr.themes.Base.load('modules/core_components/theme.json')
 
     # Custom CSS for vertical file list
     custom_css = """
@@ -3765,8 +3836,13 @@ def create_ui():
         # Add confirmation modal HTML
         gr.HTML(CONFIRMATION_MODAL_HTML)
 
+        # Add input modal HTML
+        gr.HTML(INPUT_MODAL_HTML)
+
         # Hidden trigger for confirmation modal - visible but hidden via CSS
         confirm_trigger = gr.Textbox(label="Confirm Trigger", value="", elem_id="confirm-trigger")
+        # Hidden trigger for input modal
+        input_trigger = gr.Textbox(label="Input Trigger", value="", elem_id="input-trigger")
 
         # Always-visible unload button
         with gr.Row():
@@ -3781,8 +3857,8 @@ def create_ui():
 
         with gr.Tabs():
             # ============== TAB 1: Voice Clone ==============
-            with gr.TabItem("Voice Clone"):
-                gr.Markdown("Clone Voices from Your Samples, using Qwen3-TTS or VibeVoice")
+            with gr.TabItem("Voice Clone") as voice_clone_tab:
+                gr.Markdown("Clone Voices from Samples, using Qwen3-TTS or VibeVoice")
                 with gr.Row():
                     # Left column - Sample selection (1/3 width)
                     with gr.Column(scale=1):
@@ -3857,12 +3933,11 @@ def create_ui():
                         with gr.Accordion("Qwen3 Advanced Parameters", open=False, visible=is_qwen_initial) as qwen_params_accordion:
 
                             # Emotion preset dropdown
-                            emotion_list = [k for k in EMOTION_DICT.keys()]
-                            emotion_choices = ["(None)"] + sorted(emotion_list)
+                            emotion_choices = get_emotion_choices(_active_emotions)
                             with gr.Row():
                                 qwen_emotion_preset = gr.Dropdown(
                                     choices=emotion_choices,
-                                    value="(None)",
+                                    value=None,
                                     label="🎭 Emotion Preset",
                                     info="Quick presets that adjust parameters for different emotions",
                                     scale=3
@@ -3876,6 +3951,12 @@ def create_ui():
                                     info="Emotion strength (0=none, 2=extreme)",
                                     scale=1
                                 )
+
+                            # Emotion management buttons
+                            with gr.Row():
+                                qwen_save_emotion_btn = gr.Button("Save", size="sm", scale=1)
+                                qwen_delete_emotion_btn = gr.Button("Delete", size="sm", scale=1)
+                            qwen_emotion_save_name = gr.Textbox(visible=False, value="")
 
                             with gr.Row():
                                 qwen_do_sample = gr.Checkbox(
@@ -3949,7 +4030,7 @@ def create_ui():
                                     info="Number of diffusion steps"
                                 )
 
-                            gr.Markdown("**Stochastic Sampling** _(Enable this to turn on deterministic generation )_")
+                            gr.Markdown("Stochastic Sampling Parameters")
                             with gr.Row():
                                 vv_do_sample = gr.Checkbox(
                                     label="Enable Sampling",
@@ -4000,7 +4081,7 @@ def create_ui():
                             type="filepath"
                         )
 
-                        status_text = gr.Textbox(label="Status", interactive=False, max_lines=5)
+                        clone_status = gr.Textbox(label="Status", interactive=False, lines=3, max_lines=5)
 
                 # Event handlers for Voice Clone tab
                 def load_selected_sample(sample_name):
@@ -4063,7 +4144,7 @@ def create_ui():
                             qwen_max_new_tokens,
                             vv_do_sample, vv_temperature, vv_top_k, vv_top_p, vv_repetition_penalty,
                             vv_cfg_scale, vv_num_steps],
-                    outputs=[output_audio, status_text]
+                    outputs=[output_audio, clone_status]
                 )
 
                 # Toggle language visibility based on model selection
@@ -4103,14 +4184,74 @@ def create_ui():
                     outputs=[qwen_temperature, qwen_top_p, qwen_repetition_penalty, qwen_emotion_intensity]
                 )
 
+                # Emotion management buttons
+                qwen_save_emotion_btn.click(
+                    fn=None,
+                    inputs=[qwen_emotion_preset],
+                    outputs=None,
+                    js=show_input_modal_js(
+                        title="Save Emotion Preset",
+                        message="Enter a name for this emotion preset:",
+                        placeholder="e.g., Happy, Sad, Excited",
+                        context="qwen_emotion_"
+                    )
+                )
+
+                # Handler for when user submits from input modal
+                def handle_qwen_emotion_input(input_value, intensity, temp, rep_pen, top_p):
+                    """Process input modal submission for Voice Clone emotion save."""
+                    # Context filtering: only process if this is our context
+                    if not input_value or not input_value.startswith("qwen_emotion_"):
+                        return gr.update(), gr.update()
+
+                    # Extract emotion name from context prefix
+                    # Remove context prefix and timestamp
+                    parts = input_value.split("_")
+                    if len(parts) >= 3:
+                        # Format: qwen_emotion_<name>_<timestamp> or qwen_emotion_cancel_<timestamp>
+                        if parts[2] == "cancel":
+                            return gr.update(), ""
+                        # Everything between qwen_emotion_ and final timestamp
+                        emotion_name = "_".join(parts[2:-1])
+                        return save_emotion_handler(emotion_name, intensity, temp, rep_pen, top_p)
+
+                    return gr.update(), gr.update()
+
+                qwen_delete_emotion_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=None,
+                    js=show_confirmation_modal_js(
+                        title="Delete Emotion Preset?",
+                        message="This will permanently delete this emotion preset from your configuration.",
+                        confirm_button_text="Delete",
+                        context="qwen_emotion_"
+                    )
+                )
+
                 clone_model_dropdown.change(
                     lambda x: save_preference("voice_clone_model", x),
                     inputs=[clone_model_dropdown],
                     outputs=[]
                 )
 
+                # Emotion delete confirmation handler for Voice Clone tab
+                def delete_qwen_emotion_wrapper(confirm_value, emotion_name):
+                    """Only process if context matches qwen_emotion_."""
+                    if not confirm_value or not confirm_value.startswith("qwen_emotion_"):
+                        return gr.update(), gr.update(), confirm_value
+                    # Call the delete handler with both parameters
+                    dropdown_update, status_msg, clear_trigger = delete_emotion_handler(confirm_value, emotion_name)
+                    return dropdown_update, status_msg, clear_trigger
+
+                confirm_trigger.change(
+                    delete_qwen_emotion_wrapper,
+                    inputs=[confirm_trigger, qwen_emotion_preset],
+                    outputs=[qwen_emotion_preset, clone_status, confirm_trigger]
+                )
+
             # ============== TAB 2: Custom Voice ==============
-            with gr.TabItem("Voice Presets"):
+            with gr.TabItem("Voice Presets") as voice_presets_tab:
                 gr.Markdown("Use Qwen3-TTS pre-trained models or Custom Trained models with style control")
 
                 with gr.Row():
@@ -4244,12 +4385,11 @@ def create_ui():
                         # Qwen Advanced Parameters (visible for both modes)
                         with gr.Accordion("Advanced Parameters", open=False) as custom_params_accordion:
                             # Emotion preset dropdown (hidden for Premium Speakers, shown for Trained Models)
-                            emotion_list = [k for k in EMOTION_DICT.keys()]
-                            emotion_choices = ["(None)"] + sorted(emotion_list)
+                            emotion_choices_custom = get_emotion_choices(_active_emotions)
                             with gr.Row(visible=False) as custom_emotion_row:
                                 custom_emotion_preset = gr.Dropdown(
-                                    choices=emotion_choices,
-                                    value="(None)",
+                                    choices=emotion_choices_custom,
+                                    value=None,
                                     label="🎭 Emotion Preset",
                                     info="Quick presets that adjust parameters for different emotions",
                                     scale=3
@@ -4263,6 +4403,12 @@ def create_ui():
                                     info="Emotion strength (0=none, 2=extreme)",
                                     scale=1
                                 )
+
+                            # Emotion management buttons
+                            with gr.Row(visible=False) as custom_emotion_buttons_row:
+                                custom_save_emotion_btn = gr.Button("Save", size="sm", scale=1)
+                                custom_delete_emotion_btn = gr.Button("Delete", size="sm", scale=1)
+                            custom_emotion_save_name = gr.Textbox(visible=False, value="")
 
                             with gr.Row():
                                 custom_do_sample = gr.Checkbox(
@@ -4321,7 +4467,7 @@ def create_ui():
                             label="Generated Audio",
                             type="filepath"
                         )
-                        custom_status = gr.Textbox(label="Status", max_lines=5, interactive=False)
+                        preset_status = gr.Textbox(label="Status", max_lines=5, interactive=False)
 
                 # Custom Voice event handlers
                 def extract_speaker_name(selection):
@@ -4343,6 +4489,7 @@ def create_ui():
                             trained_section: gr.update(visible=False),
                             custom_instruct_input: gr.update(visible=True),
                             custom_emotion_row: gr.update(visible=False),
+                            custom_emotion_buttons_row: gr.update(visible=False),
                             # Reset emotion controls
                             custom_emotion_preset: gr.update(value="(None)"),
                             custom_emotion_intensity: gr.update(value=1.0),
@@ -4357,6 +4504,7 @@ def create_ui():
                             trained_section: gr.update(visible=True),
                             custom_instruct_input: gr.update(visible=False),
                             custom_emotion_row: gr.update(visible=True),
+                            custom_emotion_buttons_row: gr.update(visible=True),
                             # Keep emotion controls as-is
                             custom_emotion_preset: gr.update(),
                             custom_emotion_intensity: gr.update(),
@@ -4411,7 +4559,7 @@ def create_ui():
                     inputs=[voice_type_radio],
                     outputs=[
                         premium_section, trained_section,
-                        custom_instruct_input, custom_emotion_row,
+                        custom_instruct_input, custom_emotion_row, custom_emotion_buttons_row,
                         custom_emotion_preset, custom_emotion_intensity,
                         custom_temperature, custom_top_p, custom_repetition_penalty
                     ]
@@ -4437,6 +4585,51 @@ def create_ui():
                     outputs=[custom_temperature, custom_top_p, custom_repetition_penalty, custom_emotion_intensity]
                 )
 
+                # Emotion management buttons
+                custom_save_emotion_btn.click(
+                    fn=None,
+                    inputs=[custom_emotion_preset],
+                    outputs=None,
+                    js=show_input_modal_js(
+                        title="Save Emotion Preset",
+                        message="Enter a name for this emotion preset:",
+                        placeholder="e.g., Happy, Sad, Excited",
+                        context="custom_emotion_"
+                    )
+                )
+
+                # Handler for when user submits from input modal
+                def handle_custom_emotion_input(input_value, intensity, temp, rep_pen, top_p):
+                    """Process input modal submission for Voice Presets emotion save."""
+                    # Context filtering: only process if this is our context
+                    if not input_value or not input_value.startswith("custom_emotion_"):
+                        return gr.update(), gr.update()
+
+                    # Extract emotion name from context prefix
+                    # Remove context prefix and timestamp
+                    parts = input_value.split("_")
+                    if len(parts) >= 3:
+                        # Format: custom_emotion_<name>_<timestamp> or custom_emotion_cancel_<timestamp>
+                        if parts[2] == "cancel":
+                            return gr.update(), ""
+                        # Everything between custom_emotion_ and final timestamp
+                        emotion_name = "_".join(parts[2:-1])
+                        return save_emotion_handler(emotion_name, intensity, temp, rep_pen, top_p)
+
+                    return gr.update(), gr.update()
+
+                custom_delete_emotion_btn.click(
+                    fn=None,
+                    inputs=None,
+                    outputs=None,
+                    js=show_confirmation_modal_js(
+                        title="Delete Emotion Preset?",
+                        message="This will permanently delete this emotion preset from your configuration.",
+                        confirm_button_text="Delete",
+                        context="custom_emotion_"
+                    )
+                )
+
                 custom_generate_btn.click(
                     generate_with_voice_type,
                     inputs=[
@@ -4446,7 +4639,22 @@ def create_ui():
                         custom_do_sample, custom_temperature, custom_top_k, custom_top_p,
                         custom_repetition_penalty, custom_max_new_tokens
                     ],
-                    outputs=[custom_output_audio, custom_status]
+                    outputs=[custom_output_audio, preset_status]
+                )
+
+                # Emotion delete confirmation handler for Voice Presets tab
+                def delete_custom_emotion_wrapper(confirm_value, emotion_name):
+                    """Only process if context matches custom_emotion_."""
+                    if not confirm_value or not confirm_value.startswith("custom_emotion_"):
+                        return gr.update(), gr.update(), confirm_value
+                    # Call the delete handler
+                    dropdown_update, status_msg, clear_trigger = delete_emotion_handler(confirm_value, emotion_name)
+                    return dropdown_update, status_msg, clear_trigger
+
+                confirm_trigger.change(
+                    delete_custom_emotion_wrapper,
+                    inputs=[confirm_trigger, custom_emotion_preset],
+                    outputs=[custom_emotion_preset, preset_status, confirm_trigger]
                 )
 
             # ============== TAB 3: Unified Conversation ==============
@@ -4466,6 +4674,10 @@ def create_ui():
                     container=False
                 )
 
+                # Get sample choices once for all dropdowns (avoid repeated filesystem scans)
+                conversation_available_samples = get_sample_choices()
+                conversation_first_sample = conversation_available_samples[0] if conversation_available_samples else None
+
                 with gr.Row():
                     # Left - Script input and model-specific controls
                     with gr.Column(scale=2):
@@ -4475,7 +4687,7 @@ def create_ui():
                             label="Script:",
                             placeholder=dedent("""\
                                 Use [N]: format for speaker labels (1-4 for VibeVoice, 1-8 for Base, 1-9 for CustomVoice).
-                                Qwen CustomVoice also supports (style) for emotions:
+                                Qwen also supports (style) for emotions:
 
                                 [1]: (cheerful) Hey, how's it going?
                                 [2]: (excited) I'm doing great, thanks for asking!
@@ -4483,7 +4695,7 @@ def create_ui():
                                 [3]: (curious) Mind if I join this conversation?
 
                                 VibeVoice: Natural long-form generation.
-                                Base: Your custom voice clips with advanced pause control
+                                Base: Your custom voice clips with advanced pause control, with hacked Style control.
                                 CustomVoice: Qwen Preset speakers with style control and Pause Controls"""),
                             lines=18
                         )
@@ -4514,21 +4726,18 @@ def create_ui():
                         with gr.Column(visible=is_qwen_base) as qwen_base_voices_section:
                             gr.Markdown("### Voice Samples (Up to 8 Speakers)")
 
-                            # Get sample choices once to avoid repeated filesystem scans
-                            available_voice_samples_qwen = get_sample_choices()
-
                             with gr.Row():
                                 with gr.Column():
                                     qwen_voice_sample_1 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_1"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[1] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
                                 with gr.Column():
                                     qwen_voice_sample_2 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_2"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[2] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
@@ -4536,15 +4745,15 @@ def create_ui():
                             with gr.Row():
                                 with gr.Column():
                                     qwen_voice_sample_3 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_3"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[3] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
                                 with gr.Column():
                                     qwen_voice_sample_4 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_4"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[4] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
@@ -4552,15 +4761,15 @@ def create_ui():
                             with gr.Row():
                                 with gr.Column():
                                     qwen_voice_sample_5 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_5"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[5] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
                                 with gr.Column():
                                     qwen_voice_sample_6 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_6"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[6] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
@@ -4568,15 +4777,15 @@ def create_ui():
                             with gr.Row():
                                 with gr.Column():
                                     qwen_voice_sample_7 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_7"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[7] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
                                 with gr.Column():
                                     qwen_voice_sample_8 = gr.Dropdown(
-                                        choices=available_voice_samples_qwen,
-                                        value=_user_config.get("qwen_voice_sample_8"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[8] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
@@ -4588,21 +4797,18 @@ def create_ui():
                         with gr.Column(visible=is_vibevoice) as vibevoice_voices_section:
                             gr.Markdown("### Voice Samples (Up to 4 Speakers)")
 
-                            # Get sample choices once to avoid repeated filesystem scans
-                            available_voice_samples = get_sample_choices()
-
                             with gr.Row():
                                 with gr.Column():
                                     voice_sample_1 = gr.Dropdown(
-                                        choices=available_voice_samples,
-                                        value=_user_config.get("vv_voice_sample_1"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[1] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
                                 with gr.Column():
                                     voice_sample_2 = gr.Dropdown(
-                                        choices=available_voice_samples,
-                                        value=_user_config.get("vv_voice_sample_2"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[2] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
@@ -4610,15 +4816,15 @@ def create_ui():
                             with gr.Row():
                                 with gr.Column():
                                     voice_sample_3 = gr.Dropdown(
-                                        choices=available_voice_samples,
-                                        value=_user_config.get("vv_voice_sample_3"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[3] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
                                 with gr.Column():
                                     voice_sample_4 = gr.Dropdown(
-                                        choices=available_voice_samples,
-                                        value=_user_config.get("vv_voice_sample_4"),
+                                        choices=conversation_available_samples,
+                                        value=conversation_first_sample,
                                         label="[4] Voice Sample",
                                         info="Select from your prepared samples"
                                     )
@@ -4743,7 +4949,7 @@ def create_ui():
                                         info="Higher = more adherence to prompt (3.0 recommended)"
                                     )
 
-                                gr.Markdown("**Stochastic Sampling** _(Enable this to turn on deterministic generation )_")
+                                gr.Markdown("Stochastic Sampling Parameters")
                                 with gr.Row():
                                     vv_conv_do_sample = gr.Checkbox(
                                         label="Enable Sampling",
@@ -4790,6 +4996,16 @@ def create_ui():
                         # Qwen Advanced Parameters (for both Base and CustomVoice, no emotion presets)
                         with gr.Column(visible=(is_qwen_custom or is_qwen_base)) as qwen_conv_advanced:
                             with gr.Accordion("Advanced Parameters", open=False):
+                                # Emotion intensity slider (only for Qwen Base with auto-detection)
+                                with gr.Row(visible=is_qwen_base) as conv_emotion_intensity_row:
+                                    conv_emotion_intensity = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=3.0,
+                                        value=1.0,
+                                        step=0.1,
+                                        label="Emotion Intensity",
+                                        info="Strength multiplier for detected emotions (0=none, 3=extreme)"
+                                    )
                                 with gr.Row():
                                     qwen_conv_do_sample = gr.Checkbox(
                                         label="Enable Sampling",
@@ -4931,7 +5147,7 @@ def create_ui():
                     qwen_base_pause_linebreak, qwen_base_pause_period, qwen_base_pause_comma, qwen_base_pause_question,
                     qwen_base_pause_hyphen, qwen_base_model_size,
                     # Shared Qwen params
-                    qwen_lang, qwen_seed,
+                    qwen_lang, qwen_seed, emotion_intensity,
                     # Qwen advanced params
                     qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p, qwen_repetition_penalty, qwen_max_new_tokens,
                     # VibeVoice params
@@ -4962,7 +5178,8 @@ def create_ui():
                                                           qwen_base_pause_question, qwen_base_pause_hyphen,
                                                           qwen_lang, qwen_seed, qwen_size,
                                                           qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
-                                                          qwen_repetition_penalty, qwen_max_new_tokens, progress)
+                                                          qwen_repetition_penalty, qwen_max_new_tokens,
+                                                          emotion_intensity, progress)
                     else:  # VibeVoice
                         # Map UI labels to actual model sizes
                         if vv_model_size == "Small":
@@ -4990,7 +5207,7 @@ def create_ui():
                         conv_pause_linebreak, conv_pause_period, conv_pause_comma,
                         conv_pause_question, conv_pause_hyphen, conv_base_model_size,
                         # Shared Qwen
-                        conv_language, conv_seed,
+                        conv_language, conv_seed, conv_emotion_intensity,
                         # Qwen advanced params
                         qwen_conv_do_sample, qwen_conv_temperature, qwen_conv_top_k, qwen_conv_top_p,
                         qwen_conv_repetition_penalty, qwen_conv_max_new_tokens,
@@ -5020,6 +5237,7 @@ def create_ui():
                         qwen_base_settings: gr.update(visible=is_qwen_base),
                         qwen_language_seed: gr.update(visible=is_qwen),
                         qwen_pause_controls: gr.update(visible=is_qwen),
+                        conv_emotion_intensity_row: gr.update(visible=is_qwen_base),
                         qwen_conv_advanced: gr.update(visible=is_qwen),
                         vibevoice_settings: gr.update(visible=is_vibevoice),
                         qwen_custom_tips: gr.update(visible=is_qwen_custom),
@@ -5032,7 +5250,7 @@ def create_ui():
                     inputs=[conv_model_type],
                     outputs=[qwen_speaker_table, qwen_base_voices_section, vibevoice_voices_section,
                              qwen_custom_settings, qwen_base_settings, qwen_language_seed, qwen_pause_controls,
-                             qwen_conv_advanced, vibevoice_settings,
+                             conv_emotion_intensity_row, qwen_conv_advanced, vibevoice_settings,
                              qwen_custom_tips, qwen_base_tips, vibevoice_tips]
                 )
 
@@ -5810,13 +6028,6 @@ def create_ui():
                     with gr.Column(scale=1):
                         gr.Markdown("### Training Parameters")
 
-                        model_size_radio = gr.Radio(
-                            choices=["1.7B (Large)", "0.6B (Small)"],
-                            value="1.7B (Large)",
-                            label="Base Model Size",
-                            info="Larger model = better quality, slower training"
-                        )
-
                         batch_size_slider = gr.Slider(
                             minimum=1,
                             maximum=8,
@@ -5896,7 +6107,6 @@ def create_ui():
                         train_folder_dropdown,
                         speaker_name_input,
                         ref_audio_dropdown,
-                        model_size_radio,
                         batch_size_slider,
                         learning_rate_slider,
                         num_epochs_slider,
@@ -5972,8 +6182,14 @@ def create_ui():
                                 info="Choose attention implementation.\nAuto = fastest available. flash_attention_2 (fastest) → sdpa (fast, built-in PyTorch 2.0+) → eager (slowest, always works)"
                             )
 
-                        with gr.Column():
+                            with gr.Row():
+                                settings_audio_notifications = gr.Checkbox(
+                                    label="Audio Notifications",
+                                    value=_user_config.get("browser_notifications", True),
+                                    info="Play sound when audio generation completes"
+                                )
 
+                        with gr.Column():
                             settings_offline_mode = gr.Checkbox(
                                 label="Offline Mode (Use cached models only)",
                                 value=_user_config.get("offline_mode", False),
@@ -6028,7 +6244,7 @@ def create_ui():
                         "models": "models"
                     }
 
-                    # Row 1: Samples and Output folders
+                    # Row 1: Samples, Datasets and Output folders
                     with gr.Row():
                         with gr.Column():
                             settings_samples_folder = gr.Textbox(
@@ -6046,8 +6262,6 @@ def create_ui():
                             )
                             reset_output_btn = gr.Button("Reset", size="sm")
 
-                    # Row 2: Datasets and Models folders
-                    with gr.Row():
                         with gr.Column():
                             settings_datasets_folder = gr.Textbox(
                                 label="Datasets Folder",
@@ -6056,13 +6270,27 @@ def create_ui():
                             )
                             reset_datasets_btn = gr.Button("Reset", size="sm")
 
+                    # Row 2: Models and Trained Models folder
+                    with gr.Row():
                         with gr.Column():
                             settings_models_folder = gr.Textbox(
-                                label="Models Folder",
+                                label="Downloaded Models Folder",
                                 value=_user_config.get("models_folder", default_folders["models"]),
-                                info="Folder for trained and downloaded model files"
+                                info="Folder for downloaded model files (Qwen, VibeVoice)"
                             )
                             reset_models_btn = gr.Button("Reset", size="sm")
+
+                        with gr.Column():
+                            settings_trained_models_folder = gr.Textbox(
+                                label="Trained Models Folder",
+                                value=_user_config.get("trained_models_folder", default_folders["models"]),
+                                info="Folder for your custom trained models"
+                            )
+                            reset_trained_models_btn = gr.Button("Reset", size="sm")
+
+                        with gr.Column():
+                            # Empty column for layout balance
+                            gr.Markdown("")
 
                 with gr.Column():
                     apply_folders_btn = gr.Button("Apply Changes", variant="primary", size="lg")
@@ -6093,6 +6321,13 @@ def create_ui():
                     outputs=[]
                 )
 
+                # Save audio notifications setting
+                settings_audio_notifications.change(
+                    lambda x: save_preference("browser_notifications", x),
+                    inputs=[settings_audio_notifications],
+                    outputs=[]
+                )
+
                 # Reset button handlers
                 def reset_folder(folder_key):
                     return default_folders[folder_key]
@@ -6117,6 +6352,11 @@ def create_ui():
                     outputs=[settings_models_folder]
                 )
 
+                reset_trained_models_btn.click(
+                    lambda: reset_folder("models"),
+                    outputs=[settings_trained_models_folder]
+                )
+
                 def download_model_clicked(model_display_name):
                     if not model_display_name or model_display_name.startswith("---"):
                         return "❌ Please select an actual model (not a category header)"
@@ -6129,7 +6369,7 @@ def create_ui():
                     return status
 
                 # Apply folder changes
-                def apply_folder_changes(samples, output, datasets, models):
+                def apply_folder_changes(samples, output, datasets, models, trained_models):
                     global SAMPLES_DIR, OUTPUT_DIR, DATASETS_DIR
 
                     try:
@@ -6141,19 +6381,21 @@ def create_ui():
                         new_output = base_dir / output
                         new_datasets = base_dir / datasets
                         new_models = base_dir / models
+                        new_trained_models = base_dir / trained_models
 
                         # Create directories if they don't exist
                         new_samples.mkdir(exist_ok=True)
                         new_output.mkdir(exist_ok=True)
                         new_datasets.mkdir(exist_ok=True)
                         new_models.mkdir(exist_ok=True)
+                        new_trained_models.mkdir(exist_ok=True)
 
                         # Update global variables
                         SAMPLES_DIR = new_samples
                         OUTPUT_DIR = new_output
                         DATASETS_DIR = new_datasets
 
-                        # Set HuggingFace cache environment variable
+                        # Set HuggingFace cache environment variable (for downloaded models)
                         import os
                         os.environ['HF_HOME'] = str(new_models)
 
@@ -6162,9 +6404,10 @@ def create_ui():
                         _user_config["output_folder"] = output
                         _user_config["datasets_folder"] = datasets
                         _user_config["models_folder"] = models
+                        _user_config["trained_models_folder"] = trained_models
                         save_config(_user_config)
 
-                        return f"✅ Folder paths updated successfully!\n\nSamples: {new_samples}\nOutput: {new_output}\nDatasets: {new_datasets}\nModels: {new_models}\n\nNote: Restart the app to fully apply changes to all components."
+                        return f"✅ Folder paths updated successfully!\n\nSamples: {new_samples}\nOutput: {new_output}\nDatasets: {new_datasets}\nDownloaded Models: {new_models}\nTrained Models: {new_trained_models}\n\nNote: Restart the app to fully apply changes to all components."
 
                     except Exception as e:
                         return f"❌ Error applying changes: {str(e)}"
@@ -6177,7 +6420,7 @@ def create_ui():
 
                 apply_folders_btn.click(
                     apply_folder_changes,
-                    inputs=[settings_samples_folder, settings_output_folder, settings_datasets_folder, settings_models_folder],
+                    inputs=[settings_samples_folder, settings_output_folder, settings_datasets_folder, settings_models_folder, settings_trained_models_folder],
                     outputs=[settings_status]
                 )
 
@@ -6273,80 +6516,6 @@ def create_ui():
             outputs=[]
         )
 
-        # Save voice sample selections for Qwen Base
-        qwen_voice_sample_1.change(
-            lambda x: save_preference("qwen_voice_sample_1", x),
-            inputs=[qwen_voice_sample_1],
-            outputs=[]
-        )
-
-        qwen_voice_sample_2.change(
-            lambda x: save_preference("qwen_voice_sample_2", x),
-            inputs=[qwen_voice_sample_2],
-            outputs=[]
-        )
-
-        qwen_voice_sample_3.change(
-            lambda x: save_preference("qwen_voice_sample_3", x),
-            inputs=[qwen_voice_sample_3],
-            outputs=[]
-        )
-
-        qwen_voice_sample_4.change(
-            lambda x: save_preference("qwen_voice_sample_4", x),
-            inputs=[qwen_voice_sample_4],
-            outputs=[]
-        )
-
-        qwen_voice_sample_5.change(
-            lambda x: save_preference("qwen_voice_sample_5", x),
-            inputs=[qwen_voice_sample_5],
-            outputs=[]
-        )
-
-        qwen_voice_sample_6.change(
-            lambda x: save_preference("qwen_voice_sample_6", x),
-            inputs=[qwen_voice_sample_6],
-            outputs=[]
-        )
-
-        qwen_voice_sample_7.change(
-            lambda x: save_preference("qwen_voice_sample_7", x),
-            inputs=[qwen_voice_sample_7],
-            outputs=[]
-        )
-
-        qwen_voice_sample_8.change(
-            lambda x: save_preference("qwen_voice_sample_8", x),
-            inputs=[qwen_voice_sample_8],
-            outputs=[]
-        )
-
-        # Save voice sample selections for VibeVoice
-        voice_sample_1.change(
-            lambda x: save_preference("vv_voice_sample_1", x),
-            inputs=[voice_sample_1],
-            outputs=[]
-        )
-
-        voice_sample_2.change(
-            lambda x: save_preference("vv_voice_sample_2", x),
-            inputs=[voice_sample_2],
-            outputs=[]
-        )
-
-        voice_sample_3.change(
-            lambda x: save_preference("vv_voice_sample_3", x),
-            inputs=[voice_sample_3],
-            outputs=[]
-        )
-
-        voice_sample_4.change(
-            lambda x: save_preference("vv_voice_sample_4", x),
-            inputs=[voice_sample_4],
-            outputs=[]
-        )
-
         longform_model_size.change(
             lambda x: save_preference("vibevoice_model_size", x),
             inputs=[longform_model_size],
@@ -6381,16 +6550,42 @@ def create_ui():
             outputs=[unload_status]
         )
 
-    return app, theme, custom_css, CONFIRMATION_MODAL_CSS, CONFIRMATION_MODAL_HEAD
+        # ================================
+        # INPUT MODAL TRIGGER HANDLERS
+        # ================================
+        input_trigger.change(
+            handle_qwen_emotion_input,
+            inputs=[input_trigger, qwen_emotion_intensity, qwen_temperature, qwen_repetition_penalty, qwen_top_p],
+            outputs=[qwen_emotion_preset, clone_status]
+        )
+
+        input_trigger.change(
+            handle_custom_emotion_input,
+            inputs=[input_trigger, custom_emotion_intensity, custom_temperature, custom_repetition_penalty, custom_top_p],
+            outputs=[custom_emotion_preset, preset_status]
+        )
+
+        # Refresh emotion dropdowns when tabs are selected
+        voice_clone_tab.select(
+            lambda: gr.update(choices=get_emotion_choices(_active_emotions)),
+            outputs=[qwen_emotion_preset]
+        )
+
+        voice_presets_tab.select(
+            lambda: gr.update(choices=get_emotion_choices(_active_emotions)),
+            outputs=[custom_emotion_preset]
+        )
+
+    return app, theme, custom_css, CONFIRMATION_MODAL_CSS, CONFIRMATION_MODAL_HEAD, INPUT_MODAL_CSS, INPUT_MODAL_HEAD
 if __name__ == "__main__":
 
-    app, theme, custom_css, modal_css, modal_head = create_ui()
+    app, theme, custom_css, modal_css, modal_head, input_css, input_head = create_ui()
     app.launch(
         server_name="127.0.0.1",
         server_port=7860,
         share=False,
         inbrowser=True,
         theme=theme,
-        css=custom_css + modal_css,
-        head=modal_head
+        css=custom_css + modal_css + input_css,
+        head=modal_head + input_head
     )
