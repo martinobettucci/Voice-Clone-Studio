@@ -1,5 +1,18 @@
 # Version History
 
+## January 30, 2026
+
+#### Version 0.7.0 - Advanced Parameters & Emotion Presets
+- **Advanced Parameter Controls** - Full access to sampling parameters (temperature, top_k, top_p, repetition_penalty, max_new_tokens) across all tabs
+- **Voice Clone Tab** - Emotion presets with intensity slider for Qwen models
+- **Voice Presets Tab** - Context-aware controls: style instructions for Premium Speakers, emotion presets for Trained Models
+- **Conversation Tab** - Model-specific advanced parameters: VibeVoice diffusion controls (CFG, inference steps, LM sampling), Qwen sampling parameters
+- **Voice Design Tab** - Advanced Qwen parameters for fine-tuning voice generation
+- **Emotion Preset System** - Added emotion presets with intensity control - Inspired by [Qwen3-TTS Emotional Voice Clone](https://github.com/Dawizzer/ComfyUI-Qwen3TTS-Emotional)
+- **Offline Mode** - Added offline mode toggle in Settings to use locally cached models without internet access
+- **Model Download Tool** - Direct model download to `models/` folder with progress tracking in console
+- **Training Script Fix** - Added attention mechanism fallback (flash_attention_2 → sdpa → eager) to prevent failures without flash-attn
+
 ## January 27, 2026
 
 #### Version 0.6.5 - Improved Conversation Tool

@@ -29,6 +29,23 @@ from modules.ui_components.confirmation_modal import (
     show_confirmation_modal_js
 )
 
+# Supported/Built-in Models - these should NOT appear in trained models list (all lowercase for efficient matching)
+SUPPORTED_MODELS = {
+    # Qwen3-TTS models
+    "qwen3-tts-12hz-1.7b-base",
+    "qwen3-tts-12hz-1.7b-customvoice",
+    "qwen3-tts-12hz-1.7b-voicedesign",
+    "qwen3-tts-0.6b-base",
+    "qwen3-tts-0.6b-customvoice",
+    "qwen3-tts-tokenizer-12hz",
+    # VibeVoice models
+    "vibevoice-tts-1.5b",
+    "vibevoice-tts-4b",
+    "vibevoice-asr",
+    # Whisper models
+    "whisper"
+}
+
 # Directories
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
@@ -44,6 +61,7 @@ def load_config():
         "whisper_language": "Auto-detect",
         "low_cpu_mem_usage": False,
         "attention_mechanism": "auto",
+        "offline_mode": False,
         "samples_folder": "samples",
         "output_folder": "output",
         "datasets_folder": "datasets",
@@ -129,6 +147,56 @@ LANGUAGES = [
     "Auto", "English", "Chinese", "Japanese", "Korean",
     "German", "French", "Russian", "Portuguese", "Spanish", "Italian"
 ]
+
+# Emotion parameter adjustments for expression control
+EMOTION_DICT = {
+    # Core emotions
+    "happy": {"temp": 0.18, "penalty": 0.06, "top_p": 0.04},
+    "sad": {"temp": -0.18, "penalty": -0.06, "top_p": -0.08},
+    "angry": {"temp": 0.28, "penalty": 0.12, "top_p": 0.06},
+    "scared": {"temp": 0.22, "penalty": 0.14, "top_p": 0.02},
+    "surprised": {"temp": 0.32, "penalty": 0.12, "top_p": 0.08},
+    # Intensity variations
+    "furious": {"temp": 0.52, "penalty": 0.22, "top_p": 0.12},
+    "irritated": {"temp": 0.14, "penalty": 0.04, "top_p": 0.02},
+    "melancholic": {"temp": -0.26, "penalty": -0.08, "top_p": -0.12},
+    "disappointed": {"temp": -0.14, "penalty": -0.04, "top_p": -0.06},
+    "ecstatic": {"temp": 0.46, "penalty": 0.18, "top_p": 0.14},
+    "content": {"temp": -0.08, "penalty": 0.02, "top_p": 0.02},
+    "terrified": {"temp": 0.36, "penalty": 0.22, "top_p": 0.06},
+    "anxious": {"temp": 0.18, "penalty": 0.14, "top_p": 0.02},
+    # Social interactions
+    "sarcastic": {"temp": 0.16, "penalty": 0.06, "top_p": 0.02},
+    "dismissive": {"temp": 0.08, "penalty": 0.02, "top_p": -0.08},
+    "sympathetic": {"temp": -0.08, "penalty": -0.04, "top_p": 0.02},
+    "apologetic": {"temp": -0.12, "penalty": -0.04, "top_p": -0.04},
+    "pleading": {"temp": 0.14, "penalty": 0.12, "top_p": 0.02},
+    # Confidence range
+    "confident": {"temp": -0.08, "penalty": -0.04, "top_p": 0.02},
+    "arrogant": {"temp": 0.04, "penalty": 0.02, "top_p": -0.08},
+    "hesitant": {"temp": 0.14, "penalty": 0.12, "top_p": 0.02},
+    "timid": {"temp": -0.16, "penalty": 0.08, "top_p": -0.08},
+    "defeated": {"temp": -0.22, "penalty": -0.08, "top_p": -0.08},
+    # Energy states
+    "excited": {"temp": 0.36, "penalty": 0.14, "top_p": 0.08},
+    "energetic": {"temp": 0.32, "penalty": 0.14, "top_p": 0.08},
+    "bored": {"temp": -0.18, "penalty": -0.08, "top_p": -0.08},
+    "tired": {"temp": -0.24, "penalty": -0.08, "top_p": -0.08},
+    "exhausted": {"temp": -0.28, "penalty": -0.12, "top_p": -0.12},
+    "calm": {"temp": -0.26, "penalty": -0.08, "top_p": -0.12},
+    # Tension levels
+    "nervous": {"temp": 0.22, "penalty": 0.18, "top_p": 0.04},
+    "panicked": {"temp": 0.42, "penalty": 0.24, "top_p": 0.08},
+    "frantic": {"temp": 0.48, "penalty": 0.28, "top_p": 0.12},
+    "relaxed": {"temp": -0.22, "penalty": -0.08, "top_p": -0.08},
+    # Attitude/mood
+    "playful": {"temp": 0.24, "penalty": 0.08, "top_p": 0.04},
+    "mysterious": {"temp": -0.08, "penalty": 0.02, "top_p": -0.04},
+    "menacing": {"temp": 0.14, "penalty": 0.08, "top_p": -0.04},
+    # Complex states
+    "bitter": {"temp": 0.12, "penalty": 0.06, "top_p": -0.04},
+    "desperate": {"temp": 0.28, "penalty": 0.18, "top_p": 0.04},
+}
 
 # Custom Voice speakers
 CUSTOM_VOICE_SPEAKERS = [
@@ -385,9 +453,144 @@ def get_attention_implementation(user_preference="auto"):
     return mechanisms_to_try
 
 
+def check_model_available_locally(model_name):
+    """Check if model is available in local models/ directory for offline mode.
+
+    Looks for folder with model.safetensors file.
+    Users must download models using Settings > Download Model, or manually via:
+    git clone https://huggingface.co/{model_name} models/{folder_name}
+
+    Args:
+        model_name: HuggingFace model name (e.g., "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+
+    Returns:
+        Path to local model if found, None otherwise
+    """
+    models_dir = Path(__file__).parent / "models"
+    if not models_dir.exists():
+        return None
+
+    # Extract model folder name from HF path (e.g., "Qwen3-TTS-12Hz-1.7B-Base")
+    model_folder_name = model_name.split("/")[-1] if "/" in model_name else model_name
+
+    # Look for exact folder name with any .safetensors files
+    local_path = models_dir / model_folder_name
+    if list(local_path.glob("*.safetensors")):
+        return local_path
+
+    return None
+
+
+def download_model_from_huggingface(model_id, local_folder_name=None, progress=None):
+    """Download model from HuggingFace using git clone (not cache).
+
+    Uses git-lfs to download directly to models/ folder without using HF cache.
+    Users can also manually clone with:
+    git clone https://huggingface.co/{model_id} models/{folder_name}
+
+    Args:
+        model_id: HuggingFace model ID (e.g., "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+        local_folder_name: Custom local folder name (default: extract from model_id)
+        progress: Optional Gradio progress callback
+
+    Returns:
+        Tuple: (success: bool, message: str, local_path: str or None)
+    """
+    import subprocess
+    import threading
+    import time
+
+    try:
+        # Validate inputs
+        if not model_id or "/" not in model_id:
+            return False, f"Invalid model ID: {model_id}. Use format 'Author/ModelName'", None
+
+        # Determine local folder name
+        if not local_folder_name:
+            local_folder_name = model_id.split("/")[-1]
+
+        models_dir = Path(__file__).parent / "models"
+        models_dir.mkdir(exist_ok=True)
+
+        local_path = models_dir / local_folder_name
+
+        # Check if already downloaded (look for any .safetensors files)
+        if list(local_path.glob("*.safetensors")):
+            return True, f"Model already exists at {local_path}", str(local_path)
+
+        # Check if git-lfs is installed
+        try:
+            subprocess.run(["git", "lfs", "version"], capture_output=True, check=True, timeout=5)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            error_msg = (
+                "❌ git-lfs is not installed or not in PATH. Install from: https://git-lfs.com\n"
+                "Or manually download from HuggingFace and place in: models/" + local_folder_name
+            )
+            print(error_msg, flush=True)
+            return False, error_msg, None
+
+        # Clone repository with git-lfs
+        hf_url = f"https://huggingface.co/{model_id}"
+
+        try:
+            print(f"\nStarting download: {model_id}", flush=True)
+            print(f"URL: {hf_url}", flush=True)
+            print(f"Destination: {local_path}\n", flush=True)
+
+            # Track download state
+            download_complete = {"done": False, "returncode": None}
+
+            def run_download():
+                """Run git clone without capturing output so it shows in console."""
+                try:
+                    # Don't capture output - let it go directly to console
+                    result = subprocess.run(
+                        ["git", "clone", hf_url, str(local_path)],
+                        timeout=3600
+                    )
+                    download_complete["returncode"] = result.returncode
+                except Exception as e:
+                    print(f"Download error: {e}", flush=True)
+                    download_complete["returncode"] = -1
+                finally:
+                    download_complete["done"] = True
+
+            # Start download thread
+            download_thread = threading.Thread(target=run_download, daemon=True)
+            download_thread.start()
+
+            # Wait for download to complete (progress shown in console)
+            download_thread.join()
+
+            if download_complete["returncode"] != 0:
+                return False, "❌ Download failed. Check console for details.", None
+
+            # Verify model files exist (look for any .safetensors files)
+            if not list(local_path.glob("*.safetensors")):
+                return False, "❌ Model files not found - download may be incomplete.", None
+
+            print(f"\nSuccessfully downloaded to {local_path}\n", flush=True)
+            return True, f"Successfully downloaded to {local_path}", str(local_path)
+
+        except subprocess.TimeoutExpired:
+            if local_path.exists():
+                import shutil
+                shutil.rmtree(local_path, ignore_errors=True)
+            return False, "Download timed out after 1 hour. Check your internet connection and try again.", None
+        except Exception as e:
+            if local_path.exists():
+                import shutil
+                shutil.rmtree(local_path, ignore_errors=True)
+            return False, f"Download error: {str(e)}", None
+
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None
+
+
 def load_model_with_attention(model_class, model_name, user_preference="auto", **kwargs):
     """
     Load a HuggingFace model with the best available attention mechanism.
+    First checks for locally cached model, then tries HuggingFace.
 
     Args:
         model_class: The model class to instantiate
@@ -398,29 +601,55 @@ def load_model_with_attention(model_class, model_name, user_preference="auto", *
     Returns:
         tuple: (loaded_model, attention_mechanism_used)
     """
+    offline_mode = _user_config.get("offline_mode", False)
+
+    # Check if model is available locally
+    local_model_path = check_model_available_locally(model_name)
+    if local_model_path:
+        print(f"Found local model: {local_model_path}")
+        model_to_load = str(local_model_path)
+    elif offline_mode:
+        raise RuntimeError(
+            f"❌ Offline mode enabled but model not available locally: {model_name}\n"
+            f"To use offline mode, download the model and place it in: models/{model_name.split('/')[-1]}/\n"
+            f"Or disable offline mode in Settings to download from HuggingFace."
+        )
+    else:
+        model_to_load = model_name
+
     mechanisms_to_try = get_attention_implementation(user_preference)
 
+    last_error = None
     for attn in mechanisms_to_try:
         try:
             model = model_class.from_pretrained(
-                model_name,
+                model_to_load,
                 attn_implementation=attn,
+                trust_remote_code=True,  # Allow custom models like Qwen3-TTS
                 **kwargs
             )
             print(f"✓ Model loaded with {attn}")
             return model, attn
         except Exception as e:
             error_msg = str(e).lower()
-            # Check if it's an attention-related error
-            if any(keyword in error_msg for keyword in ["flash", "attention", "sdpa"]):
+            last_error = e
+
+            # Check if it's an attention-related error (mechanism not supported)
+            is_attn_error = any(keyword in error_msg for keyword in ["flash", "attention", "sdpa", "not supported"])
+
+            if is_attn_error:
                 print(f"  {attn} not available, trying next option...")
                 continue
             else:
-                # Different error, re-raise
+                # Different error (likely file/loading issue) - don't retry with other attentions
+                print(f"  Error with {attn}: {str(e)[:100]}...")
                 raise e
 
     # Should never reach here since 'eager' always works
-    raise RuntimeError("Failed to load model with any attention mechanism")
+    if last_error:
+        raise RuntimeError(f"Failed to load model with any attention mechanism. Last error: {str(last_error)}")
+    else:
+        raise RuntimeError("Failed to load model with any attention mechanism")
 
 
 # ============================================
@@ -515,7 +744,12 @@ def get_whisper_model():
 
     if _whisper_model is None:
         print("Loading Whisper model...")
-        _whisper_model = whisper.load_model("medium")
+        # Check if user has pre-cached Whisper model in ./models/whisper/
+        whisper_cache_path = Path("./models/whisper")
+        if whisper_cache_path.exists():
+            _whisper_model = whisper.load_model("medium", in_memory_cache=False, download_root="./models/whisper")
+        else:
+            _whisper_model = whisper.load_model("medium", in_memory_cache=False)
         print("Whisper model loaded!")
     return _whisper_model
 
@@ -963,8 +1197,12 @@ def on_sample_select(sample_name):
     return None, ""
 
 
-def generate_audio(sample_name, text_to_generate, language, seed, model_selection="Qwen3 - Small", progress=gr.Progress()):
-    """Generate audio using voice cloning - supports both Qwen and VibeVoice engines."""
+def generate_audio(sample_name, text_to_generate, language, seed, model_selection="Qwen3 - Small",
+                   qwen_do_sample=True, qwen_temperature=0.9, qwen_top_k=50, qwen_top_p=1.0, qwen_repetition_penalty=1.05,
+                   qwen_max_new_tokens=2048,
+                   vv_do_sample=False, vv_temperature=1.0, vv_top_k=50, vv_top_p=1.0, vv_repetition_penalty=1.0,
+                   vv_cfg_scale=3.0, vv_num_steps=20, progress=gr.Progress()):
+    """Generate audio using voice cloning - supports both Qwen and VibeVoice engines with full parameter control."""
     if not sample_name:
         return None, "❌ Please select a voice sample first."
 
@@ -1027,11 +1265,26 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
             cache_status = "cached" if was_cached else "newly processed"
             progress(0.6, desc=f"Generating audio ({cache_status} prompt)...")
 
+            # Prepare generation kwargs for Qwen
+            gen_kwargs = {
+                'max_new_tokens': int(qwen_max_new_tokens),
+            }
+            if qwen_do_sample:
+                gen_kwargs['do_sample'] = True
+                gen_kwargs['temperature'] = qwen_temperature
+                if qwen_top_k > 0:
+                    gen_kwargs['top_k'] = int(qwen_top_k)
+                if qwen_top_p < 1.0:
+                    gen_kwargs['top_p'] = qwen_top_p
+                if qwen_repetition_penalty != 1.0:
+                    gen_kwargs['repetition_penalty'] = qwen_repetition_penalty
+
             # Generate using the cached prompt
             wavs, sr = model.generate_voice_clone(
                 text=text_to_generate.strip(),
                 language=language if language != "Auto" else "Auto",
                 voice_clone_prompt=prompt_items,
+                **gen_kwargs
             )
 
             engine_display = f"Qwen3-{model_size}"
@@ -1056,7 +1309,8 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                processor = VibeVoiceProcessor.from_pretrained(model_path)
+                offline_mode = _user_config.get("offline_mode", False)
+                processor = VibeVoiceProcessor.from_pretrained(model_path, local_files_only=offline_mode)
 
             logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
 
@@ -1082,16 +1336,27 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
 
             progress(0.6, desc="Generating audio...")
 
-            # Set inference steps
-            model.set_ddpm_inference_steps(num_steps=10)
+            # Set inference steps for VibeVoice
+            model.set_ddpm_inference_steps(num_steps=int(vv_num_steps))
+
+            # Prepare generation config with VibeVoice parameters
+            gen_config = {'do_sample': vv_do_sample}
+            if vv_do_sample:
+                gen_config['temperature'] = vv_temperature
+                if vv_top_k > 0:
+                    gen_config['top_k'] = int(vv_top_k)
+                if vv_top_p < 1.0:
+                    gen_config['top_p'] = vv_top_p
+                if vv_repetition_penalty != 1.0:
+                    gen_config['repetition_penalty'] = vv_repetition_penalty
 
             # Generate
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=None,
-                cfg_scale=3.0,
+                cfg_scale=vv_cfg_scale,
                 tokenizer=processor.tokenizer,
-                generation_config={'do_sample': False},
+                generation_config=gen_config,
                 verbose=False,
             )
 
@@ -1141,7 +1406,10 @@ def generate_audio(sample_name, text_to_generate, language, seed, model_selectio
         return None, f"❌ Error generating audio: {str(e)}"
 
 
-def generate_voice_design(text_to_generate, language, instruct, seed, progress=gr.Progress(), save_to_output=False):
+def generate_voice_design(text_to_generate, language, instruct, seed,
+                          do_sample=True, temperature=0.9, top_k=50, top_p=1.0, 
+                          repetition_penalty=1.05, max_new_tokens=2048,
+                          progress=gr.Progress(), save_to_output=False):
     """Generate audio using voice design with natural language instructions."""
     if not text_to_generate or not text_to_generate.strip():
         return None, "❌ Please enter text to generate."
@@ -1168,6 +1436,12 @@ def generate_voice_design(text_to_generate, language, instruct, seed, progress=g
             text=text_to_generate.strip(),
             language=language if language != "Auto" else "Auto",
             instruct=instruct.strip(),
+            do_sample=do_sample,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            max_new_tokens=max_new_tokens
         )
 
         progress(0.8, desc=f"Saving audio ({'output' if save_to_output else 'temp'})...")
@@ -1252,7 +1526,9 @@ def preprocess_conversation_script(script):
     return '\n'.join(lines)
 
 
-def generate_custom_voice(text_to_generate, language, speaker, instruct, seed, model_size="1.7B", progress=gr.Progress()):
+def generate_custom_voice(text_to_generate, language, speaker, instruct, seed, model_size="1.7B",
+                          do_sample=True, temperature=0.9, top_k=50, top_p=1.0,
+                          repetition_penalty=1.05, max_new_tokens=2048, progress=gr.Progress()):
     """Generate audio using the CustomVoice model with premium speakers."""
     if not text_to_generate or not text_to_generate.strip():
         return None, "❌ Please enter text to generate."
@@ -1281,6 +1557,12 @@ def generate_custom_voice(text_to_generate, language, speaker, instruct, seed, m
             "text": text_to_generate.strip(),
             "language": language if language != "Auto" else "Auto",
             "speaker": speaker,
+            "do_sample": do_sample,
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
+            "max_new_tokens": max_new_tokens
         }
         if instruct and instruct.strip():
             kwargs["instruct"] = instruct.strip()
@@ -1315,7 +1597,9 @@ def generate_custom_voice(text_to_generate, language, speaker, instruct, seed, m
         return None, f"❌ Error generating audio: {str(e)}"
 
 
-def generate_with_trained_model(text_to_generate, language, speaker_name, checkpoint_path, instruct, seed, progress=gr.Progress()):
+def generate_with_trained_model(text_to_generate, language, speaker_name, checkpoint_path, instruct, seed,
+                                do_sample=True, temperature=0.9, top_k=50, top_p=1.0,
+                                repetition_penalty=1.05, max_new_tokens=2048, progress=gr.Progress()):
     """Generate audio using a trained custom voice model checkpoint."""
     if not text_to_generate or not text_to_generate.strip():
         return None, "❌ Please enter text to generate."
@@ -1355,6 +1639,12 @@ def generate_with_trained_model(text_to_generate, language, speaker_name, checkp
             "text": text_to_generate.strip(),
             "language": language if language != "Auto" else "Auto",
             "speaker": speaker_name,  # Use the speaker name the model was trained with
+            "do_sample": do_sample,
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
+            "max_new_tokens": max_new_tokens
         }
         if instruct and instruct.strip():
             kwargs["instruct"] = instruct.strip()
@@ -1389,7 +1679,9 @@ def generate_with_trained_model(text_to_generate, language, speaker_name, checkp
         return None, f"❌ Error generating audio: {str(e)}"
 
 
-def generate_conversation(conversation_data, pause_linebreak, pause_period, pause_comma, pause_question, pause_hyphen, language, seed, model_size="1.7B", progress=gr.Progress()):
+def generate_conversation(conversation_data, pause_linebreak, pause_period, pause_comma, pause_question, pause_hyphen, language, seed, model_size="1.7B",
+                          do_sample=True, temperature=0.9, top_k=50, top_p=1.0, repetition_penalty=1.05, max_new_tokens=2048,
+                          progress=gr.Progress()):
     """Generate a multi-speaker conversation from structured data with granular pause control.
 
     conversation_data is a string with format:
@@ -1512,6 +1804,12 @@ def generate_conversation(conversation_data, pause_linebreak, pause_period, paus
                     "text": segment_text,
                     "language": language if language != "Auto" else "Auto",
                     "speaker": speaker,
+                    "do_sample": do_sample,
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                    "repetition_penalty": repetition_penalty,
+                    "max_new_tokens": max_new_tokens
                 }
                 if style_instruct:
                     kwargs["instruct"] = style_instruct
@@ -1582,7 +1880,9 @@ def generate_conversation(conversation_data, pause_linebreak, pause_period, paus
         return None, f"❌ Error generating conversation: {str(e)}"
 
 
-def generate_conversation_base(conversation_data, voice_samples_dict, pause_linebreak, pause_period, pause_comma, pause_question, pause_hyphen, language, seed, model_size="0.6B", progress=gr.Progress()):
+def generate_conversation_base(conversation_data, voice_samples_dict, pause_linebreak, pause_period, pause_comma, pause_question, pause_hyphen, language, seed, model_size="0.6B",
+                               do_sample=True, temperature=0.9, top_k=50, top_p=1.0, repetition_penalty=1.05, max_new_tokens=2048,
+                               progress=gr.Progress()):
     """Generate a multi-speaker conversation using Qwen Base model with custom voice samples and granular pause control.
 
     Similar to DialogueInferenceNode - uses voice cloning with custom samples (up to 8 speakers).
@@ -1677,7 +1977,13 @@ def generate_conversation_base(conversation_data, voice_samples_dict, pause_line
                     text=segment_text,
                     language=language if language != "Auto" else "auto",
                     ref_audio=voice_sample_path,
-                    ref_text=ref_text
+                    ref_text=ref_text,
+                    do_sample=do_sample,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    max_new_tokens=max_new_tokens
                 )
 
                 # Get pause duration after this segment
@@ -1754,7 +2060,9 @@ def generate_conversation_base(conversation_data, voice_samples_dict, pause_line
         return None, f"❌ Error generating conversation: {str(e)}"
 
 
-def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5B", cfg_scale=3.0, seed=-1, progress=gr.Progress()):
+def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5B", cfg_scale=3.0, seed=-1,
+                                num_steps=20, do_sample=False, temperature=1.0, top_k=50, top_p=1.0, repetition_penalty=1.0,
+                                progress=gr.Progress()):
     """Generate long-form multi-speaker audio using VibeVoice TTS (up to 90 minutes)."""
     if not script_text or not script_text.strip():
         return None, "❌ Please enter a script."
@@ -1792,7 +2100,8 @@ def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
-            processor = VibeVoiceProcessor.from_pretrained(model_path)
+            offline_mode = _user_config.get("offline_mode", False)
+            processor = VibeVoiceProcessor.from_pretrained(model_path, local_files_only=offline_mode)
 
         logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
 
@@ -1899,7 +2208,7 @@ def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5
         progress(0.6, desc="Generating audio...")
 
         # Set inference steps
-        model.set_ddpm_inference_steps(num_steps=10)
+        model.set_ddpm_inference_steps(num_steps=num_steps)
 
         # Generate
         outputs = model.generate(
@@ -1907,7 +2216,13 @@ def generate_vibevoice_longform(script_text, voice_samples_dict, model_size="1.5
             max_new_tokens=None,
             cfg_scale=cfg_scale,
             tokenizer=processor.tokenizer,
-            generation_config={'do_sample': False},
+            generation_config={
+                'do_sample': do_sample,
+                'temperature': temperature,
+                'top_k': top_k,
+                'top_p': top_p,
+                'repetition_penalty': repetition_penalty
+            },
             verbose=False,
         )
 
@@ -2581,6 +2896,9 @@ def get_trained_models():
     - "ModelName - Epoch N" for checkpoint-based models
 
     Each entry includes the full path for loading.
+
+    Note: Excludes all official/built-in models (Qwen, VibeVoice, Whisper).
+    Only returns user-trained models.
     """
     trained_models_dir = Path("models")
     if not trained_models_dir.exists():
@@ -2590,6 +2908,15 @@ def get_trained_models():
 
     for folder in trained_models_dir.iterdir():
         if not folder.is_dir():
+            continue
+
+        # Skip official/built-in models by checking if any supported model name is in the folder name
+        folder_name_lower = folder.name.lower()
+        is_supported_model = any(
+            supported in folder_name_lower
+            for supported in SUPPORTED_MODELS
+        )
+        if is_supported_model:
             continue
 
         # Check if this folder directly contains model.safetensors
@@ -3196,15 +3523,19 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
     try:
         from huggingface_hub import snapshot_download
         # This checks cache first, only downloads if missing, then returns cache path
+        offline_mode = _user_config.get("offline_mode", False)
         base_model_path = snapshot_download(
             repo_id=base_model_id,
             allow_patterns=["*.json", "*.safetensors", "*.txt", "*.npz"],
-            local_files_only=False  # Will download if not in cache
+            local_files_only=offline_mode  # Will error if not cached in offline mode
         )
         status_log.append(f"✅ Using cached model at: {base_model_path}")
     except Exception as e:
         status_log.append(f"❌ Failed to locate/download base model: {str(e)}")
         return "\n".join(status_log)
+
+    # Get attention implementation preference from config
+    attn_impl = _user_config.get("attention_implementation", "auto")
 
     sft_cmd = [
         str(venv_python),
@@ -3216,11 +3547,13 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
         "--lr", str(learning_rate),
         "--num_epochs", str(int(num_epochs)),
         "--save_interval", str(int(save_interval)),
-        "--speaker_name", speaker_name.strip().lower()
+        "--speaker_name", speaker_name.strip().lower(),
+        "--attn_implementation", attn_impl
     ]
 
     status_log.append("Training configuration:")
     status_log.append(f"  Base model: {base_model_id}")
+    status_log.append(f"  Attention implementation: {attn_impl}")
     status_log.append(f"  Batch size: {int(batch_size)}")
     status_log.append(f"  Learning rate: {learning_rate}")
     status_log.append(f"  Epochs: {int(num_epochs)}")
@@ -3298,6 +3631,62 @@ def train_model(folder, speaker_name, ref_audio_filename, model_size, batch_size
     return "\n".join(status_log)
 
 
+# ============================================
+# Emotion Preset System (Shared across tabs)
+# ============================================
+
+def apply_emotion_preset(emotion_name, intensity, baseline_temp=0.9, baseline_top_p=1.0, baseline_penalty=1.05):
+    """
+    Adjust generation parameters based on selected emotion and intensity.
+
+    Args:
+        emotion_name: Name of emotion from EMOTION_DICT or "(None)"
+        intensity: Multiplier for emotion strength (0-2.0)
+        baseline_temp: Default temperature value
+        baseline_top_p: Default top_p value
+        baseline_penalty: Default repetition penalty value
+
+    Returns:
+        Tuple of gr.update() objects for (temperature, top_p, repetition_penalty, intensity)
+    """
+    import gradio as gr
+
+    # Check if using defaults - reset everything
+    if emotion_name == "(None)":
+        return (
+            gr.update(value=baseline_temp),
+            gr.update(value=baseline_top_p),
+            gr.update(value=baseline_penalty),
+            gr.update(value=1.0)  # Reset intensity to 1.0
+        )
+
+    # Extract emotion key from dropdown selection
+    emotion_key = emotion_name.split(" (")[0] if " (" in emotion_name else emotion_name
+
+    # Baseline values
+    baseline_values = {"temp": baseline_temp, "top_p": baseline_top_p, "penalty": baseline_penalty}
+
+    # Retrieve adjustment values or use zero adjustments
+    adjustments = EMOTION_DICT.get(emotion_key, {"temp": 0.0, "penalty": 0.0, "top_p": 0.0})
+
+    # Calculate adjusted values with intensity scaling
+    adjusted_temp = baseline_values["temp"] + (adjustments["temp"] * intensity)
+    adjusted_top_p = baseline_values["top_p"] + (adjustments["top_p"] * intensity)
+    adjusted_penalty = baseline_values["penalty"] + (adjustments["penalty"] * intensity)
+
+    # Clamp to valid ranges
+    final_temp = min(max(adjusted_temp, 0.1), 2.0)
+    final_top_p = min(max(adjusted_top_p, 0.0), 1.0)
+    final_penalty = min(max(adjusted_penalty, 1.0), 2.0)
+
+    return (
+        gr.update(value=final_temp),
+        gr.update(value=final_top_p),
+        gr.update(value=final_penalty),
+        gr.update()  # Keep intensity as-is for regular emotions
+    )
+
+
 def create_ui():
     """Create the Gradio interface."""
 
@@ -3330,7 +3719,7 @@ def create_ui():
         display: grid !important;
     }
     #output-files-container {
-        max-height: 600px;
+        max-height: 800px;
         overflow-y: auto;
     }
     #output-files-group label {
@@ -3463,6 +3852,147 @@ def create_ui():
                                 scale=1
                             )
 
+                        # Qwen3 Advanced Parameters
+                        is_qwen_initial = "Qwen" in _user_config.get("voice_clone_model", DEFAULT_VOICE_CLONE_MODEL)
+                        with gr.Accordion("Qwen3 Advanced Parameters", open=False, visible=is_qwen_initial) as qwen_params_accordion:
+
+                            # Emotion preset dropdown
+                            emotion_list = [k for k in EMOTION_DICT.keys()]
+                            emotion_choices = ["(None)"] + sorted(emotion_list)
+                            with gr.Row():
+                                qwen_emotion_preset = gr.Dropdown(
+                                    choices=emotion_choices,
+                                    value="(None)",
+                                    label="🎭 Emotion Preset",
+                                    info="Quick presets that adjust parameters for different emotions",
+                                    scale=3
+                                )
+                                qwen_emotion_intensity = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=2.0,
+                                    value=1.0,
+                                    step=0.1,
+                                    label="Intensity",
+                                    info="Emotion strength (0=none, 2=extreme)",
+                                    scale=1
+                                )
+
+                            with gr.Row():
+                                qwen_do_sample = gr.Checkbox(
+                                    label="Enable Sampling",
+                                    value=True,
+                                    info="Qwen3 recommends sampling enabled (default: True)"
+                                )
+                                qwen_temperature = gr.Slider(
+                                    minimum=0.1,
+                                    maximum=2.0,
+                                    value=0.9,
+                                    step=0.05,
+                                    label="Temperature",
+                                    info="Sampling temperature"
+                                )
+
+                            with gr.Row():
+                                qwen_top_k = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=50,
+                                    step=1,
+                                    label="Top-K",
+                                    info="Keep only top K tokens"
+                                )
+                                qwen_top_p = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=1.0,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Top-P (Nucleus)",
+                                    info="Cumulative probability threshold"
+                                )
+
+                            with gr.Row():
+                                qwen_repetition_penalty = gr.Slider(
+                                    minimum=1.0,
+                                    maximum=2.0,
+                                    value=1.05,
+                                    step=0.05,
+                                    label="Repetition Penalty",
+                                    info="Penalize repeated tokens"
+                                )
+                                qwen_max_new_tokens = gr.Slider(
+                                    minimum=512,
+                                    maximum=4096,
+                                    value=2048,
+                                    step=256,
+                                    label="Max New Tokens",
+                                    info="Maximum codec tokens to generate"
+                                )
+
+                        # VibeVoice Advanced Parameters
+                        with gr.Accordion("VibeVoice Advanced Parameters", open=False, visible=not is_qwen_initial) as vv_params_accordion:
+
+                            with gr.Row():
+                                vv_cfg_scale = gr.Slider(
+                                    minimum=1.0,
+                                    maximum=5.0,
+                                    value=3.0,
+                                    step=0.1,
+                                    label="CFG Scale",
+                                    info="Controls audio adherence to voice prompt"
+                                )
+                                vv_num_steps = gr.Slider(
+                                    minimum=5,
+                                    maximum=50,
+                                    value=20,
+                                    step=1,
+                                    label="Inference Steps",
+                                    info="Number of diffusion steps"
+                                )
+
+                            gr.Markdown("**Stochastic Sampling** _(Enable this to turn on deterministic generation )_")
+                            with gr.Row():
+                                vv_do_sample = gr.Checkbox(
+                                    label="Enable Sampling",
+                                    value=False,
+                                    info="Enable stochastic sampling (default: False)"
+                                )
+                            with gr.Row():
+                                vv_repetition_penalty = gr.Slider(
+                                    minimum=1.0,
+                                    maximum=2.0,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Repetition Penalty",
+                                    info="Penalize repeated tokens"
+                                )
+
+                                vv_temperature = gr.Slider(
+                                    minimum=0.1,
+                                    maximum=2.0,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Temperature",
+                                    info="Sampling temperature"
+                                )
+
+                            with gr.Row():
+                                vv_top_k = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=50,
+                                    step=1,
+                                    label="Top-K",
+                                    info="Keep only top K tokens"
+                                )
+                                vv_top_p = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=1.0,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Top-P (Nucleus)",
+                                    info="Cumulative probability threshold"
+                                )
+
                         generate_btn = gr.Button("Generate Audio", variant="primary", size="lg")
 
                         output_audio = gr.Audio(
@@ -3528,7 +4058,11 @@ def create_ui():
 
                 generate_btn.click(
                     generate_audio,
-                    inputs=[sample_dropdown, text_input, language_dropdown, seed_input, clone_model_dropdown],
+                    inputs=[sample_dropdown, text_input, language_dropdown, seed_input, clone_model_dropdown,
+                            qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p, qwen_repetition_penalty,
+                            qwen_max_new_tokens,
+                            vv_do_sample, vv_temperature, vv_top_k, vv_top_p, vv_repetition_penalty,
+                            vv_cfg_scale, vv_num_steps],
                     outputs=[output_audio, status_text]
                 )
 
@@ -3541,6 +4075,32 @@ def create_ui():
                     toggle_language_visibility,
                     inputs=[clone_model_dropdown],
                     outputs=[language_row]
+                )
+
+                # Toggle accordion visibility based on engine
+                def toggle_engine_params(model_selection):
+                    is_qwen = "Qwen" in model_selection
+                    return gr.update(visible=is_qwen), gr.update(visible=not is_qwen)
+
+                clone_model_dropdown.change(
+                    toggle_engine_params,
+                    inputs=[clone_model_dropdown],
+                    outputs=[qwen_params_accordion, vv_params_accordion]
+                )
+
+                # Apply emotion preset to Qwen parameters
+                # Update when emotion changes
+                qwen_emotion_preset.change(
+                    apply_emotion_preset,
+                    inputs=[qwen_emotion_preset, qwen_emotion_intensity],
+                    outputs=[qwen_temperature, qwen_top_p, qwen_repetition_penalty, qwen_emotion_intensity]
+                )
+
+                # Update when intensity changes
+                qwen_emotion_intensity.change(
+                    apply_emotion_preset,
+                    inputs=[qwen_emotion_preset, qwen_emotion_intensity],
+                    outputs=[qwen_temperature, qwen_top_p, qwen_repetition_penalty, qwen_emotion_intensity]
                 )
 
                 clone_model_dropdown.change(
@@ -3681,6 +4241,80 @@ def create_ui():
                                 scale=1
                             )
 
+                        # Qwen Advanced Parameters (visible for both modes)
+                        with gr.Accordion("Advanced Parameters", open=False) as custom_params_accordion:
+                            # Emotion preset dropdown (hidden for Premium Speakers, shown for Trained Models)
+                            emotion_list = [k for k in EMOTION_DICT.keys()]
+                            emotion_choices = ["(None)"] + sorted(emotion_list)
+                            with gr.Row(visible=False) as custom_emotion_row:
+                                custom_emotion_preset = gr.Dropdown(
+                                    choices=emotion_choices,
+                                    value="(None)",
+                                    label="🎭 Emotion Preset",
+                                    info="Quick presets that adjust parameters for different emotions",
+                                    scale=3
+                                )
+                                custom_emotion_intensity = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=2.0,
+                                    value=1.0,
+                                    step=0.1,
+                                    label="Intensity",
+                                    info="Emotion strength (0=none, 2=extreme)",
+                                    scale=1
+                                )
+
+                            with gr.Row():
+                                custom_do_sample = gr.Checkbox(
+                                    label="Enable Sampling",
+                                    value=True,
+                                    info="Qwen3 recommends sampling enabled (default: True)"
+                                )
+                                custom_temperature = gr.Slider(
+                                    minimum=0.1,
+                                    maximum=2.0,
+                                    value=0.9,
+                                    step=0.05,
+                                    label="Temperature",
+                                    info="Sampling temperature"
+                                )
+
+                            with gr.Row():
+                                custom_top_k = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=50,
+                                    step=1,
+                                    label="Top-K",
+                                    info="Keep only top K tokens"
+                                )
+                                custom_top_p = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=1.0,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Top-P (Nucleus)",
+                                    info="Cumulative probability threshold"
+                                )
+
+                            with gr.Row():
+                                custom_repetition_penalty = gr.Slider(
+                                    minimum=1.0,
+                                    maximum=2.0,
+                                    value=1.05,
+                                    step=0.05,
+                                    label="Repetition Penalty",
+                                    info="Penalize repeated tokens"
+                                )
+                                custom_max_new_tokens = gr.Slider(
+                                    minimum=512,
+                                    maximum=4096,
+                                    value=2048,
+                                    step=256,
+                                    label="Max New Tokens",
+                                    info="Maximum codec tokens to generate"
+                                )
+
                         custom_generate_btn = gr.Button("Generate Audio", variant="primary", size="lg")
 
                         custom_output_audio = gr.Audio(
@@ -3699,12 +4333,40 @@ def create_ui():
                 def toggle_voice_type(voice_type):
                     """Toggle between premium and trained model sections."""
                     is_premium = voice_type == "Premium Speakers"
-                    return {
-                        premium_section: gr.update(visible=is_premium),
-                        trained_section: gr.update(visible=not is_premium)
-                    }
 
-                def generate_with_voice_type(text, lang, speaker_sel, instruct, seed, model_size, voice_type, premium_speaker, trained_model, progress=gr.Progress()):
+                    # Premium Speakers: show style instructions, hide emotion preset/intensity (and reset them)
+                    # Trained Models: hide style instructions, show emotion preset/intensity
+                    if is_premium:
+                        # Reset emotion parameters to defaults when switching to Premium
+                        return {
+                            premium_section: gr.update(visible=True),
+                            trained_section: gr.update(visible=False),
+                            custom_instruct_input: gr.update(visible=True),
+                            custom_emotion_row: gr.update(visible=False),
+                            # Reset emotion controls
+                            custom_emotion_preset: gr.update(value="(None)"),
+                            custom_emotion_intensity: gr.update(value=1.0),
+                            custom_temperature: gr.update(value=0.9),
+                            custom_top_p: gr.update(value=1.0),
+                            custom_repetition_penalty: gr.update(value=1.05)
+                        }
+                    else:
+                        # Trained Models mode
+                        return {
+                            premium_section: gr.update(visible=False),
+                            trained_section: gr.update(visible=True),
+                            custom_instruct_input: gr.update(visible=False),
+                            custom_emotion_row: gr.update(visible=True),
+                            # Keep emotion controls as-is
+                            custom_emotion_preset: gr.update(),
+                            custom_emotion_intensity: gr.update(),
+                            custom_temperature: gr.update(),
+                            custom_top_p: gr.update(),
+                            custom_repetition_penalty: gr.update()
+                        }
+
+                def generate_with_voice_type(text, lang, speaker_sel, instruct, seed, model_size, voice_type, premium_speaker, trained_model,
+                                             do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens, progress=gr.Progress()):
                     """Generate audio with either premium or trained voice."""
 
                     if voice_type == "Premium Speakers":
@@ -3716,6 +4378,7 @@ def create_ui():
                         return generate_custom_voice(
                             text, lang, speaker, instruct, seed,
                             "1.7B" if model_size == "Large" else "0.6B",
+                            do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
                             progress
                         )
                     else:
@@ -3738,13 +4401,20 @@ def create_ui():
 
                         # Generate with trained model
                         return generate_with_trained_model(
-                            text, lang, speaker_name, model_path, instruct, seed, progress
+                            text, lang, speaker_name, model_path, instruct, seed,
+                            do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
+                            progress
                         )
 
                 voice_type_radio.change(
                     toggle_voice_type,
                     inputs=[voice_type_radio],
-                    outputs=[premium_section, trained_section]
+                    outputs=[
+                        premium_section, trained_section,
+                        custom_instruct_input, custom_emotion_row,
+                        custom_emotion_preset, custom_emotion_intensity,
+                        custom_temperature, custom_top_p, custom_repetition_penalty
+                    ]
                 )
 
                 refresh_trained_btn.click(
@@ -3752,12 +4422,29 @@ def create_ui():
                     outputs=[trained_model_dropdown]
                 )
 
+                # Apply emotion preset to Custom Voice parameters
+                # Update when emotion changes
+                custom_emotion_preset.change(
+                    apply_emotion_preset,
+                    inputs=[custom_emotion_preset, custom_emotion_intensity],
+                    outputs=[custom_temperature, custom_top_p, custom_repetition_penalty, custom_emotion_intensity]
+                )
+
+                # Update when intensity changes
+                custom_emotion_intensity.change(
+                    apply_emotion_preset,
+                    inputs=[custom_emotion_preset, custom_emotion_intensity],
+                    outputs=[custom_temperature, custom_top_p, custom_repetition_penalty, custom_emotion_intensity]
+                )
+
                 custom_generate_btn.click(
                     generate_with_voice_type,
                     inputs=[
                         custom_text_input, custom_language, custom_speaker_dropdown,
                         custom_instruct_input, custom_seed, custom_model_size,
-                        voice_type_radio, custom_speaker_dropdown, trained_model_dropdown
+                        voice_type_radio, custom_speaker_dropdown, trained_model_dropdown,
+                        custom_do_sample, custom_temperature, custom_top_k, custom_top_p,
+                        custom_repetition_penalty, custom_max_new_tokens
                     ],
                     outputs=[custom_output_audio, custom_status]
                 )
@@ -3979,53 +4666,52 @@ def create_ui():
                                 )
 
                         # Shared Pause Controls (for both Qwen modes)
-                        with gr.Column(visible=(is_qwen_custom or is_qwen_base)) as qwen_pause_controls:
-                            gr.Markdown("**Pause Controls**")
-
-                            conv_pause_linebreak = gr.Slider(
-                                minimum=0.0,
-                                maximum=3.0,
-                                value=_user_config.get("conv_pause_linebreak", 0.5),
-                                step=0.1,
-                                label="Pause Between Lines",
-                                info="Silence between each speaker turn"
-                            )
-
-                            with gr.Row():
-                                conv_pause_period = gr.Slider(
+                        with gr.Accordion("Pause Controls", open=False, visible=(is_qwen_custom or is_qwen_base)) as qwen_pause_controls:
+                            with gr.Column():
+                                conv_pause_linebreak = gr.Slider(
                                     minimum=0.0,
-                                    maximum=2.0,
-                                    value=_user_config.get("conv_pause_period", 0.4),
+                                    maximum=3.0,
+                                    value=_user_config.get("conv_pause_linebreak", 0.5),
                                     step=0.1,
-                                    label="After Period (.)",
-                                    info="Pause after periods"
-                                )
-                                conv_pause_comma = gr.Slider(
-                                    minimum=0.0,
-                                    maximum=2.0,
-                                    value=_user_config.get("conv_pause_comma", 0.2),
-                                    step=0.1,
-                                    label="After Comma (,)",
-                                    info="Pause after commas"
+                                    label="Pause Between Lines",
+                                    info="Silence between each speaker turn"
                                 )
 
-                            with gr.Row():
-                                conv_pause_question = gr.Slider(
-                                    minimum=0.0,
-                                    maximum=2.0,
-                                    value=_user_config.get("conv_pause_question", 0.6),
-                                    step=0.1,
-                                    label="After Question (?)",
-                                    info="Pause after questions"
-                                )
-                                conv_pause_hyphen = gr.Slider(
-                                    minimum=0.0,
-                                    maximum=2.0,
-                                    value=_user_config.get("conv_pause_hyphen", 0.3),
-                                    step=0.1,
-                                    label="After Hyphen (-)",
-                                    info="Pause after hyphens"
-                                )
+                                with gr.Row():
+                                    conv_pause_period = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=2.0,
+                                        value=_user_config.get("conv_pause_period", 0.4),
+                                        step=0.1,
+                                        label="After Period (.)",
+                                        info="Pause after periods"
+                                    )
+                                    conv_pause_comma = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=2.0,
+                                        value=_user_config.get("conv_pause_comma", 0.2),
+                                        step=0.1,
+                                        label="After Comma (,)",
+                                        info="Pause after commas"
+                                    )
+
+                                with gr.Row():
+                                    conv_pause_question = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=2.0,
+                                        value=_user_config.get("conv_pause_question", 0.6),
+                                        step=0.1,
+                                        label="After Question (?)",
+                                        info="Pause after questions"
+                                    )
+                                    conv_pause_hyphen = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=2.0,
+                                        value=_user_config.get("conv_pause_hyphen", 0.3),
+                                        step=0.1,
+                                        label="After Hyphen (-)",
+                                        info="Pause after hyphens"
+                                    )
 
                         # VibeVoice-specific settings
                         with gr.Column(visible=is_vibevoice) as vibevoice_settings:
@@ -4036,14 +4722,124 @@ def create_ui():
                                 info="Small = Faster, Large = Better Quality"
                             )
 
-                            longform_cfg_scale = gr.Slider(
-                                minimum=1.0,
-                                maximum=5.0,
-                                value=3.0,
-                                step=0.5,
-                                label="CFG Scale",
-                                info="Higher = more adherence to prompt (3.0 recommended)"
-                            )
+                            # VibeVoice Advanced Parameters
+                            with gr.Accordion("Advanced Parameters", open=False):
+                                with gr.Row():
+                                    vv_conv_num_steps = gr.Slider(
+                                        minimum=5,
+                                        maximum=50,
+                                        value=20,
+                                        step=1,
+                                        label="Inference Steps",
+                                        info="Number of diffusion steps"
+                                    )
+
+                                    longform_cfg_scale = gr.Slider(
+                                        minimum=1.0,
+                                        maximum=5.0,
+                                        value=3.0,
+                                        step=0.5,
+                                        label="CFG Scale",
+                                        info="Higher = more adherence to prompt (3.0 recommended)"
+                                    )
+
+                                gr.Markdown("**Stochastic Sampling** _(Enable this to turn on deterministic generation )_")
+                                with gr.Row():
+                                    vv_conv_do_sample = gr.Checkbox(
+                                        label="Enable Sampling",
+                                        value=False,
+                                        info="Enable stochastic sampling (default: False)"
+                                    )
+                                with gr.Row():
+                                    vv_conv_repetition_penalty = gr.Slider(
+                                        minimum=1.0,
+                                        maximum=2.0,
+                                        value=1.0,
+                                        step=0.05,
+                                        label="Repetition Penalty",
+                                        info="Penalize repeated tokens"
+                                    )
+
+                                    vv_conv_temperature = gr.Slider(
+                                        minimum=0.1,
+                                        maximum=2.0,
+                                        value=1.0,
+                                        step=0.05,
+                                        label="Temperature",
+                                        info="Sampling temperature"
+                                    )
+
+                                with gr.Row():
+                                    vv_conv_top_k = gr.Slider(
+                                        minimum=0,
+                                        maximum=100,
+                                        value=50,
+                                        step=1,
+                                        label="Top-K",
+                                        info="Keep only top K tokens"
+                                    )
+                                    vv_conv_top_p = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=1.0,
+                                        value=1.0,
+                                        step=0.05,
+                                        label="Top-P (Nucleus)",
+                                        info="Cumulative probability threshold"
+                                    )
+
+                        # Qwen Advanced Parameters (for both Base and CustomVoice, no emotion presets)
+                        with gr.Column(visible=(is_qwen_custom or is_qwen_base)) as qwen_conv_advanced:
+                            with gr.Accordion("Advanced Parameters", open=False):
+                                with gr.Row():
+                                    qwen_conv_do_sample = gr.Checkbox(
+                                        label="Enable Sampling",
+                                        value=True,
+                                        info="Qwen3 recommends sampling enabled (default: True)"
+                                    )
+                                    qwen_conv_temperature = gr.Slider(
+                                        minimum=0.1,
+                                        maximum=2.0,
+                                        value=0.9,
+                                        step=0.05,
+                                        label="Temperature",
+                                        info="Sampling temperature"
+                                    )
+
+                                with gr.Row():
+                                    qwen_conv_top_k = gr.Slider(
+                                        minimum=0,
+                                        maximum=100,
+                                        value=50,
+                                        step=1,
+                                        label="Top-K",
+                                        info="Keep only top K tokens"
+                                    )
+                                    qwen_conv_top_p = gr.Slider(
+                                        minimum=0.0,
+                                        maximum=1.0,
+                                        value=1.0,
+                                        step=0.05,
+                                        label="Top-P (Nucleus)",
+                                        info="Cumulative probability threshold"
+                                    )
+
+                                with gr.Row():
+                                    qwen_conv_repetition_penalty = gr.Slider(
+                                        minimum=1.0,
+                                        maximum=2.0,
+                                        value=1.05,
+                                        step=0.05,
+                                        label="Repetition Penalty",
+                                        info="Penalize repeated tokens"
+                                    )
+                                    qwen_conv_max_new_tokens = gr.Slider(
+                                        minimum=512,
+                                        maximum=4096,
+                                        value=2048,
+                                        step=256,
+                                        label="Max New Tokens",
+                                        info="Maximum codec tokens to generate"
+                                    )
 
                         # Shared settings
                         conv_generate_btn = gr.Button("Generate Conversation", variant="primary", size="lg")
@@ -4136,8 +4932,12 @@ def create_ui():
                     qwen_base_pause_hyphen, qwen_base_model_size,
                     # Shared Qwen params
                     qwen_lang, qwen_seed,
+                    # Qwen advanced params
+                    qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p, qwen_repetition_penalty, qwen_max_new_tokens,
                     # VibeVoice params
                     vv_v1, vv_v2, vv_v3, vv_v4, vv_model_size, vv_cfg,
+                    # VibeVoice advanced params
+                    vv_num_steps, vv_do_sample, vv_temperature, vv_top_k, vv_top_p, vv_repetition_penalty,
                     # Shared
                     seed, progress=gr.Progress()
                 ):
@@ -4147,7 +4947,9 @@ def create_ui():
                         qwen_size = "1.7B" if qwen_custom_model_size == "Large" else "0.6B"
                         return generate_conversation(script, qwen_custom_pause_linebreak, qwen_custom_pause_period,
                                                      qwen_custom_pause_comma, qwen_custom_pause_question,
-                                                     qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size)
+                                                     qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size,
+                                                     qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
+                                                     qwen_repetition_penalty, qwen_max_new_tokens)
                     elif model_type == "Qwen Base":
                         # Map UI labels to actual model sizes
                         qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
@@ -4158,7 +4960,9 @@ def create_ui():
                         return generate_conversation_base(script, voice_samples, qwen_base_pause_linebreak,
                                                           qwen_base_pause_period, qwen_base_pause_comma,
                                                           qwen_base_pause_question, qwen_base_pause_hyphen,
-                                                          qwen_lang, qwen_seed, qwen_size, progress)
+                                                          qwen_lang, qwen_seed, qwen_size,
+                                                          qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
+                                                          qwen_repetition_penalty, qwen_max_new_tokens, progress)
                     else:  # VibeVoice
                         # Map UI labels to actual model sizes
                         if vv_model_size == "Small":
@@ -4168,7 +4972,9 @@ def create_ui():
                         else:
                             vv_size = "Large"
                         voice_samples = prepare_voice_samples_dict(vv_v1, vv_v2, vv_v3, vv_v4)
-                        return generate_vibevoice_longform(script, voice_samples, vv_size, vv_cfg, seed, progress)
+                        return generate_vibevoice_longform(script, voice_samples, vv_size, vv_cfg, seed,
+                                                           vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
+                                                           vv_top_p, vv_repetition_penalty, progress)
 
                 # Event handlers
                 conv_generate_btn.click(
@@ -4185,9 +4991,15 @@ def create_ui():
                         conv_pause_question, conv_pause_hyphen, conv_base_model_size,
                         # Shared Qwen
                         conv_language, conv_seed,
+                        # Qwen advanced params
+                        qwen_conv_do_sample, qwen_conv_temperature, qwen_conv_top_k, qwen_conv_top_p,
+                        qwen_conv_repetition_penalty, qwen_conv_max_new_tokens,
                         # VibeVoice
                         voice_sample_1, voice_sample_2, voice_sample_3, voice_sample_4,
                         longform_model_size, longform_cfg_scale,
+                        # VibeVoice advanced params
+                        vv_conv_num_steps, vv_conv_do_sample, vv_conv_temperature, vv_conv_top_k,
+                        vv_conv_top_p, vv_conv_repetition_penalty,
                         # Shared
                         conv_seed
                     ],
@@ -4208,6 +5020,7 @@ def create_ui():
                         qwen_base_settings: gr.update(visible=is_qwen_base),
                         qwen_language_seed: gr.update(visible=is_qwen),
                         qwen_pause_controls: gr.update(visible=is_qwen),
+                        qwen_conv_advanced: gr.update(visible=is_qwen),
                         vibevoice_settings: gr.update(visible=is_vibevoice),
                         qwen_custom_tips: gr.update(visible=is_qwen_custom),
                         qwen_base_tips: gr.update(visible=is_qwen_base),
@@ -4218,7 +5031,8 @@ def create_ui():
                     toggle_conv_ui,
                     inputs=[conv_model_type],
                     outputs=[qwen_speaker_table, qwen_base_voices_section, vibevoice_voices_section,
-                             qwen_custom_settings, qwen_base_settings, qwen_language_seed, qwen_pause_controls, vibevoice_settings,
+                             qwen_custom_settings, qwen_base_settings, qwen_language_seed, qwen_pause_controls,
+                             qwen_conv_advanced, vibevoice_settings,
                              qwen_custom_tips, qwen_base_tips, vibevoice_tips]
                 )
 
@@ -4251,14 +5065,14 @@ def create_ui():
                 gr.Markdown("Create new voices from natural language descriptions")
 
                 with gr.Row():
-                    with gr.Column(scale=3):
+                    with gr.Column(scale=2):
                         gr.Markdown("### Create Design")
 
                         design_text_input = gr.Textbox(
                             label="Reference Text",
                             placeholder="Enter the text for the voice design (this will be spoken in the designed voice)...",
                             lines=3,
-                            value="Thank you for listening to this voice design sample. This sentence is intentionally a bit longer so you can hear the full range and quality of the generated voice."
+                            value="Thank you for listening to this voice design sample. This sentence is intentionally a bit long so you can hear the full range and quality of the generated voice."
                         )
 
                         design_instruct_input = gr.Textbox(
@@ -4286,6 +5100,59 @@ def create_ui():
                             value=False
                         )
 
+                        # Qwen Advanced Parameters (no emotion presets)
+                        with gr.Accordion("Advanced Parameters", open=False):
+                            with gr.Row():
+                                design_do_sample = gr.Checkbox(
+                                    label="Enable Sampling",
+                                    value=True,
+                                    info="Qwen3 recommends sampling enabled (default: True)"
+                                )
+                                design_temperature = gr.Slider(
+                                    minimum=0.1,
+                                    maximum=2.0,
+                                    value=0.9,
+                                    step=0.05,
+                                    label="Temperature",
+                                    info="Sampling temperature"
+                                )
+
+                            with gr.Row():
+                                design_top_k = gr.Slider(
+                                    minimum=0,
+                                    maximum=100,
+                                    value=50,
+                                    step=1,
+                                    label="Top-K",
+                                    info="Keep only top K tokens"
+                                )
+                                design_top_p = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=1.0,
+                                    value=1.0,
+                                    step=0.05,
+                                    label="Top-P (Nucleus)",
+                                    info="Cumulative probability threshold"
+                                )
+
+                            with gr.Row():
+                                design_repetition_penalty = gr.Slider(
+                                    minimum=1.0,
+                                    maximum=2.0,
+                                    value=1.05,
+                                    step=0.05,
+                                    label="Repetition Penalty",
+                                    info="Penalize repeated tokens"
+                                )
+                                design_max_new_tokens = gr.Slider(
+                                    minimum=512,
+                                    maximum=4096,
+                                    value=2048,
+                                    step=256,
+                                    label="Max New Tokens",
+                                    info="Maximum codec tokens to generate"
+                                )
+
                         design_generate_btn = gr.Button("Generate Voice", variant="primary", size="lg")
                         design_status = gr.Textbox(label="Status", interactive=False, max_lines=3)
 
@@ -4306,12 +5173,18 @@ def create_ui():
                         design_save_btn = gr.Button("Save Sample", variant="primary")
 
                 # Voice Design event handlers
-                def generate_voice_design_with_checkbox(text, language, instruct, seed, save_to_output, progress=gr.Progress()):
-                    return generate_voice_design(text, language, instruct, seed, progress=progress, save_to_output=save_to_output)
+                def generate_voice_design_with_checkbox(text, language, instruct, seed, save_to_output,
+                                                        do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
+                                                        progress=gr.Progress()):
+                    return generate_voice_design(text, language, instruct, seed,
+                                                 do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
+                                                 progress=progress, save_to_output=save_to_output)
 
                 design_generate_btn.click(
                     generate_voice_design_with_checkbox,
-                    inputs=[design_text_input, design_language, design_instruct_input, design_seed, save_to_output_checkbox],
+                    inputs=[design_text_input, design_language, design_instruct_input, design_seed, save_to_output_checkbox,
+                            design_do_sample, design_temperature, design_top_k, design_top_p,
+                            design_repetition_penalty, design_max_new_tokens],
                     outputs=[design_output_audio, design_status]
                 )
 
@@ -5081,23 +5954,68 @@ def create_ui():
                 gr.Markdown("# ⚙️ Settings")
                 gr.Markdown("Configure global application settings")
 
+                gr.Markdown("### Model Loading")
+
                 with gr.Column():
-                    gr.Markdown("### Model Loading")
+                    with gr.Row():
+                        with gr.Column():
+                            settings_low_cpu_mem = gr.Checkbox(
+                                label="Low CPU Memory Usage (Slower loading time)",
+                                value=_user_config.get("low_cpu_mem_usage", False),
+                                info="Reduces CPU RAM usage when loading models by loading weights in smaller chunks. Tradeoff: slightly slower model loading time."
+                            )
 
-                    settings_low_cpu_mem = gr.Checkbox(
-                        label="Low CPU Memory Usage (Slower loading time)",
-                        value=_user_config.get("low_cpu_mem_usage", False),
-                        info="Reduces CPU RAM usage when loading models by loading weights in smaller chunks. Tradeoff: slightly slower model loading time."
-                    )
+                            settings_attention_mechanism = gr.Dropdown(
+                                label="Attention Mechanism",
+                                choices=["auto", "flash_attention_2", "sdpa", "eager"],
+                                value=_user_config.get("attention_mechanism", "auto"),
+                                info="Choose attention implementation.\nAuto = fastest available. flash_attention_2 (fastest) → sdpa (fast, built-in PyTorch 2.0+) → eager (slowest, always works)"
+                            )
 
-                    settings_attention_mechanism = gr.Dropdown(
-                        label="Attention Mechanism",
-                        choices=["auto", "flash_attention_2", "sdpa", "eager"],
-                        value=_user_config.get("attention_mechanism", "auto"),
-                        info="Choose attention implementation. Auto = fastest available. flash_attention_2 (fastest) → sdpa (fast, built-in PyTorch 2.0+) → eager (slowest, always works)"
-                    )
+                        with gr.Column():
 
-                    gr.Markdown("---")
+                            settings_offline_mode = gr.Checkbox(
+                                label="Offline Mode (Use cached models only)",
+                                value=_user_config.get("offline_mode", False),
+                                info="When enabled, only uses models found in models folder"
+                            )
+
+                            model_select = gr.Dropdown(
+                                label="Select Model to Download",
+                                info="Download models directly to models folder (recommended for offline mode)",
+                                choices=[
+                                    "--- Qwen3-TTS Base ---",
+                                    "Qwen3-TTS-12Hz-0.6B-Base",
+                                    "Qwen3-TTS-12Hz-1.7B-Base",
+                                    "--- Qwen3-TTS CustomVoice ---",
+                                    "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                                    "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                                    "--- Qwen3-TTS VoiceDesign ---",
+                                    "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+                                    "--- VibeVoice TTS ---",
+                                    "VibeVoice-1.5B",
+                                    "VibeVoice-Large (4-bit)",
+                                    "VibeVoice-Large",
+                                    "--- VibeVoice ASR ---",
+                                    "VibeVoice-ASR",
+                                ],
+                                value="Qwen3-TTS-12Hz-0.6B-Base"
+                            )
+                            download_btn = gr.Button("Download Model", scale=1)
+
+                            # Mapping from display names to HuggingFace model IDs
+                            MODEL_ID_MAP = {
+                                "Qwen3-TTS-12Hz-0.6B-Base": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                                "Qwen3-TTS-12Hz-1.7B-Base": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+                                "Qwen3-TTS-12Hz-0.6B-CustomVoice": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                                "Qwen3-TTS-12Hz-1.7B-CustomVoice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                                "Qwen3-TTS-12Hz-1.7B-VoiceDesign": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+                                "VibeVoice-1.5B": "FranckyB/VibeVoice-1.5B",
+                                "VibeVoice-Large (4-bit)": "FranckyB/VibeVoice-Large-4bit",
+                                "VibeVoice-Large": "FranckyB/VibeVoice-Large",
+                                "VibeVoice-ASR": "microsoft/VibeVoice-ASR",
+                            }
+
                     gr.Markdown("### Folder Paths")
                     gr.Markdown("Configure where files are stored. Changes apply after clicking **Apply Changes**.")
 
@@ -5140,15 +6058,15 @@ def create_ui():
 
                         with gr.Column():
                             settings_models_folder = gr.Textbox(
-                                label="Models Cache Folder",
+                                label="Models Folder",
                                 value=_user_config.get("models_folder", default_folders["models"]),
-                                info="Folder for downloaded model files (HuggingFace cache)"
+                                info="Folder for trained and downloaded model files"
                             )
                             reset_models_btn = gr.Button("Reset", size="sm")
 
                 with gr.Column():
                     apply_folders_btn = gr.Button("Apply Changes", variant="primary", size="lg")
-                    settings_folder_status = gr.Textbox(
+                    settings_status = gr.Textbox(
                         label="Status",
                         interactive=False,
                         max_lines=10
@@ -5165,6 +6083,13 @@ def create_ui():
                 settings_attention_mechanism.change(
                     lambda x: save_preference("attention_mechanism", x),
                     inputs=[settings_attention_mechanism],
+                    outputs=[]
+                )
+
+                # Save offline mode setting
+                settings_offline_mode.change(
+                    lambda x: save_preference("offline_mode", x),
+                    inputs=[settings_offline_mode],
                     outputs=[]
                 )
 
@@ -5191,6 +6116,17 @@ def create_ui():
                     lambda: reset_folder("models"),
                     outputs=[settings_models_folder]
                 )
+
+                def download_model_clicked(model_display_name):
+                    if not model_display_name or model_display_name.startswith("---"):
+                        return "❌ Please select an actual model (not a category header)"
+                    # Convert display name to full model ID
+                    model_id = MODEL_ID_MAP.get(model_display_name, model_display_name)
+
+                    success, message, path = download_model_from_huggingface(model_id, progress=None)
+
+                    status = f"✓ {message}" if success else f"❌ {message}"
+                    return status
 
                 # Apply folder changes
                 def apply_folder_changes(samples, output, datasets, models):
@@ -5233,10 +6169,16 @@ def create_ui():
                     except Exception as e:
                         return f"❌ Error applying changes: {str(e)}"
 
+                download_btn.click(
+                    fn=download_model_clicked,
+                    inputs=[model_select],
+                    outputs=[settings_status]
+                )
+
                 apply_folders_btn.click(
                     apply_folder_changes,
                     inputs=[settings_samples_folder, settings_output_folder, settings_datasets_folder, settings_models_folder],
-                    outputs=[settings_folder_status]
+                    outputs=[settings_status]
                 )
 
         # ============== Config Auto-Save ==============

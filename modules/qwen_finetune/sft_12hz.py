@@ -28,6 +28,24 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig
 
 target_speaker_embedding = None
+
+def get_attention_implementation():
+    """
+    Try to load model with best available attention implementation.
+    Priority: flash_attention_2 → sdpa → eager
+    """
+    mechanisms = ["flash_attention_2", "sdpa", "eager"]
+    
+    for mechanism in mechanisms:
+        try:
+            # Test if mechanism is available with a minimal config
+            print(f"Trying attention implementation: {mechanism}")
+            return mechanism
+        except Exception:
+            continue
+    
+    return "eager"  # Fallback to eager (always works)
+
 def train():
     global target_speaker_embedding
 
@@ -40,17 +58,44 @@ def train():
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--save_interval", type=int, default=5, help="Save checkpoint every N epochs (0 = save every epoch)")
     parser.add_argument("--speaker_name", type=str, default="speaker_test")
+    parser.add_argument("--attn_implementation", type=str, default="auto", 
+                        choices=["auto", "flash_attention_2", "sdpa", "eager"],
+                        help="Attention implementation (auto = try flash_attention_2 → sdpa → eager)")
     args = parser.parse_args()
 
     accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision="bf16")
 
     MODEL_PATH = args.init_model_path
 
-    qwen3tts = Qwen3TTSModel.from_pretrained(
-        MODEL_PATH,
-        dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-    )
+    # Determine attention implementation
+    if args.attn_implementation == "auto":
+        attn_impl = None
+        mechanisms = ["flash_attention_2", "sdpa", "eager"]
+        for mechanism in mechanisms:
+            try:
+                print(f"Attempting to load model with {mechanism}...")
+                qwen3tts = Qwen3TTSModel.from_pretrained(
+                    MODEL_PATH,
+                    dtype=torch.bfloat16,
+                    attn_implementation=mechanism,
+                )
+                attn_impl = mechanism
+                print(f"✓ Successfully loaded with {mechanism}")
+                break
+            except Exception as e:
+                print(f"✗ {mechanism} not available: {e}")
+                continue
+        
+        if attn_impl is None:
+            raise RuntimeError("Failed to load model with any attention mechanism")
+    else:
+        # User specified attention implementation
+        print(f"Loading model with specified attention: {args.attn_implementation}")
+        qwen3tts = Qwen3TTSModel.from_pretrained(
+            MODEL_PATH,
+            dtype=torch.bfloat16,
+            attn_implementation=args.attn_implementation,
+        )
     config = AutoConfig.from_pretrained(MODEL_PATH)
 
     train_data = open(args.train_jsonl).readlines()
