@@ -2615,9 +2615,6 @@ def extract_audio_from_video(video_path):
         filename = f"extracted_audio_{timestamp}.wav"
         audio_output = TEMP_DIR / filename
 
-        # Prepare fallback if needed
-        using_fallback = False
-
         # Use ffmpeg to extract audio
         cmd = [
             'ffmpeg',
@@ -2714,7 +2711,10 @@ def normalize_audio(audio_file):
                  sf.write(str(temp_path), normalized, sr)
             except Exception as fbe:
                  print(f"Fallback save failed: {fbe}")
-                 raise e
+                 raise RuntimeError(
+                     f"Failed to save normalized audio to both {TEMP_DIR} and system temp. "
+                     f"Primary error: {e}; fallback error: {fbe}"
+                 ) from fbe
 
         # Force file flush on Windows to prevent connection reset errors
         if platform.system() == "Windows":
@@ -2766,7 +2766,8 @@ def clean_audio(audio_file, progress=gr.Progress()):
 
     if not os.path.exists(audio_file):
         print(f"Error: Audio file not found at path: {audio_file}")
-        return audio_file # Return original path so UI doesn't break
+        # Return None so the Gradio Audio component does not try to load a nonexistent path
+        return None
 
     if not DEEPFILTER_AVAILABLE:
         print("DeepFilterNet not installed. Skipping cleaning.")
@@ -3435,18 +3436,18 @@ def convert_audio_to_finetune_format(audio_path, progress=gr.Progress()):
 
         # Replace original with converted
         if temp_output.exists():
-            import shutil
             try:
                 if output_path.exists():
                     output_path.unlink()
                 shutil.move(str(temp_output), str(output_path))
-            except Exception as move_err:
+            except Exception:
                  if temp_output.exists():
                      try:
                          temp_output.unlink()
-                     except:
+                     except Exception:
+                         # Ignore errors during best-effort cleanup of the temporary file
                          pass
-                 raise move_err
+                 raise
 
         progress(1.0, desc="Done!")
         return str(output_path), "Converted to 24kHz 16-bit mono"
