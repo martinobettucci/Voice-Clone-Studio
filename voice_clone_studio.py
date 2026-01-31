@@ -215,11 +215,17 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 
 # Clear temp folder on launch
-for f in TEMP_DIR.iterdir():
-    if f.is_file():
-        f.unlink()
-    elif f.is_dir():
-        shutil.rmtree(f)
+try:
+    for f in TEMP_DIR.iterdir():
+        try:
+            if f.is_file():
+                f.unlink()
+            elif f.is_dir():
+                shutil.rmtree(f)
+        except Exception:
+            pass # Ignore individual file errors
+except Exception as e:
+    print(f"Warning: Could not cleanup temp folder: {e}")
 
 
 # Global model cache - now stores (model, size) tuples
@@ -2606,7 +2612,11 @@ def extract_audio_from_video(video_path):
 
         # Create temp output path
         timestamp = datetime.now().strftime('%H%M%S')
-        audio_output = TEMP_DIR / f"extracted_audio_{timestamp}.wav"
+        filename = f"extracted_audio_{timestamp}.wav"
+        audio_output = TEMP_DIR / filename
+
+        # Prepare fallback if needed
+        using_fallback = False
 
         # Use ffmpeg to extract audio
         cmd = [
@@ -2621,6 +2631,13 @@ def extract_audio_from_video(video_path):
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Check if failed due to permission/path issues
+        if result.returncode != 0 and ("Permission denied" in result.stderr or "No such file" in result.stderr):
+             print(f"ffmpeg failed writing to {audio_output}: {result.stderr}. Using system temp.")
+             audio_output = Path(tempfile.gettempdir()) / filename
+             cmd[-1] = str(audio_output)
+             result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode == 0 and audio_output.exists():
             return str(audio_output)
@@ -2683,8 +2700,21 @@ def normalize_audio(audio_file):
         else:
             normalized = data
 
-        temp_path = TEMP_DIR / f"normalized_{datetime.now().strftime('%H%M%S')}.wav"
-        sf.write(str(temp_path), normalized, sr)
+        timestamp = datetime.now().strftime('%H%M%S')
+        filename = f"normalized_{timestamp}.wav"
+        temp_path = TEMP_DIR / filename
+        
+        try:
+            sf.write(str(temp_path), normalized, sr)
+        except (PermissionError, OSError) as e:
+            # Fallback to system temp
+            try:
+                 print(f"⚠ Warning: Could not write to {temp_path} ({e}). Falling back to system temp.")
+                 temp_path = Path(tempfile.gettempdir()) / filename
+                 sf.write(str(temp_path), normalized, sr)
+            except Exception as fbe:
+                 print(f"Fallback save failed: {fbe}")
+                 raise e
 
         # Force file flush on Windows to prevent connection reset errors
         if platform.system() == "Windows":
@@ -2708,8 +2738,19 @@ def convert_to_mono(audio_file):
         # check if stereo, if mono return original
         if len(data.shape) > 1 and data.shape[1] > 1:
             mono = np.mean(data, axis=1)
-            temp_path = TEMP_DIR / f"mono_{datetime.now().strftime('%H%M%S')}.wav"
-            sf.write(str(temp_path), mono, sr)
+            
+            timestamp = datetime.now().strftime('%H%M%S')
+            filename = f"mono_{timestamp}.wav"
+            temp_path = TEMP_DIR / filename
+            
+            try:
+                sf.write(str(temp_path), mono, sr)
+            except (PermissionError, OSError) as e:
+                # Fallback to system temp
+                print(f"⚠ Warning: Could not write to {temp_path} ({e}). Falling back to system temp.")
+                temp_path = Path(tempfile.gettempdir()) / filename
+                sf.write(str(temp_path), mono, sr)
+                
             return str(temp_path)
         else:
             return audio_file
@@ -3364,7 +3405,13 @@ def convert_audio_to_finetune_format(audio_path, progress=gr.Progress()):
 
         # Use ffmpeg to convert (already installed)
         output_path = Path(audio_path)
-        temp_output = output_path.parent / f"temp_{output_path.name}"
+        
+        # Use system temp for intermediate file to avoid finding permission issues
+        # in the dataset folder during conversion
+        import tempfile
+        fd, temp_path = tempfile.mkstemp(suffix=output_path.suffix)
+        os.close(fd)
+        temp_output = Path(temp_path)
 
         # ffmpeg command: convert to 24kHz, mono, 16-bit PCM
         cmd = [
@@ -3379,12 +3426,27 @@ def convert_audio_to_finetune_format(audio_path, progress=gr.Progress()):
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
+            if temp_output.exists():
+                try:
+                    temp_output.unlink()
+                except:
+                    pass
             return None, f"❌ ffmpeg error: {result.stderr}"
 
         # Replace original with converted
         if temp_output.exists():
-            output_path.unlink()
-            temp_output.rename(output_path)
+            import shutil
+            try:
+                if output_path.exists():
+                    output_path.unlink()
+                shutil.move(str(temp_output), str(output_path))
+            except Exception as move_err:
+                 if temp_output.exists():
+                     try:
+                         temp_output.unlink()
+                     except:
+                         pass
+                 raise move_err
 
         progress(1.0, desc="Done!")
         return str(output_path), "Converted to 24kHz 16-bit mono"
