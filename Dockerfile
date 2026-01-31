@@ -92,6 +92,7 @@ ENV PATH="/home/user/app/venv/bin:$PATH" \
 COPY --chown=1001:1001 --from=builder /home/user/app/venv /home/user/app/venv
 COPY ./modules /home/user/app/modules
 COPY ./docs /home/user/app/docs
+COPY ./tests /home/user/app/tests
 COPY ./voice_clone_studio.py /home/user/app/voice_clone_studio.py
 WORKDIR /home/user/app
 EXPOSE 7860

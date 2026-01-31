@@ -6904,7 +6904,7 @@ if __name__ == "__main__":
 
     app, theme, custom_css, modal_css, modal_head, input_css, input_head = create_ui()
     app.launch(
-        server_name="127.0.0.1",
+        server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
         server_port=7860,
         share=False,
         inbrowser=True,

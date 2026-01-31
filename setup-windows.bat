@@ -124,8 +124,7 @@ echo Option 1 - Build from source (requires C++ compiler):
 echo   pip install flash-attn --no-build-isolation
 echo.
 echo Option 2 - Use prebuilt wheel (faster, no compiler needed):
-echo   Visit: https://github.com/bdashore3/flash-attention/releases
-echo   Download the wheel matching your Python version
+echo   Download a wheel matching your Python version
 echo   Then: pip install downloaded-wheel-file.whl
 echo.
 echo ========================================
