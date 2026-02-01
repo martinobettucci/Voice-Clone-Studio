@@ -1554,19 +1554,19 @@ def generate_voice_design(text_to_generate, language, instruct, seed,
 
         progress(0.8, desc=f"Saving audio ({'output' if save_to_output else 'temp'})...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # Ensure audio is numpy array (move to CPU if tensor)
         audio_data = wavs[0]
         if hasattr(audio_data, "cpu"):
             audio_data = audio_data.cpu().numpy()
         elif hasattr(audio_data, "numpy"):
             audio_data = audio_data.numpy()
-            
+
         if save_to_output:
             out_file = OUTPUT_DIR / f"voice_design_{timestamp}.wav"
         else:
             out_file = TEMP_DIR / f"voice_design_{timestamp}.wav"
-            
+
         try:
             # Ensure directory exists just in case
             if not out_file.parent.exists():
@@ -2631,13 +2631,13 @@ def extract_audio_from_video(video_path):
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
+
         # Check if failed due to permission/path issues
         if result.returncode != 0 and ("Permission denied" in result.stderr or "No such file" in result.stderr):
-             print(f"ffmpeg failed writing to {audio_output}: {result.stderr}. Using system temp.")
-             audio_output = Path(tempfile.gettempdir()) / filename
-             cmd[-1] = str(audio_output)
-             result = subprocess.run(cmd, capture_output=True, text=True)
+            print(f"ffmpeg failed writing to {audio_output}: {result.stderr}. Using system temp.")
+            audio_output = Path(tempfile.gettempdir()) / filename
+            cmd[-1] = str(audio_output)
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode == 0 and audio_output.exists():
             return str(audio_output)
@@ -2688,10 +2688,10 @@ def on_prep_audio_load(audio_file):
 def normalize_audio(audio_file):
     """Normalize audio levels."""
     if audio_file is None:
-        return None
+        return None, "No audio file provided"
 
     if not os.path.exists(audio_file):
-        return None
+        return None, "Audio file not found"
 
     try:
         data, sr = sf.read(audio_file)
@@ -2706,40 +2706,40 @@ def normalize_audio(audio_file):
         timestamp = datetime.now().strftime('%H%M%S')
         filename = f"normalized_{timestamp}.wav"
         temp_path = TEMP_DIR / filename
-        
+
         try:
             sf.write(str(temp_path), normalized, sr)
         except (PermissionError, OSError) as e:
             # Fallback to system temp
             try:
-                 print(f"⚠ Warning: Could not write to {temp_path} ({e}). Falling back to system temp.")
-                 temp_path = Path(tempfile.gettempdir()) / filename
-                 sf.write(str(temp_path), normalized, sr)
+                print(f"⚠ Warning: Could not write to {temp_path} ({e}). Falling back to system temp.")
+                temp_path = Path(tempfile.gettempdir()) / filename
+                sf.write(str(temp_path), normalized, sr)
             except Exception as fbe:
-                 print(f"Fallback save failed: {fbe}")
-                 raise RuntimeError(
-                     f"Failed to save normalized audio to both {TEMP_DIR} and system temp. "
-                     f"Primary error: {e}; fallback error: {fbe}"
-                 ) from fbe
+                print(f"Fallback save failed: {fbe}")
+                raise RuntimeError(
+                    f"Failed to save normalized audio to both {TEMP_DIR} and system temp. "
+                    f"Primary error: {e}; fallback error: {fbe}"
+                ) from fbe
 
         # Force file flush on Windows to prevent connection reset errors
         if platform.system() == "Windows":
             time.sleep(0.1)  # Small delay to ensure file is fully written
 
-        return str(temp_path)
+        return str(temp_path), "Audio normalized successfully"
 
     except Exception as e:
         print(f"Error normalizing audio: {e}")
-        return audio_file
+        return audio_file, "Error normalizing audio"
 
 
 def convert_to_mono(audio_file):
     """Convert stereo audio to mono."""
     if audio_file is None:
-        return None
+        return None, "No audio file provided"
 
     if not os.path.exists(audio_file):
-        return None
+        return None, "Audio file not found"
 
     try:
         data, sr = sf.read(audio_file)
@@ -2747,11 +2747,11 @@ def convert_to_mono(audio_file):
         # check if stereo, if mono return original
         if len(data.shape) > 1 and data.shape[1] > 1:
             mono = np.mean(data, axis=1)
-            
+
             timestamp = datetime.now().strftime('%H%M%S')
             filename = f"mono_{timestamp}.wav"
             temp_path = TEMP_DIR / filename
-            
+
             try:
                 sf.write(str(temp_path), mono, sr)
             except (PermissionError, OSError) as e:
@@ -2759,29 +2759,29 @@ def convert_to_mono(audio_file):
                 print(f"⚠ Warning: Could not write to {temp_path} ({e}). Falling back to system temp.")
                 temp_path = Path(tempfile.gettempdir()) / filename
                 sf.write(str(temp_path), mono, sr)
-                
-            return str(temp_path)
+
+            return str(temp_path), "Converted to mono successfully"
         else:
-            return audio_file
+            return audio_file, "Audio is already mono"
 
     except Exception as e:
         print(f"Error converting to mono: {e}")
-        return audio_file
+        return audio_file, "Error converting to mono"
 
 
 def clean_audio(audio_file, progress=gr.Progress()):
     """Clean audio using DeepFilterNet."""
     if audio_file is None:
-        return None
+        return None, "No audio file provided"
 
     if not os.path.exists(audio_file):
         print(f"Error: Audio file not found at path: {audio_file}")
         # Return None so the Gradio Audio component does not try to load a nonexistent path
-        return None
+        return None, "Audio file not found"
 
     if not DEEPFILTER_AVAILABLE:
         print("DeepFilterNet not installed. Skipping cleaning.")
-        return audio_file
+        return audio_file, "DeepFilterNet not available."
 
     try:
         progress(0.1, desc="Loading Audio Cleaner...")
@@ -2807,25 +2807,25 @@ def clean_audio(audio_file, progress=gr.Progress()):
 
         # Robust save with fallback for permission/system errors
         try:
-             # Try saving to configured temp dir
+            # Try saving to configured temp dir
             save_audio(str(output_path), enhanced_audio, target_sr)
         except (PermissionError, OSError, RuntimeError) as e:
             msg = str(e)
             if "Permission denied" in msg or "System error" in msg:
-                 import tempfile
-                 print(f"⚠ Warning: Could not write to {output_path} ({msg}). Falling back to system temp.")
-                 output_path = Path(tempfile.gettempdir()) / output_filename
-                 save_audio(str(output_path), enhanced_audio, target_sr)
+                import tempfile
+                print(f"⚠ Warning: Could not write to {output_path} ({msg}). Falling back to system temp.")
+                output_path = Path(tempfile.gettempdir()) / output_filename
+                save_audio(str(output_path), enhanced_audio, target_sr)
             else:
                 raise e
 
         progress(1.0, desc="Done!")
-        return str(output_path)
+        return str(output_path), "Cleaned audio successfully"
 
     except Exception as e:
         print(f"Error cleaning audio: {e}")
         # Return original if cleaning fails
-        return audio_file
+        return audio_file, "Error cleaning audio"
 
 
 def transcribe_audio(audio_file, whisper_language, transcribe_model, progress=gr.Progress()):
@@ -3416,7 +3416,7 @@ def convert_audio_to_finetune_format(audio_path, progress=gr.Progress()):
 
         # Use ffmpeg to convert (already installed)
         output_path = Path(audio_path)
-        
+
         # Use system temp for intermediate file to avoid finding permission issues
         # in the dataset folder during conversion
         import tempfile
@@ -5856,21 +5856,21 @@ def create_ui():
                 normalize_btn.click(
                     normalize_audio,
                     inputs=[prep_audio_editor],
-                    outputs=[prep_audio_editor]
+                    outputs=[prep_audio_editor, save_status]
                 )
 
                 # Convert to mono
                 mono_btn.click(
                     convert_to_mono,
                     inputs=[prep_audio_editor],
-                    outputs=[prep_audio_editor]
+                    outputs=[prep_audio_editor, save_status]
                 )
 
                 # Clean audio
                 clean_btn.click(
                     clean_audio,
                     inputs=[prep_audio_editor],
-                    outputs=[prep_audio_editor]
+                    outputs=[prep_audio_editor, save_status]
                 )
 
                 # Transcribe
