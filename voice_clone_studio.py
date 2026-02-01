@@ -6201,21 +6201,21 @@ def create_ui():
                 finetune_normalize_btn.click(
                     normalize_audio,
                     inputs=[finetune_audio_preview],
-                    outputs=[finetune_audio_preview]
+                    outputs=[finetune_audio_preview, finetune_status]
                 )
 
                 # Convert to mono
                 finetune_mono_btn.click(
                     convert_to_mono,
                     inputs=[finetune_audio_preview],
-                    outputs=[finetune_audio_preview]
+                    outputs=[finetune_audio_preview, finetune_status]
                 )
 
                 # Clean audio
                 finetune_clean_btn.click(
                     clean_audio,
                     inputs=[finetune_audio_preview],
-                    outputs=[finetune_audio_preview]
+                    outputs=[finetune_audio_preview, finetune_status]
                 )
 
                 save_trimmed_event = save_trimmed_btn.click(
