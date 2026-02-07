@@ -16,6 +16,11 @@ if __name__ == "__main__":
 import gradio as gr
 from pathlib import Path
 from modules.core_components.tool_base import Tool, ToolConfig
+from modules.core_components.help_page import (
+    show_voice_clone_help, show_conversation_help, show_voice_presets_help,
+    show_voice_design_help, show_prep_samples_help, show_finetune_help,
+    show_train_help, show_tips_help
+)
 
 
 class SettingsTool(Tool):
@@ -36,146 +41,175 @@ class SettingsTool(Tool):
 
         # Extract needed items from shared_state
         _user_config = shared_state.get('_user_config', {})
+        format_help_html = shared_state.get('format_help_html')
 
         with gr.TabItem("⚙️"):
-            gr.Markdown("# ⚙️ Settings")
-            gr.Markdown("Configure global application settings")
+            with gr.Tabs():
+                with gr.TabItem("Settings"):
+                    gr.Markdown("# ⚙️ Settings")
+                    gr.Markdown("Configure global application settings")
 
-            gr.Markdown("### Model Loading")
+                    gr.Markdown("### Model Loading")
 
-            with gr.Column():
-                with gr.Row():
                     with gr.Column():
-                        components['settings_low_cpu_mem'] = gr.Checkbox(
-                            label="Low CPU Memory Usage (Slower loading time)",
-                            value=_user_config.get("low_cpu_mem_usage", False),
-                            info="Reduces CPU RAM usage when loading models by loading weights in smaller chunks. Tradeoff: slightly slower model loading time."
-                        )
-
-                        components['settings_attention_mechanism'] = gr.Dropdown(
-                            label="Attention Mechanism",
-                            choices=["auto", "flash_attention_2", "sdpa", "eager"],
-                            value=_user_config.get("attention_mechanism", "auto"),
-                            info="Choose attention implementation.\nAuto = fastest available. flash_attention_2 (fastest) → sdpa (fast, built-in PyTorch 2.0+) → eager (slowest, always works)"
-                        )
-
                         with gr.Row():
-                            components['settings_audio_notifications'] = gr.Checkbox(
-                                label="Audio Notifications",
-                                value=_user_config.get("browser_notifications", True),
-                                info="Play sound when audio generation completes"
-                            )
+                            with gr.Column():
+                                components['settings_low_cpu_mem'] = gr.Checkbox(
+                                    label="Low CPU Memory Usage (Slower loading time)",
+                                    value=_user_config.get("low_cpu_mem_usage", False),
+                                    info="Reduces CPU RAM usage when loading models by loading weights in smaller chunks. Tradeoff: slightly slower model loading time."
+                                )
 
-                    with gr.Column():
-                        components['settings_offline_mode'] = gr.Checkbox(
-                            label="Offline Mode (Use cached models only)",
-                            value=_user_config.get("offline_mode", False),
-                            info="When enabled, only uses models found in models folder"
-                        )
+                                components['settings_attention_mechanism'] = gr.Dropdown(
+                                    label="Attention Mechanism",
+                                    choices=["auto", "flash_attention_2", "sdpa", "eager"],
+                                    value=_user_config.get("attention_mechanism", "auto"),
+                                    info="Choose attention implementation.\nAuto = fastest available. flash_attention_2 (fastest) → sdpa (fast, built-in PyTorch 2.0+) → eager (slowest, always works)"
+                                )
 
-                        components['model_select'] = gr.Dropdown(
-                            label="Select Model to Download",
-                            info="Download models directly to models folder (recommended for offline mode)\nWhisper cannot be auto-downloaded, copy local copy of Whisper in ./models.",
-                            choices=[
-                                "--- Qwen3-TTS Base ---",
-                                "Qwen3-TTS-12Hz-0.6B-Base",
-                                "Qwen3-TTS-12Hz-1.7B-Base",
-                                "--- Qwen3-TTS CustomVoice ---",
-                                "Qwen3-TTS-12Hz-0.6B-CustomVoice",
-                                "Qwen3-TTS-12Hz-1.7B-CustomVoice",
-                                "--- Qwen3-TTS VoiceDesign ---",
-                                "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-                                "--- VibeVoice TTS ---",
-                                "VibeVoice-1.5B",
-                                "VibeVoice-Large (4-bit)",
-                                "VibeVoice-Large",
-                                "--- VibeVoice ASR ---",
-                                "VibeVoice-ASR",
-                            ],
-                            value="Qwen3-TTS-12Hz-0.6B-Base"
-                        )
-                        components['download_btn'] = gr.Button("Download Model", scale=1)
+                                with gr.Row():
+                                    components['settings_audio_notifications'] = gr.Checkbox(
+                                        label="Audio Notifications",
+                                        value=_user_config.get("browser_notifications", True),
+                                        info="Play sound when audio generation completes"
+                                    )
 
-                        # Mapping from display names to HuggingFace model IDs
-                        components['MODEL_ID_MAP'] = {
-                            "Qwen3-TTS-12Hz-0.6B-Base": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-                            "Qwen3-TTS-12Hz-1.7B-Base": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-                            "Qwen3-TTS-12Hz-0.6B-CustomVoice": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-                            "Qwen3-TTS-12Hz-1.7B-CustomVoice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-                            "Qwen3-TTS-12Hz-1.7B-VoiceDesign": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-                            "VibeVoice-1.5B": "FranckyB/VibeVoice-1.5B",
-                            "VibeVoice-Large (4-bit)": "FranckyB/VibeVoice-Large-4bit",
-                            "VibeVoice-Large": "FranckyB/VibeVoice-Large",
-                            "VibeVoice-ASR": "microsoft/VibeVoice-ASR",
+                            with gr.Column():
+                                components['settings_offline_mode'] = gr.Checkbox(
+                                    label="Offline Mode (Use cached models only)",
+                                    value=_user_config.get("offline_mode", False),
+                                    info="When enabled, only uses models found in models folder"
+                                )
+
+                                components['model_select'] = gr.Dropdown(
+                                    label="Select Model to Download",
+                                    info="Download models directly to models folder (recommended for offline mode)\nWhisper cannot be auto-downloaded, copy local copy of Whisper in ./models.",
+                                    choices=[
+                                        "--- Qwen3-TTS Base ---",
+                                        "Qwen3-TTS-12Hz-0.6B-Base",
+                                        "Qwen3-TTS-12Hz-1.7B-Base",
+                                        "--- Qwen3-TTS CustomVoice ---",
+                                        "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                                        "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                                        "--- Qwen3-TTS VoiceDesign ---",
+                                        "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+                                        "--- VibeVoice TTS ---",
+                                        "VibeVoice-1.5B",
+                                        "VibeVoice-Large (4-bit)",
+                                        "VibeVoice-Large",
+                                        "--- VibeVoice ASR ---",
+                                        "VibeVoice-ASR",
+                                    ],
+                                    value="Qwen3-TTS-12Hz-0.6B-Base"
+                                )
+                                components['download_btn'] = gr.Button("Download Model", scale=1)
+
+                                # Mapping from display names to HuggingFace model IDs
+                                components['MODEL_ID_MAP'] = {
+                                    "Qwen3-TTS-12Hz-0.6B-Base": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                                    "Qwen3-TTS-12Hz-1.7B-Base": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+                                    "Qwen3-TTS-12Hz-0.6B-CustomVoice": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                                    "Qwen3-TTS-12Hz-1.7B-CustomVoice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                                    "Qwen3-TTS-12Hz-1.7B-VoiceDesign": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+                                    "VibeVoice-1.5B": "FranckyB/VibeVoice-1.5B",
+                                    "VibeVoice-Large (4-bit)": "FranckyB/VibeVoice-Large-4bit",
+                                    "VibeVoice-Large": "FranckyB/VibeVoice-Large",
+                                    "VibeVoice-ASR": "microsoft/VibeVoice-ASR",
+                                }
+
+                        gr.Markdown("### Folder Paths")
+                        gr.Markdown("Configure where files are stored. Changes apply after clicking **Apply Changes**.")
+
+                        # Default folder paths
+                        default_folders = {
+                            "samples": "samples",
+                            "output": "output",
+                            "datasets": "datasets",
+                            "temp": "temp",
+                            "models": "models"
                         }
+                        components['default_folders'] = default_folders
 
-                gr.Markdown("### Folder Paths")
-                gr.Markdown("Configure where files are stored. Changes apply after clicking **Apply Changes**.")
+                        # Row 1: Samples, Datasets and Output folders
+                        with gr.Row():
+                            with gr.Column():
+                                components['settings_samples_folder'] = gr.Textbox(
+                                    label="Voice Samples Folder",
+                                    value=_user_config.get("samples_folder", default_folders["samples"]),
+                                    info="Folder for voice sample files (.wav + .json)"
+                                )
+                                components['reset_samples_btn'] = gr.Button("Reset", size="sm")
 
-                # Default folder paths
-                default_folders = {
-                    "samples": "samples",
-                    "output": "output",
-                    "datasets": "datasets",
-                    "temp": "temp",
-                    "models": "models"
-                }
-                components['default_folders'] = default_folders
+                            with gr.Column():
+                                components['settings_output_folder'] = gr.Textbox(
+                                    label="Output Folder",
+                                    value=_user_config.get("output_folder", default_folders["output"]),
+                                    info="Folder for generated audio files"
+                                )
+                                components['reset_output_btn'] = gr.Button("Reset", size="sm")
 
-                # Row 1: Samples, Datasets and Output folders
-                with gr.Row():
+                            with gr.Column():
+                                components['settings_datasets_folder'] = gr.Textbox(
+                                    label="Datasets Folder",
+                                    value=_user_config.get("datasets_folder", default_folders["datasets"]),
+                                    info="Folder for training/finetuning datasets"
+                                )
+                                components['reset_datasets_btn'] = gr.Button("Reset", size="sm")
+
+                        # Row 2: Models and Trained Models folder
+                        with gr.Row():
+                            with gr.Column():
+                                components['settings_models_folder'] = gr.Textbox(
+                                    label="Downloaded Models Folder",
+                                    value=_user_config.get("models_folder", default_folders["models"]),
+                                    info="Folder for downloaded model files (Qwen, VibeVoice)"
+                                )
+                                components['reset_models_btn'] = gr.Button("Reset", size="sm")
+
+                            with gr.Column():
+                                components['settings_trained_models_folder'] = gr.Textbox(
+                                    label="Trained Models Folder",
+                                    value=_user_config.get("trained_models_folder", default_folders["models"]),
+                                    info="Folder for your custom trained models"
+                                )
+                                components['reset_trained_models_btn'] = gr.Button("Reset", size="sm")
+
+                            with gr.Column():
+                                gr.Markdown("")
+
                     with gr.Column():
-                        components['settings_samples_folder'] = gr.Textbox(
-                            label="Voice Samples Folder",
-                            value=_user_config.get("samples_folder", default_folders["samples"]),
-                            info="Folder for voice sample files (.wav + .json)"
+                        components['apply_folders_btn'] = gr.Button("Apply Changes", variant="primary", size="lg")
+                        components['settings_status'] = gr.Textbox(
+                            label="Status",
+                            interactive=False,
+                            max_lines=10
                         )
-                        components['reset_samples_btn'] = gr.Button("Reset", size="sm")
 
-                    with gr.Column():
-                        components['settings_output_folder'] = gr.Textbox(
-                            label="Output Folder",
-                            value=_user_config.get("output_folder", default_folders["output"]),
-                            info="Folder for generated audio files"
-                        )
-                        components['reset_output_btn'] = gr.Button("Reset", size="sm")
+                with gr.TabItem("Help Guide"):
+                    gr.Markdown("# Voice Clone Studio - Help & Guide")
 
-                    with gr.Column():
-                        components['settings_datasets_folder'] = gr.Textbox(
-                            label="Datasets Folder",
-                            value=_user_config.get("datasets_folder", default_folders["datasets"]),
-                            info="Folder for training/finetuning datasets"
-                        )
-                        components['reset_datasets_btn'] = gr.Button("Reset", size="sm")
+                    components['help_topic'] = gr.Radio(
+                        choices=[
+                            "Voice Clone",
+                            "Voice Presets",
+                            "Conversation",
+                            "Voice Design",
+                            "Prep Samples",
+                            "Finetune Dataset",
+                            "Train Model",
+                            "Tips & Tricks"
+                        ],
+                        value="Voice Clone",
+                        show_label=False,
+                        interactive=True,
+                        container=False
+                    )
 
-                # Row 2: Models and Trained Models folder
-                with gr.Row():
-                    with gr.Column():
-                        components['settings_models_folder'] = gr.Textbox(
-                            label="Downloaded Models Folder",
-                            value=_user_config.get("models_folder", default_folders["models"]),
-                            info="Folder for downloaded model files (Qwen, VibeVoice)"
-                        )
-                        components['reset_models_btn'] = gr.Button("Reset", size="sm")
-
-                    with gr.Column():
-                        components['settings_trained_models_folder'] = gr.Textbox(
-                            label="Trained Models Folder",
-                            value=_user_config.get("trained_models_folder", default_folders["models"]),
-                            info="Folder for your custom trained models"
-                        )
-                        components['reset_trained_models_btn'] = gr.Button("Reset", size="sm")
-
-                    with gr.Column():
-                        gr.Markdown("")
-
-            with gr.Column():
-                components['apply_folders_btn'] = gr.Button("Apply Changes", variant="primary", size="lg")
-                components['settings_status'] = gr.Textbox(
-                    label="Status",
-                    interactive=False,
-                    max_lines=10
-                )
+                    components['help_content'] = gr.HTML(
+                        value=format_help_html(show_voice_clone_help()),
+                        container=True,
+                        padding=True
+                    )
 
         return components
 
@@ -188,6 +222,7 @@ class SettingsTool(Tool):
         save_preference = shared_state.get('save_preference')
         save_config = shared_state.get('save_config')
         download_model_from_huggingface = shared_state.get('download_model_from_huggingface')
+        format_help_html = shared_state.get('format_help_html')
 
         # Save low CPU memory setting
         components['settings_low_cpu_mem'].change(
@@ -302,6 +337,26 @@ class SettingsTool(Tool):
             apply_folder_changes,
             inputs=[components['settings_samples_folder'], components['settings_output_folder'], components['settings_datasets_folder'], components['settings_models_folder'], components['settings_trained_models_folder']],
             outputs=[components['settings_status']]
+        )
+
+        # Help Guide topic selector
+        def show_help(topic):
+            help_map = {
+                "Voice Clone": show_voice_clone_help,
+                "Conversation": show_conversation_help,
+                "Voice Presets": show_voice_presets_help,
+                "Voice Design": show_voice_design_help,
+                "Prep Samples": show_prep_samples_help,
+                "Finetune Dataset": show_finetune_help,
+                "Train Model": show_train_help,
+                "Tips & Tricks": show_tips_help
+            }
+            return format_help_html(help_map[topic]())
+
+        components['help_topic'].change(
+            fn=show_help,
+            inputs=components['help_topic'],
+            outputs=components['help_content']
         )
 
 

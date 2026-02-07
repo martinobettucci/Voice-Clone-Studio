@@ -9,13 +9,6 @@ ARCHITECTURE:
 - Tools import get_tts_manager() / get_asr_manager() directly (singleton pattern)
 - Tools implement their own generation logic, file I/O, progress updates
 - This file only provides: directories, constants, shared utilities, modals
-- No wrapper functions for generation - tools handle everything themselves
-
-REFACTORED TOOLS (fully independent):
-✅ Voice Design - calls tts_manager.generate_voice_design()
-✅ Voice Clone - calls tts_manager.get_qwen3_custom_voice() / get_vibevoice_tts()
-✅ Voice Presets - calls tts_manager.get_qwen3_custom_voice()
-🔄 Conversation - TODO: needs 3 conversation handlers added
 """
 
 import os
@@ -25,7 +18,7 @@ import torch
 import json
 import random
 import tempfile
-from datetime import datetime
+import time
 
 import gradio as gr
 
@@ -121,19 +114,6 @@ from modules.core_components.constants import (
     VIBEVOICE_GENERATION_DEFAULTS,
 )
 
-# Check optional dependencies
-try:
-    import whisper
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
-
-try:
-    from df.enhance import enhance, init_df
-    DEEPFILTER_AVAILABLE = True
-except ImportError:
-    DEEPFILTER_AVAILABLE = False
-
 # ============================================================================
 # GLOBAL MANAGERS - Tools access via shared_state
 # ============================================================================
@@ -198,8 +178,6 @@ def create_ui():
                 'DEFAULT_VOICE_CLONE_MODEL': DEFAULT_VOICE_CLONE_MODEL,
                 'LANGUAGES': LANGUAGES,
                 'CUSTOM_VOICE_SPEAKERS': CUSTOM_VOICE_SPEAKERS,
-                'WHISPER_AVAILABLE': WHISPER_AVAILABLE,
-                'DEEPFILTER_AVAILABLE': DEEPFILTER_AVAILABLE
             },
             managers={
                 'tts_manager': _tts_manager,
@@ -212,18 +190,29 @@ def create_ui():
         # ============================================================
         # LOAD ALL MODULAR TOOLS
         # ============================================================
-        tool_components = create_enabled_tools(shared_state)
+        with gr.Tabs(elem_id="main-tabs"):
+            tool_components = create_enabled_tools(shared_state)
         setup_tool_events(tool_components, shared_state)
 
         # Wire up unload button
         def on_unload_all():
             _tts_manager.unload_all()
             _asr_manager.unload_all()
-            return "✓ All models unloaded. VRAM freed."
+            return "VRAM freed."
+
+        # Clear status after 3 seconds to keep UI tidy
+        def clear_status():
+            time.sleep(3)
+            return " "
 
         unload_all_btn.click(
             on_unload_all,
             outputs=[unload_status]
+        ).then(
+            fn=clear_status,
+            inputs=[],
+            outputs=[unload_status],
+            show_progress="hidden"
         )
 
     return app
@@ -236,7 +225,7 @@ if __name__ == "__main__":
         server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
         server_port=7860,
         share=False,
-        inbrowser=False,  # Don't auto-open browser to avoid SSL issues
+        inbrowser=True,
         theme=theme,
         css=TRIGGER_HIDE_CSS + CONFIRMATION_MODAL_CSS + INPUT_MODAL_CSS,
         head=CONFIRMATION_MODAL_HEAD + INPUT_MODAL_HEAD

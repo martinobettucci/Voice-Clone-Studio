@@ -11,6 +11,6 @@ echo.
 echo.
 echo.
 
-python voice_clone_studio_minimal.py
+python voice_clone_studio.py
 
 pause

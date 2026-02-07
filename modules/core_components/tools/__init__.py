@@ -14,20 +14,17 @@ from pathlib import Path
 from modules.core_components.tool_base import ToolConfig, Tool
 
 # Import all tool modules here
-from modules.core_components.tools import help_page
 from modules.core_components.tools import output_history
 from modules.core_components.tools import voice_design
 from modules.core_components.tools import voice_clone
 from modules.core_components.tools import voice_presets
 from modules.core_components.tools import conversation
 from modules.core_components.tools import prep_samples
-from modules.core_components.tools import finetune_dataset
 from modules.core_components.tools import train_model
 from modules.core_components.tools import settings
 
 # Registry of available tools
 # Format: 'tool_name': (module, ToolConfig)
-# TODO: Add other tools as they are refactored to be self-contained
 ALL_TOOLS = {
     'voice_clone': (voice_clone, voice_clone.VoiceCloneTool.config),
     'voice_presets': (voice_presets, voice_presets.VoicePresetsTool.config),
@@ -35,23 +32,9 @@ ALL_TOOLS = {
     'voice_design': (voice_design, voice_design.VoiceDesignTool.config),
     'prep_samples': (prep_samples, prep_samples.PrepSamplesTool.config),
     'output_history': (output_history, output_history.OutputHistoryTool.config),
+    'train_model': (train_model, train_model.TrainModelTool.config),
     'settings': (settings, settings.SettingsTool.config),
-    'help_page': (help_page, help_page.HelpGuideTool.config),
 }
-
-# # Format: 'tool_name': (module, ToolConfig)
-# ALL_TOOLS = {
-#     'voice_clone': (voice_clone, voice_clone.VoiceCloneTool.config),
-#     'voice_presets': (voice_presets, voice_presets.VoicePresetsTool.config),
-#     'conversation': (conversation, conversation.ConversationTool.config),
-#     'voice_design': (voice_design, voice_design.VoiceDesignTool.config),
-#     'prep_samples': (prep_samples, prep_samples.PrepSamplesTool.config),
-#     'output_history': (output_history, output_history.OutputHistoryTool.config),
-#     'finetune_dataset': (finetune_dataset, finetune_dataset.FinetuneDatasetTool.config),
-#     'train_model': (train_model, train_model.TrainModelTool.config),
-#     'settings': (settings, settings.SettingsTool.config),
-#     'help_page': (help_page, help_page.HelpGuideTool.config),
-# }
 
 
 def get_tool_registry():
@@ -179,6 +162,8 @@ __all__ = [
     'get_available_samples',
     'get_prompt_cache_path',
     'load_sample_details',
+    'get_dataset_folders',
+    'get_dataset_files',
     'get_or_create_voice_prompt_standalone',
     'build_shared_state',
     'run_tool_standalone',
@@ -265,6 +250,14 @@ SHARED_CSS = """
 }
 #output-files-group label:hover {
     background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Push Settings (last tab) to the far right */
+#main-tabs .tab-container[role="tablist"] {
+    display: flex !important;
+}
+#main-tabs .tab-container[role="tablist"] > button:last-child {
+    margin-left: auto !important;
 }
 """
 
@@ -552,6 +545,40 @@ def load_sample_details(sample_name):
 
     return None, "", ""
 
+
+# ===== Dataset Management Helpers (Finetune Dataset & Train Model tools) =====
+
+def get_dataset_folders():
+    """Get list of subfolders in datasets directory."""
+    DATASETS_DIR = get_configured_dir("datasets_folder", "datasets")
+    if not DATASETS_DIR.exists():
+        return ["(No folders)"]
+    folders = sorted([d.name for d in DATASETS_DIR.iterdir() if d.is_dir()])
+    return folders if folders else ["(No folders)"]
+
+
+def get_dataset_files(folder=None):
+    """Get list of audio file names in a dataset subfolder for FileLister."""
+    DATASETS_DIR = get_configured_dir("datasets_folder", "datasets")
+    if not DATASETS_DIR.exists():
+        return []
+
+    if folder and folder not in ("(No folders)", "(Select Dataset)"):
+        scan_dir = DATASETS_DIR / folder
+    else:
+        scan_dir = DATASETS_DIR
+
+    if not scan_dir.exists():
+        return []
+
+    audio_files = sorted(
+        list(scan_dir.glob("*.wav")) + list(scan_dir.glob("*.mp3")),
+        key=lambda x: x.stat().st_mtime,
+        reverse=True
+    )
+    return [f.name for f in audio_files]
+
+
 def get_or_create_voice_prompt_standalone(model, sample_name, wav_path, ref_text, model_size, progress_callback=None):
     """
     Get cached voice prompt or create new one using tts_manager.
@@ -576,6 +603,21 @@ def get_or_create_voice_prompt_standalone(model, sample_name, wav_path, ref_text
     # Create new prompt
     if progress_callback:
         progress_callback(0.2, desc="Processing voice sample (first time)...")
+
+    prompt_items = model.create_voice_clone_prompt(
+        ref_audio=wav_path,
+        ref_text=ref_text,
+        x_vector_only_mode=False,
+    )
+
+    # Save to cache
+    if progress_callback:
+        progress_callback(0.35, desc="Caching voice prompt...")
+
+    tts_manager.save_voice_prompt(sample_name, prompt_items, sample_hash, model_size)
+
+    return prompt_items, False  # False = newly created
+
 
     prompt_items = model.create_voice_clone_prompt(
         ref_audio=wav_path,
@@ -624,7 +666,11 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         create_emotion_intensity_slider,
         create_pause_controls
     )
-    from modules.core_components.ai_models.model_utils import get_trained_models as get_trained_models_util
+    from modules.core_components.ai_models.model_utils import (
+        get_trained_models as get_trained_models_util,
+        get_trained_model_names as get_trained_model_names_util,
+        train_model as train_model_util
+    )
 
     # Import audio utilities BEFORE building shared_state
     from modules.core_components.audio_utils import (
@@ -636,10 +682,16 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         normalize_audio as normalize_audio_util,
         convert_to_mono as convert_to_mono_util,
         save_audio_as_sample as save_as_sample_util,
-        clean_audio as clean_audio_util
+        clean_audio as clean_audio_util,
+        check_audio_format as check_audio_format_util
     )
 
-    # Check if DeepFilterNet is available
+    # Check optional dependencies
+    try:
+        import whisper
+        WHISPER_AVAILABLE = True
+    except ImportError:
+        WHISPER_AVAILABLE = False
 
     # DeepFilterNet / Torchaudio Compatibility Shim
     try:
@@ -711,7 +763,7 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         'MODEL_SIZES_VIBEVOICE': constants.get('MODEL_SIZES_VIBEVOICE'),
         'VOICE_CLONE_OPTIONS': constants.get('VOICE_CLONE_OPTIONS'),
         'DEFAULT_VOICE_CLONE_MODEL': constants.get('DEFAULT_VOICE_CLONE_MODEL'),
-        'WHISPER_AVAILABLE': constants.get('WHISPER_AVAILABLE', False),
+        'WHISPER_AVAILABLE': WHISPER_AVAILABLE,
         'DEEPFILTER_AVAILABLE': DEEPFILTER_AVAILABLE,
 
         # UI component creators
@@ -735,6 +787,19 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
 
         # Helper functions
         'get_trained_models': lambda: get_trained_models_util(directories.get('OUTPUT_DIR').parent / user_config.get("models_folder", "models")),
+        'get_trained_model_names': lambda: get_trained_model_names_util(
+            directories.get('OUTPUT_DIR').parent / user_config.get("trained_models_folder", "models")
+        ),
+        'train_model': lambda folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval, progress=None: train_model_util(
+            folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval,
+            user_config, directories.get('DATASETS_DIR'),
+            directories.get('OUTPUT_DIR').parent,  # project_root
+            play_completion_beep, progress
+        ),
+
+        # Dataset management helpers
+        'get_dataset_folders': get_dataset_folders,
+        'get_dataset_files': get_dataset_files,
 
         # Sample management helpers (Voice Clone & related tools)
         'get_sample_choices': get_sample_choices,
@@ -873,7 +938,7 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
             confirm_trigger=confirm_trigger,
             input_trigger=input_trigger
         )
-        
+
         # Add tool-specific shared_state entries
         if extra_shared_state:
             shared_state.update(extra_shared_state)

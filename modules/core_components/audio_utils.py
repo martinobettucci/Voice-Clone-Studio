@@ -14,6 +14,22 @@ from pathlib import Path
 from datetime import datetime
 
 
+def check_audio_format(audio_path):
+    """Check if audio is 24kHz, 16-bit, mono.
+
+    Returns:
+        Tuple of (is_correct, info_or_none)
+    """
+    try:
+        info = sf.info(audio_path)
+        is_correct = (info.samplerate == 24000 and
+                      info.channels == 1 and
+                      info.subtype == 'PCM_16')
+        return is_correct, info
+    except Exception:
+        return False, None
+
+
 def is_video_file(filepath):
     """Check if file is a video based on extension."""
     if not filepath:

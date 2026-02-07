@@ -511,17 +511,18 @@ class VoiceCloneTool(Tool):
         def delete_qwen_emotion_wrapper(confirm_value, emotion_name):
             """Only process if context matches qwen_emotion_."""
             if not confirm_value or not confirm_value.startswith("qwen_emotion_"):
-                return gr.update(), gr.update(), ""
+                return gr.update(), gr.update()
 
-            # Use shared helper to process delete result
+            # Call the delete handler and discard the clear_trigger (3rd value)
             from modules.core_components.emotion_manager import process_delete_emotion_result
             delete_result = delete_emotion_handler(confirm_value, emotion_name)
-            return process_delete_emotion_result(delete_result, shared_state)
+            dropdown_update, status_msg, _clear = process_delete_emotion_result(delete_result, shared_state)
+            return dropdown_update, status_msg
 
         confirm_trigger.change(
             delete_qwen_emotion_wrapper,
             inputs=[confirm_trigger, components['qwen_emotion_preset']],
-            outputs=[components['qwen_emotion_preset'], components['clone_status'], confirm_trigger]
+            outputs=[components['qwen_emotion_preset'], components['clone_status']]
         )
 
         def generate_from_lister(lister_value, *args):

@@ -7,8 +7,6 @@ Train custom voice models using finetuning datasets.
 import gradio as gr
 from textwrap import dedent
 from modules.core_components.tool_base import Tool, ToolConfig
-# format_help_html comes from shared_state
-from pathlib import Path
 
 
 class TrainModelTool(Tool):
@@ -27,18 +25,13 @@ class TrainModelTool(Tool):
         """Create Train Model tool UI."""
         components = {}
 
-        # Get helper functions and config
         format_help_html = shared_state['format_help_html']
         get_dataset_folders = shared_state['get_dataset_folders']
-        get_dataset_files = shared_state['get_dataset_files']
-        get_trained_model_names = shared_state['get_trained_model_names']
-        train_model = shared_state['train_model']
-        DATASETS_DIR = shared_state['DATASETS_DIR']
 
         with gr.TabItem("Train Model"):
             gr.Markdown("Train a custom voice model using your finetuning dataset")
             with gr.Row():
-                # Left column - Dataset selection and validation
+                # Left column - Dataset selection
                 with gr.Column(scale=1):
                     gr.Markdown("### Dataset Selection")
 
@@ -74,7 +67,7 @@ class TrainModelTool(Tool):
                         3. Choose reference audio from dataset
                         4. Configure parameters & start training (defaults work well for most cases)
 
-                        *See Help Guide tab → Train Model for detailed instructions*
+                        *See Help Guide tab -> Train Model for detailed instructions*
                     """)
                     gr.HTML(
                         value=format_help_html(train_quick_guide),
@@ -132,26 +125,19 @@ class TrainModelTool(Tool):
     def setup_events(cls, components, shared_state):
         """Wire up Train Model tab events."""
 
-        # Get helper functions
         get_dataset_files = shared_state['get_dataset_files']
+        get_dataset_folders = shared_state['get_dataset_folders']
         get_trained_model_names = shared_state['get_trained_model_names']
         train_model = shared_state['train_model']
         input_trigger = shared_state['input_trigger']
+        show_input_modal_js = shared_state['show_input_modal_js']
         DATASETS_DIR = shared_state['DATASETS_DIR']
 
+        # --- Folder change: update ref audio dropdown ---
         def update_ref_audio_dropdown(folder):
             """Update reference audio dropdown when folder changes."""
             files = get_dataset_files(folder)
             return gr.update(choices=files, value=None), None
-
-        def load_ref_audio_preview(folder, filename):
-            """Load reference audio preview."""
-            if not folder or not filename or folder == "(No folders)" or folder == "(Select Dataset)":
-                return None
-            audio_path = DATASETS_DIR / folder / filename
-            if audio_path.exists():
-                return str(audio_path)
-            return None
 
         components['train_folder_dropdown'].change(
             update_ref_audio_dropdown,
@@ -159,10 +145,21 @@ class TrainModelTool(Tool):
             outputs=[components['ref_audio_dropdown'], components['ref_audio_preview']]
         )
 
+        # --- Refresh folders ---
         components['refresh_train_folder_btn'].click(
-            lambda: gr.update(choices=["(Select Dataset)"] + shared_state['get_dataset_folders'](), value="(Select Dataset)"),
+            lambda: gr.update(choices=["(Select Dataset)"] + get_dataset_folders(), value="(Select Dataset)"),
             outputs=[components['train_folder_dropdown']]
         )
+
+        # --- Ref audio preview ---
+        def load_ref_audio_preview(folder, filename):
+            """Load reference audio preview."""
+            if not folder or not filename or folder in ("(No folders)", "(Select Dataset)"):
+                return None
+            audio_path = DATASETS_DIR / folder / filename
+            if audio_path.exists():
+                return str(audio_path)
+            return None
 
         components['ref_audio_dropdown'].change(
             load_ref_audio_preview,
@@ -170,119 +167,72 @@ class TrainModelTool(Tool):
             outputs=[components['ref_audio_preview']]
         )
 
-        # Hidden JSON for existing models list (JS-accessible)
+        # --- Start Training: 2-step modal with dynamic validation ---
+        # Hidden JSON to pass existing model names to JS for validation
         components['existing_models_json'] = gr.JSON(value=[], visible=False)
 
-        # Function to show modal with current model list
-        def show_training_modal():
-            """Fetch current model list and prepare modal."""
-            existing_models = get_trained_model_names()
-            return existing_models
+        def fetch_existing_models():
+            """Fetch current model list before opening modal."""
+            return get_trained_model_names()
+
+        # Build the base modal JS using show_input_modal_js
+        base_modal_js = show_input_modal_js(
+            title="Start Training",
+            message="Enter a name for this trained voice model:",
+            placeholder="e.g., MyVoice, Female-Narrator, John-Doe",
+            submit_button_text="Start Training",
+            context="train_model_"
+        )
+
+        # Wrap to inject dynamic validation from existing models list
+        open_modal_js = f"""
+        (existingModels) => {{
+            window.inputModalValidation = (value) => {{
+                if (!value || value.trim().length === 0) {{
+                    return 'Please enter a model name';
+                }}
+                if (existingModels && Array.isArray(existingModels)) {{
+                    if (existingModels.includes(value.trim())) {{
+                        return 'Model "' + value.trim() + '" already exists!';
+                    }}
+                }}
+                return null;
+            }};
+            const openModal = {base_modal_js};
+            openModal('');
+        }}
+        """
 
         components['start_training_btn'].click(
-            fn=show_training_modal,
+            fn=fetch_existing_models,
             inputs=None,
             outputs=[components['existing_models_json']]
         ).then(
             fn=None,
             inputs=[components['existing_models_json']],
             outputs=None,
-            js="""
-            (existingModels) => {
-                const overlay = document.getElementById('input-modal-overlay');
-                if (!overlay) return;
-
-                const titleEl = document.getElementById('input-modal-title');
-                const messageEl = document.getElementById('input-modal-message');
-                const inputField = document.getElementById('input-modal-field');
-                const submitBtn = document.getElementById('input-modal-submit-btn');
-                const cancelBtn = document.getElementById('input-modal-cancel-btn');
-                const errorEl = document.getElementById('input-modal-error');
-
-                if (titleEl) titleEl.textContent = 'Start Training';
-                if (messageEl) {
-                    messageEl.textContent = 'Enter a name for this trained voice model:';
-                    messageEl.style.display = 'block';
-                    messageEl.classList.remove('error');
-                    delete messageEl.dataset.originalMessage;
-                }
-                if (inputField) {
-                    inputField.placeholder = 'e.g., MyVoice, Female-Narrator, John-Doe';
-                    inputField.value = '';
-                }
-                if (submitBtn) {
-                    submitBtn.textContent = 'Start Training';
-                    submitBtn.setAttribute('data-context', 'train_model_');
-                }
-                if (cancelBtn) {
-                    cancelBtn.setAttribute('data-context', 'train_model_');
-                }
-                if (errorEl) {
-                    errorEl.classList.remove('show');
-                    errorEl.textContent = '';
-                }
-
-                // Set up validation with current model list
-                window.inputModalValidation = (value) => {
-                    console.log('[VALIDATION] Called with value:', value);
-                    console.log('[VALIDATION] existingModels:', existingModels);
-                    console.log('[VALIDATION] Is array?', Array.isArray(existingModels));
-
-                    if (!value || value.trim().length === 0) {
-                        return 'Please enter a model name';
-                    }
-
-                    const trimmedValue = value.trim();
-                    console.log('[VALIDATION] Trimmed value:', trimmedValue);
-                    console.log('[VALIDATION] Checking if includes...');
-
-                    if (existingModels && Array.isArray(existingModels)) {
-                        console.log('[VALIDATION] Array contents:', existingModels);
-                        const exists = existingModels.includes(trimmedValue);
-                        console.log('[VALIDATION] Exists?', exists);
-
-                        if (exists) {
-                            return 'Model "' + trimmedValue + '" already exists!';
-                        }
-                    } else {
-                        console.log('[VALIDATION] existingModels is not an array or is null');
-                    }
-
-                    return null;
-                };
-
-                overlay.classList.add('show');
-
-                // Focus the input field after a brief delay
-                setTimeout(() => {
-                    if (inputField) {
-                        inputField.focus();
-                        inputField.select();
-                    }
-                }, 100);
-            }
-            """
+            js=open_modal_js
         )
 
-        # Handler for training modal submission
-        def handle_train_model_input(input_value, folder, ref_audio, batch_size, lr, epochs, save_interval):
+        # --- Handle training modal submission ---
+        def handle_train_model_input(input_value, folder, ref_audio, batch_size, lr, epochs, save_interval, progress=gr.Progress()):
             """Process input modal submission for training."""
-            # Context filtering: only process if this is our context
             if not input_value or not input_value.startswith("train_model_"):
                 return gr.update()
 
-            # Extract speaker name from context prefix
+            # Format: "train_model_SpeakerName_timestamp"
             parts = input_value.split("_")
             if len(parts) >= 3:
                 speaker_name = "_".join(parts[2:-1])
-                return train_model(folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval)
+                return train_model(folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval, progress)
 
             return gr.update()
 
         input_trigger.change(
             handle_train_model_input,
-            inputs=[input_trigger, components['train_folder_dropdown'], components['ref_audio_dropdown'], components['batch_size_slider'],
-                    components['learning_rate_slider'], components['num_epochs_slider'], components['save_interval_slider']],
+            inputs=[input_trigger, components['train_folder_dropdown'], components['ref_audio_dropdown'],
+                    components['batch_size_slider'], components['learning_rate_slider'],
+                    components['num_epochs_slider'], components['save_interval_slider']],
             outputs=[components['training_status']]
         )
 

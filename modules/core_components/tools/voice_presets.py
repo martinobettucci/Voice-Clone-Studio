@@ -542,16 +542,17 @@ class VoicePresetsTool(Tool):
         def delete_custom_emotion_wrapper(confirm_value, emotion_name):
             """Only process if context matches custom_emotion_."""
             if not confirm_value or not confirm_value.startswith("custom_emotion_"):
-                return gr.update(), gr.update(), ""
+                return gr.update(), gr.update()
 
-            # Use shared helper to process delete result
+            # Call the delete handler and discard the clear_trigger (3rd value)
             delete_result = delete_emotion_handler(confirm_value, emotion_name)
-            return process_delete_emotion_result(delete_result, shared_state)
+            dropdown_update, status_msg, _clear = process_delete_emotion_result(delete_result, shared_state)
+            return dropdown_update, status_msg
 
         confirm_trigger.change(
             delete_custom_emotion_wrapper,
             inputs=[confirm_trigger, components['custom_emotion_preset']],
-            outputs=[components['custom_emotion_preset'], components['preset_status'], confirm_trigger]
+            outputs=[components['custom_emotion_preset'], components['preset_status']]
         )
 
         input_trigger.change(

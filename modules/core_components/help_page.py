@@ -404,6 +404,43 @@ class HelpGuideTool(Tool):
     )
 
     @classmethod
+    def create_content(cls, shared_state):
+        """Create Help Guide content without a container wrapper.
+
+        Use this when rendering help outside of the main tab bar
+        (e.g. in an Accordion at the bottom of the page).
+        """
+        components = {}
+        format_help_html = shared_state.get('format_help_html')
+
+        gr.Markdown("# Voice Clone Studio - Help & Guide")
+
+        components['help_topic'] = gr.Radio(
+            choices=[
+                "Voice Clone",
+                "Voice Presets",
+                "Conversation",
+                "Voice Design",
+                "Prep Samples",
+                "Finetune Dataset",
+                "Train Model",
+                "Tips & Tricks"
+            ],
+            value="Voice Clone",
+            show_label=False,
+            interactive=True,
+            container=False
+        )
+
+        components['help_content'] = gr.HTML(
+            value=format_help_html(show_voice_clone_help()),
+            container=True,
+            padding=True
+        )
+
+        return components
+
+    @classmethod
     def create_tool(cls, shared_state):
         """Create Help Guide tool UI."""
         components = {}

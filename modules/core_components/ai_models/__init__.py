@@ -11,6 +11,9 @@ from .model_utils import (
     check_model_available_locally,
     empty_cuda_cache,
     log_gpu_memory,
+    get_trained_models,
+    get_trained_model_names,
+    train_model,
 )
 
 from .tts_manager import (
@@ -31,6 +34,9 @@ __all__ = [
     "check_model_available_locally",
     "empty_cuda_cache",
     "log_gpu_memory",
+    "get_trained_models",
+    "get_trained_model_names",
+    "train_model",
 
     # TTS
     "TTSManager",
