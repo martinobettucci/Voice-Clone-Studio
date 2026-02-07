@@ -1,19 +1,23 @@
 # Voice Clone Studio
 
-A Gradio-based web UI for voice cloning and voice design, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) and [VibeVoice](https://github.com/microsoft/VibeVoice).
-Supports both Whisper or VibeVoice-asr for automatic Transcription.
+A modular Gradio-based web UI for voice cloning, voice design, and multi-speaker conversation, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) and [VibeVoice](https://github.com/microsoft/VibeVoice).
+Supports both Whisper and VibeVoice ASR for automatic transcription.
 
-![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-Powered%20by%20Qwen3--TTS-blue) ![VibeVoice](https://img.shields.io/badge/VibeVoice-%20TTS-green) ![VibeVoice](https://img.shields.io/badge/VibeVoice-%20ASR-green)
+![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-v1.0-blue) ![Qwen3-TTS](https://img.shields.io/badge/Qwen3--TTS-Powered-blue) ![VibeVoice](https://img.shields.io/badge/VibeVoice-TTS-green) ![VibeVoice](https://img.shields.io/badge/VibeVoice-ASR-green)
+
+## Architecture
+
+Voice Clone Studio v1.0 is fully modular. The main file (`voice_clone_studio.py`) is a ~230 line orchestrator that dynamically loads self-contained tools as tabs. Each tool can be enabled or disabled from Settings without touching any code.
 
 ## Features
 
 ### Voice Clone
-Clone voices from your own audio samples. Just provide a short reference audio clip with its transcript, and generate new speech in that voice.
-**Choose Your Engine:**
-- **Qwen Small/Fast or VibeVoice Small/Fast** - 
+Clone voices from your own audio samples. Provide a short reference audio clip with its transcript, and generate new speech in that voice.
 
+- **Multiple engines** - Qwen3-TTS (0.6B/1.7B) or VibeVoice (1.5B/Large/Large-4bit)
 - **Voice prompt caching** - First generation processes the sample, subsequent ones are instant
 - **Seed control** - Reproducible results with saved seeds
+- **Emotion presets** - 40+ emotion presets with adjustable intensity
 - **Metadata tracking** - Each output saves generation info (sample, seed, text)
 
 ### Conversation
@@ -105,18 +109,29 @@ Fine-tune your own custom voice models with your training data:
 5. Monitor training progress in real-time
 6. Use trained model in Voice Presets tab
 
-### Prep Samples
-Full audio preparation workspace:
+### Prep Audio
+Unified audio preparation workspace for both voice samples and training datasets:
 
 - **Trim** - Use waveform selection to cut audio
 - **Normalize** - Balance audio levels
 - **Convert to Mono** - Ensure single-channel audio
+- **Denoise** - Clean audio with DeepFilterNet
 - **Transcribe** - Whisper or VibeVoice ASR automatic transcription
 - **Batch Transcribe** - Process entire folders of audio files at once
 - **Save as Sample** - One-click sample creation
+- **Dataset Management** - Organize and prepare training data
 
 ### Output History
-View, play back, and manage your previously generated audio files.
+View, play back, and manage your previously generated audio files. Multi-select for batch deletion, double-click to play.
+
+### Settings
+Centralized application configuration:
+
+- **Model loading** - Attention mechanism, offline mode, low CPU memory usage
+- **Folder paths** - Configurable directories for samples, output, datasets, models
+- **Model downloads** - Download models directly to local storage
+- **Visible Tools** - Enable or disable any tool tab (restart to apply)
+- **Help Guide** - Built-in documentation for all tools
 
 ---
 ## Installation
@@ -299,9 +314,9 @@ The UI will open at `http://127.0.0.1:7860`
 
 ### Prepare Voice Samples
 
-1. Go to the **Prep Samples** tab
+1. Go to the **Prep Audio** tab
 2. Upload or record audio (3-10 seconds of clear speech)
-3. Trim and normalize as needed
+3. Trim, normalize, and denoise as needed
 4. Transcribe or manually enter the text
 5. Save as a sample with a name
 
@@ -322,17 +337,43 @@ The UI will open at `http://127.0.0.1:7860`
 ## Project Structure
 
 ```
-Qwen3-TTS-Voice-Clone-Studio/
-├── voice_clone_ui.py      # Main Gradio application
-├── requirements.txt       # Python dependencies
-├── __Launch_UI.bat        # Windows launcher
-├── samples/               # Voice samples (.wav + .txt pairs)
-│   └── example.wav
-│   └── example.txt
-├── output/                # Generated audio outputs
-├── vendor                 # Included Technology
-│   └── vibevoice_asr      # newest version of vibevoice with asr support
-│   └── vibevoice_tts      # prior version of vibevoice with tts support
+Voice-Clone-Studio/
+├── voice_clone_studio.py          # Main orchestrator (~230 lines)
+├── config.json                    # User preferences & enabled tools
+├── requirements.txt               # Python dependencies
+├── launch.bat / launch.sh         # Launcher scripts
+├── wheel/                         # Pre-built custom Gradio components
+│   └── gradio_filelister-0.4.0-py3-none-any.whl
+├── samples/                       # Voice samples (.wav + .json)
+├── output/                        # Generated audio outputs
+├── datasets/                      # Training datasets
+├── models/                        # Downloaded & trained models
+├── docs/                          # Documentation
+│   ├── updates.md                 # Version history
+│   ├── troubleshooting.md         # Troubleshooting guide
+│   └── MODEL_MANAGEMENT_README.md # AI model manager docs
+└── modules/
+    ├── core_components/           # Core app code
+    │   ├── tools/                 # All UI tools (tabs)
+    │   │   ├── voice_clone.py
+    │   │   ├── voice_presets.py
+    │   │   ├── conversation.py
+    │   │   ├── voice_design.py
+    │   │   ├── prep_audio.py
+    │   │   ├── output_history.py
+    │   │   ├── train_model.py
+    │   │   └── settings.py
+    │   ├── ai_models/             # TTS & ASR model managers
+    │   ├── ui_components/         # Modals, theme
+    │   ├── gradio_filelister/     # Custom file browser component
+    │   ├── constants.py           # Central constants
+    │   ├── emotion_manager.py     # Emotion presets
+    │   ├── audio_utils.py         # Audio processing
+    │   └── help_page.py           # Help content
+    ├── deepfilternet/             # Audio denoising
+    ├── qwen_finetune/             # Training scripts
+    ├── vibevoice_tts/             # VibeVoice TTS
+    └── vibevoice_asr/             # VibeVoice ASR
 ```
 
 ## Models Used
@@ -369,14 +410,7 @@ This project is based on and uses code from:
 - **[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**    - Apache 2.0 License (Alibaba)
 - **[VibeVoice](https://github.com/microsoft/VibeVoice)** - MIT License
 - **[Gradio](https://gradio.app/)**                       - Apache 2.0 License
-- **[OpenAI Whisper](https://github.com/openai/whisper)** - MIT License
-
-## Acknowledgments
-
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba
-- [VibeVoice](https://github.com/microsoft/VibeVoice) by Microsoft
-- [Gradio](https://gradio.app/) for the web UI framework
-- [OpenAI Whisper](https://github.com/openai/whisper) for transcription
+- **[DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)** - MIT License
 
 ## Updates
 
