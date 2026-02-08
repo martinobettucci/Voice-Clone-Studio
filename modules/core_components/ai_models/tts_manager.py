@@ -425,20 +425,26 @@ class TTSManager:
 
         return audio_data, sr
 
-    def generate_with_trained_model(self, text: str, language: str, speaker_name: str,
-                                    checkpoint_path: str, instruct: str = None, seed: int = -1,
-                                    do_sample: bool = True, temperature: float = 0.9, top_k: int = 50,
-                                    top_p: float = 1.0, repetition_penalty: float = 1.05,
-                                    max_new_tokens: int = 2048, user_config: dict = None) -> Tuple[str, int]:
+    def generate_with_trained_model(self, text, language, speaker_name,
+                                    checkpoint_path, instruct=None, seed=-1,
+                                    do_sample=True, temperature=0.9, top_k=50,
+                                    top_p=1.0, repetition_penalty=1.05,
+                                    max_new_tokens=2048, user_config=None,
+                                    icl_mode=False, voice_sample_path=None, ref_text=None):
         """
         Generate audio using a trained custom voice model checkpoint.
+
+        Supports two modes:
+        - Speaker embedding mode (default): Uses the baked-in speaker embedding
+        - ICL mode: Uses In-Context Learning with a reference audio sample for
+          much more natural and expressive voice cloning
 
         Args:
             text: Text to generate
             language: Language for TTS
             speaker_name: Speaker name the model was trained with
             checkpoint_path: Path to trained model checkpoint
-            instruct: Optional style instructions
+            instruct: Optional style instructions (only used in speaker embedding mode)
             seed: Random seed (-1 for random)
             do_sample: Enable sampling
             temperature: Sampling temperature
@@ -446,7 +452,10 @@ class TTSManager:
             top_p: Top-p sampling
             repetition_penalty: Repetition penalty
             max_new_tokens: Maximum tokens to generate
-            user_config: User configuration dict (for attention mechanism, etc.)
+            user_config: User configuration dict
+            icl_mode: If True, use In-Context Learning with voice sample
+            voice_sample_path: Path to reference audio (required for ICL mode)
+            ref_text: Transcript of the reference audio (required for ICL mode)
 
         Returns:
             Tuple: (audio_array, sample_rate)
@@ -462,40 +471,128 @@ class TTSManager:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        # Model management - unload if different model
-        model_id = f"trained_{checkpoint_path}"
-        # Note: check_and_unload_if_different should be called by the caller if needed
-
-        # Load the trained model checkpoint
-        # This would need check_and_unload_if_different and load_model_with_attention
-        # which should also be moved here eventually
         if user_config is None:
             user_config = {}
 
-        # For now, load directly - proper model management to be added
-        model = Qwen3TTSModel.from_pretrained(
-            checkpoint_path,
-            device_map="cuda:0" if torch.cuda.is_available() else "cpu",
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            low_cpu_mem_usage=user_config.get("low_cpu_mem_usage", False)
+        # Determine device and dtype
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+        # Load the trained model checkpoint with attention fallback
+        mechanisms = get_attention_implementation(
+            user_config.get("attention_mechanism", "auto")
         )
 
-        # Build kwargs
-        kwargs = {
-            "text": text.strip(),
-            "language": language if language != "Auto" else "Auto",
-            "speaker": speaker_name,
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-            "repetition_penalty": repetition_penalty,
-            "max_new_tokens": max_new_tokens
-        }
-        if instruct and instruct.strip():
-            kwargs["instruct"] = instruct.strip()
+        model = None
+        for attn in mechanisms:
+            try:
+                model = Qwen3TTSModel.from_pretrained(
+                    checkpoint_path,
+                    device_map=device,
+                    torch_dtype=dtype,
+                    attn_implementation=attn,
+                    low_cpu_mem_usage=user_config.get("low_cpu_mem_usage", False)
+                )
+                print(f"Trained model loaded with {attn}")
+                break
+            except Exception as e:
+                error_msg = str(e).lower()
+                is_attn_error = any(
+                    kw in error_msg for kw in ["flash", "attention", "sdpa", "not supported"]
+                )
+                if is_attn_error:
+                    print(f"  {attn} not available for trained model, trying next...")
+                    continue
+                raise
 
-        wavs, sr = model.generate_custom_voice(**kwargs)
+        if model is None:
+            raise RuntimeError("Failed to load trained model with any attention mechanism")
+
+        if icl_mode and voice_sample_path and ref_text:
+            # ICL mode: use generate_voice_clone with reference audio
+            # Ensure model type allows voice cloning (patch legacy "custom_voice" models)
+            if hasattr(model, 'model') and hasattr(model.model, 'tts_model_type'):
+                if model.model.tts_model_type != "base":
+                    print(f"Patching tts_model_type from '{model.model.tts_model_type}' to 'base' for ICL inference")
+                    model.model.tts_model_type = "base"
+
+            # Training drops speaker_encoder weights from checkpoints to save space.
+            # ICL needs it to compute speaker embeddings from reference audio.
+            # Borrow speaker_encoder from the base model of matching size.
+            if model.model.speaker_encoder is None:
+                import json as json_mod
+                config_path = Path(checkpoint_path) / "config.json"
+                with open(config_path, "r", encoding="utf-8") as f:
+                    ckpt_config = json_mod.load(f)
+                base_size = "1.7B" if ckpt_config.get("tts_model_size") == "1b7" else "0.6B"
+                base_name = f"Qwen/Qwen3-TTS-12Hz-{base_size}-Base"
+                print(f"Speaker encoder missing - borrowing from {base_size} base model...")
+
+                # Try local first, then HuggingFace
+                local_path = check_model_available_locally(base_name)
+                base_to_load = str(local_path) if local_path else base_name
+
+                base_model = Qwen3TTSModel.from_pretrained(
+                    base_to_load,
+                    device_map=device,
+                    torch_dtype=dtype,
+                )
+                model.model.speaker_encoder = base_model.model.speaker_encoder
+                model.model.speaker_encoder_sample_rate = base_model.model.speaker_encoder_sample_rate
+                del base_model
+                torch.cuda.empty_cache()
+                print("Speaker encoder transplanted successfully")
+
+            # Create voice clone prompt with ICL (not x-vector only)
+            prompt_items = model.create_voice_clone_prompt(
+                ref_audio=str(voice_sample_path),
+                ref_text=ref_text,
+                x_vector_only_mode=False,
+            )
+
+            # Build generation kwargs
+            gen_kwargs = {
+                'max_new_tokens': int(max_new_tokens),
+            }
+            if do_sample:
+                gen_kwargs['do_sample'] = True
+                gen_kwargs['temperature'] = temperature
+                if top_k > 0:
+                    gen_kwargs['top_k'] = int(top_k)
+                if top_p < 1.0:
+                    gen_kwargs['top_p'] = top_p
+                if repetition_penalty != 1.0:
+                    gen_kwargs['repetition_penalty'] = repetition_penalty
+
+            wavs, sr = model.generate_voice_clone(
+                text=text.strip(),
+                language=language if language != "Auto" else "Auto",
+                voice_clone_prompt=prompt_items,
+                **gen_kwargs
+            )
+        else:
+            # Speaker embedding mode: use generate_custom_voice
+            # Ensure model type allows custom voice (patch "base" models)
+            if hasattr(model, 'model') and hasattr(model.model, 'tts_model_type'):
+                if model.model.tts_model_type != "custom_voice":
+                    print(f"Patching tts_model_type from '{model.model.tts_model_type}' to 'custom_voice' for speaker embedding inference")
+                    model.model.tts_model_type = "custom_voice"
+
+            kwargs = {
+                "text": text.strip(),
+                "language": language if language != "Auto" else "Auto",
+                "speaker": speaker_name,
+                "do_sample": do_sample,
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
+                "max_new_tokens": max_new_tokens
+            }
+            if instruct and instruct.strip():
+                kwargs["instruct"] = instruct.strip()
+
+            wavs, sr = model.generate_custom_voice(**kwargs)
 
         # Convert to numpy if needed
         audio_data = wavs[0]
