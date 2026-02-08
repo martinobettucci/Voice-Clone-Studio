@@ -48,6 +48,7 @@ MODEL_SIZES_BASE = ["Small", "Large"]  # Base model: Small=0.6B, Large=1.7B
 MODEL_SIZES_CUSTOM = ["Small", "Large"]  # CustomVoice: Small=0.6B, Large=1.7B
 MODEL_SIZES_DESIGN = ["1.7B"]  # VoiceDesign only has 1.7B
 MODEL_SIZES_VIBEVOICE = ["Small", "Large (4-bit)", "Large"]  # VibeVoice: 1.5B, 7B-4bit, 7B
+MODEL_SIZES_QWEN3_ASR = ["Small", "Large"]  # Qwen3-ASR: 0.6B, 1.7B
 
 # Voice Clone engine and model options
 VOICE_CLONE_OPTIONS = [

@@ -24,6 +24,20 @@ echo.
 choice /C 12 /T 15 /D 2 /M "Install LuxTTS?"
 set LUXTTS_CHOICE=%errorlevel%
 echo.
+
+echo ========================================
+echo Optional: Install Qwen3 ASR speech recognition?
+echo Qwen3 ASR provides high-quality multilingual speech recognition.
+echo Supports 52 languages with Small (0.6B) and Large (1.7B) models.
+echo Note: This will update transformers to 4.57.6+
+echo ========================================
+echo.
+echo   1. Yes - Install Qwen3 ASR support
+echo   2. No  - Skip (DEFAULT)
+echo.
+choice /C 12 /T 15 /D 2 /M "Install Qwen3 ASR?"
+set QWEN3ASR_CHOICE=%errorlevel%
+echo.
 echo All questions answered - installing now...
 echo.
 
@@ -156,6 +170,24 @@ goto :luxtts_done
 :skip_luxtts
 echo Skipping LuxTTS installation.
 :luxtts_done
+echo.
+
+REM Qwen3 ASR (installed last as it updates transformers)
+if not "%QWEN3ASR_CHOICE%"=="1" goto :skip_qwen3asr
+
+echo.
+echo Installing Qwen3 ASR...
+pip install -U qwen-asr
+if %errorlevel% neq 0 (
+    echo WARNING: Qwen3 ASR installation failed.
+    goto :skip_qwen3asr
+)
+echo Qwen3 ASR installed successfully!
+goto :qwen3asr_done
+
+:skip_qwen3asr
+echo Skipping Qwen3 ASR installation.
+:qwen3asr_done
 echo.
 
 echo ========================================

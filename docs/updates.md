@@ -1,5 +1,15 @@
 # Version History
 
+## February 8, 2026
+#### Version 1.2.0 - Qwen3-ASR & ICL Support for Trained Models
+- **Qwen3 ASR Integration** - Added Qwen3-ASR as a new transcription engine in Prep Audio, supporting 52 languages and dialects
+- **Model Size Selector** - Choose between Small (0.6B, fast) and Large (1.7B, best accuracy) Qwen3 ASR models
+- **Language Selection** - Qwen3 ASR supports language hints for improved accuracy, shared with Whisper's language dropdown
+- **ICL (In-Context Learning) for Trained Models** - Enhanced Voice Presets with optional ICL mode that provides real-time prosody and style cues on top of trained voice identity
+- **Dataset-Based ICL Samples** - Select reference audio from your training datasets for ICL, with audio preview and automatic transcript loading
+- **Speaker Encoder Transplant** - Automatic fix for trained model checkpoints missing speaker encoder weights, loading them from the matching base model at runtime
+- **Setup Script Integration** - Qwen3 ASR offered as optional install in setup-windows.bat, setup-linux.sh, and Dockerfile
+- **Suppressed Gradio HTTP Logs** - Silenced noisy httpx/httpcore info-level logs from Gradio 6
 
 ## February 7, 2026
 #### Version 1.1.0 - Added support for LuxTTS

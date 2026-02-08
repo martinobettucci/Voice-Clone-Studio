@@ -27,6 +27,17 @@ echo ""
 read -t 30 -p "Install LuxTTS? (y/N, default N in 30s): " INSTALL_LUXTTS
 INSTALL_LUXTTS=${INSTALL_LUXTTS:-N}
 echo ""
+
+echo "========================================="
+echo "Optional: Install Qwen3 ASR speech recognition?"
+echo "Qwen3 ASR provides high-quality multilingual speech recognition."
+echo "Supports 52 languages with Small (0.6B) and Large (1.7B) models."
+echo "Note: This will update transformers to 4.57.6+"
+echo "========================================="
+echo ""
+read -t 30 -p "Install Qwen3 ASR? (y/N, default N in 30s): " INSTALL_QWEN3ASR
+INSTALL_QWEN3ASR=${INSTALL_QWEN3ASR:-N}
+echo ""
 echo "All questions answered - installing now..."
 echo ""
 
@@ -105,6 +116,19 @@ if [[ "$INSTALL_LUXTTS" =~ ^[Yy]$ ]]; then
     fi
 else
     echo "Skipping LuxTTS installation."
+fi
+
+# Qwen3 ASR (installed last as it updates transformers)
+if [[ "$INSTALL_QWEN3ASR" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Installing Qwen3 ASR..."
+    if pip install -U qwen-asr; then
+        echo "Qwen3 ASR installed successfully!"
+    else
+        echo "Qwen3 ASR installation failed."
+    fi
+else
+    echo "Skipping Qwen3 ASR installation."
 fi
 
 echo ""

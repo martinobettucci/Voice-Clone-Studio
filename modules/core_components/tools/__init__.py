@@ -685,6 +685,12 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
     except ImportError:
         WHISPER_AVAILABLE = False
 
+    try:
+        from qwen_asr import Qwen3ASRModel
+        QWEN3_ASR_AVAILABLE = True
+    except ImportError:
+        QWEN3_ASR_AVAILABLE = False
+
     # DeepFilterNet / Torchaudio Compatibility Shim
     try:
         from modules.deepfilternet import deepfilternet_torchaudio_patch
@@ -753,10 +759,12 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         'MODEL_SIZES_CUSTOM': constants.get('MODEL_SIZES_CUSTOM'),
         'MODEL_SIZES_DESIGN': constants.get('MODEL_SIZES_DESIGN'),
         'MODEL_SIZES_VIBEVOICE': constants.get('MODEL_SIZES_VIBEVOICE'),
+        'MODEL_SIZES_QWEN3_ASR': constants.get('MODEL_SIZES_QWEN3_ASR', ['Small', 'Large']),
         'VOICE_CLONE_OPTIONS': constants.get('VOICE_CLONE_OPTIONS'),
         'DEFAULT_VOICE_CLONE_MODEL': constants.get('DEFAULT_VOICE_CLONE_MODEL'),
         'TTS_ENGINES': constants.get('TTS_ENGINES', {}),
         'WHISPER_AVAILABLE': WHISPER_AVAILABLE,
+        'QWEN3_ASR_AVAILABLE': QWEN3_ASR_AVAILABLE,
         'DEEPFILTER_AVAILABLE': DEEPFILTER_AVAILABLE,
 
         # UI component creators

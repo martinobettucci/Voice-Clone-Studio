@@ -19,6 +19,11 @@ import json
 import random
 import tempfile
 import time
+import logging
+
+# Suppress Gradio's noisy HTTP request logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 import gradio as gr
 
@@ -103,6 +108,7 @@ from modules.core_components.constants import (
     MODEL_SIZES_CUSTOM,
     MODEL_SIZES_DESIGN,
     MODEL_SIZES_VIBEVOICE,
+    MODEL_SIZES_QWEN3_ASR,
     VOICE_CLONE_OPTIONS,
     DEFAULT_VOICE_CLONE_MODEL,
     TTS_ENGINES,
@@ -175,6 +181,7 @@ def create_ui():
                 'MODEL_SIZES_CUSTOM': MODEL_SIZES_CUSTOM,
                 'MODEL_SIZES_DESIGN': MODEL_SIZES_DESIGN,
                 'MODEL_SIZES_VIBEVOICE': MODEL_SIZES_VIBEVOICE,
+                'MODEL_SIZES_QWEN3_ASR': MODEL_SIZES_QWEN3_ASR,
                 'VOICE_CLONE_OPTIONS': VOICE_CLONE_OPTIONS,
                 'DEFAULT_VOICE_CLONE_MODEL': DEFAULT_VOICE_CLONE_MODEL,
                 'TTS_ENGINES': TTS_ENGINES,

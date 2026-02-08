@@ -29,15 +29,25 @@ class ASRManager:
         # Model cache
         self._whisper_model = None
         self._vibevoice_asr_model = None
+        self._qwen3_asr_model = None
 
         # Availability flags
         self.whisper_available = self._check_whisper_available()
+        self.qwen3_asr_available = self._check_qwen3_asr_available()
         self._last_loaded_model = None
 
     def _check_whisper_available(self) -> bool:
         """Check if Whisper is installed."""
         try:
             import whisper
+            return True
+        except ImportError:
+            return False
+
+    def _check_qwen3_asr_available(self):
+        """Check if qwen-asr package is installed."""
+        try:
+            from qwen_asr import Qwen3ASRModel
             return True
         except ImportError:
             return False
@@ -124,6 +134,101 @@ class ASRManager:
             print("Whisper ASR model loaded!")
 
         return self._whisper_model
+
+    def get_qwen3_asr(self, size="Small"):
+        """Load Qwen3 ASR model.
+
+        Args:
+            size: "Small" (0.6B) or "Large" (1.7B)
+        """
+        if not self.qwen3_asr_available:
+            raise ImportError(
+                "qwen-asr package is not installed.\n"
+                "Install with: pip install -U qwen-asr"
+            )
+
+        model_id = f"qwen3_asr_{size}"
+        self._check_and_unload_if_different(model_id)
+
+        if self._qwen3_asr_model is None:
+            size_map = {"Small": "0.6B", "Large": "1.7B"}
+            model_size = size_map.get(size, "0.6B")
+            model_name = f"Qwen/Qwen3-ASR-{model_size}"
+            print(f"Loading Qwen3 ASR model ({model_size})...")
+            from qwen_asr import Qwen3ASRModel
+            device = get_device()
+            dtype = get_dtype(device)
+
+            # Check for local model
+            offline_mode = self.user_config.get("offline_mode", False)
+            local_path = check_model_available_locally(model_name)
+            if local_path:
+                print(f"Found local model: {local_path}")
+                model_to_load = str(local_path)
+            elif offline_mode:
+                raise RuntimeError(
+                    f"Offline mode enabled but model not available locally: {model_name}\n"
+                    f"To use offline mode, download the model first or disable offline mode in Settings."
+                )
+            else:
+                model_to_load = model_name
+
+            # Try loading with attention fallback
+            mechanisms = get_attention_implementation(
+                self.user_config.get("attention_mechanism", "auto")
+            )
+
+            model = None
+            for attn in mechanisms:
+                try:
+                    kwargs = dict(
+                        dtype=dtype,
+                        device_map=device,
+                        max_inference_batch_size=32,
+                        max_new_tokens=512,
+                    )
+                    # Only pass attn_implementation for non-eager (eager is default)
+                    if attn != "eager":
+                        kwargs["attn_implementation"] = attn
+                    model = Qwen3ASRModel.from_pretrained(model_to_load, **kwargs)
+                    print(f"Qwen3 ASR loaded with {attn} attention")
+                    break
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    is_attn_error = any(
+                        keyword in error_msg
+                        for keyword in ["flash", "attention", "sdpa", "not supported"]
+                    )
+                    if is_attn_error and attn != mechanisms[-1]:
+                        print(f"  {attn} not available, trying next option...")
+                        continue
+                    raise e
+
+            # Create wrapper for consistent API (returns {"text": "..."} like Whisper)
+            class Qwen3ASRWrapper:
+                def __init__(self, model):
+                    self.model = model
+
+                def transcribe(self, audio_path, **kwargs):
+                    """Transcribe audio file. Returns dict with 'text' key."""
+                    import logging
+                    language = kwargs.get("language", None)
+                    # Suppress "temperature not valid" warning from transformers generate()
+                    gen_logger = logging.getLogger("transformers.generation.utils")
+                    prev_level = gen_logger.level
+                    gen_logger.setLevel(logging.ERROR)
+                    try:
+                        results = self.model.transcribe(audio=audio_path, language=language)
+                    finally:
+                        gen_logger.setLevel(prev_level)
+                    print(f"[Qwen3 ASR Raw Result] {results}")
+                    text = results[0].text if results else ""
+                    return {"text": text}
+
+            self._qwen3_asr_model = Qwen3ASRWrapper(model)
+            print("Qwen3 ASR model loaded!")
+
+        return self._qwen3_asr_model
 
     def get_vibevoice_asr(self):
         """Load VibeVoice ASR model."""
@@ -277,6 +382,11 @@ class ASRManager:
             del self._vibevoice_asr_model
             self._vibevoice_asr_model = None
             freed.append("VibeVoice ASR")
+
+        if self._qwen3_asr_model is not None:
+            del self._qwen3_asr_model
+            self._qwen3_asr_model = None
+            freed.append("Qwen3 ASR")
 
         if freed:
             empty_cuda_cache()

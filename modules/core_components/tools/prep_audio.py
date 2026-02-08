@@ -45,6 +45,8 @@ class PrepSamplesTool(Tool):
         _user_config = shared_state['_user_config']
         LANGUAGES = shared_state['LANGUAGES']
         WHISPER_AVAILABLE = shared_state['WHISPER_AVAILABLE']
+        QWEN3_ASR_AVAILABLE = shared_state['QWEN3_ASR_AVAILABLE']
+        MODEL_SIZES_QWEN3_ASR = shared_state['MODEL_SIZES_QWEN3_ASR']
         DEEPFILTER_AVAILABLE = shared_state['DEEPFILTER_AVAILABLE']
 
         # Let's hide dataset if train model is off
@@ -117,6 +119,8 @@ class PrepSamplesTool(Tool):
                     gr.Markdown("### Transcription Settings")
 
                     available_models = ['VibeVoice ASR']
+                    if QWEN3_ASR_AVAILABLE:
+                        available_models.append('Qwen3 ASR')
                     if WHISPER_AVAILABLE:
                         available_models.append('Whisper')
 
@@ -131,12 +135,23 @@ class PrepSamplesTool(Tool):
                         info="Choose transcription engine"
                     )
 
-                    components['whisper_language'] = gr.Dropdown(
-                        choices=["Auto-detect"] + LANGUAGES[1:],
-                        value=_user_config.get("whisper_language", "Auto-detect"),
-                        label="Language",
-                        visible=(default_model == "Whisper")
-                    )
+                    with gr.Row():
+                        components['whisper_language'] = gr.Dropdown(
+                            choices=["Auto-detect"] + LANGUAGES[1:],
+                            value=_user_config.get("whisper_language", "Auto-detect"),
+                            label="Language",
+                            visible=(default_model in ("Whisper", "Qwen3 ASR"))
+                        )
+
+                        default_asr_size = _user_config.get("qwen3_asr_size", "Small")
+                        if default_asr_size not in MODEL_SIZES_QWEN3_ASR:
+                            default_asr_size = MODEL_SIZES_QWEN3_ASR[0]
+                        components['qwen3_asr_size'] = gr.Dropdown(
+                            choices=MODEL_SIZES_QWEN3_ASR,
+                            value=default_asr_size,
+                            label="Qwen3 ASR Size",
+                            visible=(default_model == "Qwen3 ASR")
+                        )
 
                 # Right column - Audio editing
                 with gr.Column(scale=2):
@@ -428,12 +443,20 @@ class PrepSamplesTool(Tool):
 
         # ===== Transcribe (shared) =====
 
-        def transcribe_audio_handler(audio_file, whisper_language, transcribe_model, progress=gr.Progress()):
-            """Transcribe audio using Whisper or VibeVoice ASR."""
+        def transcribe_audio_handler(audio_file, whisper_language, transcribe_model, qwen3_asr_size, progress=gr.Progress()):
+            """Transcribe audio using Whisper, Qwen3 ASR, or VibeVoice ASR."""
             if audio_file is None:
                 return "Please load an audio file first.", ""
             try:
-                if transcribe_model == "VibeVoice ASR":
+                if transcribe_model == "Qwen3 ASR":
+                    progress(0.2, desc=f"Loading Qwen3 ASR ({qwen3_asr_size})...")
+                    model = asr_manager.get_qwen3_asr(size=qwen3_asr_size)
+                    progress(0.4, desc="Transcribing...")
+                    options = {}
+                    if whisper_language and whisper_language != "Auto-detect":
+                        options["language"] = whisper_language
+                    result = model.transcribe(audio_file, **options)
+                elif transcribe_model == "VibeVoice ASR":
                     progress(0.2, desc="Loading VibeVoice ASR...")
                     model = asr_manager.get_vibevoice_asr()
                     progress(0.4, desc="Transcribing...")
@@ -457,6 +480,7 @@ class PrepSamplesTool(Tool):
                     result = model.transcribe(audio_file, **options)
 
                 progress(1.0, desc="Done!")
+                print(f"[ASR Raw Output] ({transcribe_model}): {result['text']}")
                 transcription = result["text"].strip()
 
                 if transcribe_model == "VibeVoice ASR":
@@ -577,7 +601,7 @@ class PrepSamplesTool(Tool):
 
         # ===== Batch transcribe (dataset mode only) =====
 
-        def batch_transcribe_handler(folder, replace_existing, language, transcribe_model, progress=gr.Progress()):
+        def batch_transcribe_handler(folder, replace_existing, language, transcribe_model, qwen3_asr_size, progress=gr.Progress()):
             """Batch transcribe all audio files in a dataset folder."""
             if not folder or folder in ("(No folders)", "(Select Dataset)"):
                 return "Please select a dataset folder first."
@@ -605,7 +629,16 @@ class PrepSamplesTool(Tool):
 
                 # Load model once
                 options = {}
-                if transcribe_model == "VibeVoice ASR":
+                if transcribe_model == "Qwen3 ASR":
+                    progress(0.05, desc=f"Loading Qwen3 ASR model ({qwen3_asr_size})...")
+                    try:
+                        model = asr_manager.get_qwen3_asr(size=qwen3_asr_size)
+                        status_log.append("Loaded Qwen3 ASR model")
+                    except Exception as e:
+                        return f"Qwen3 ASR not available: {str(e)}"
+                    if language and language != "Auto-detect":
+                        options["language"] = language
+                elif transcribe_model == "VibeVoice ASR":
                     progress(0.05, desc="Loading VibeVoice ASR model...")
                     try:
                         model = asr_manager.get_vibevoice_asr()
@@ -649,9 +682,12 @@ class PrepSamplesTool(Tool):
                              desc=f"Transcribing {i + 1}/{len(audio_files)}: {audio_file.name[:30]}...")
 
                     try:
-                        result = model.transcribe(str(audio_file), **options) if transcribe_model != "VibeVoice ASR" \
-                            else model.transcribe(str(audio_file))
+                        if transcribe_model == "VibeVoice ASR":
+                            result = model.transcribe(str(audio_file))
+                        else:
+                            result = model.transcribe(str(audio_file), **options)
 
+                        print(f"[ASR Raw Output] ({transcribe_model}): {result['text']}")
                         text = result["text"].strip()
                         if transcribe_model == "VibeVoice ASR":
                             text = re.sub(r'\[.*?\]\s*:', '', text)
@@ -852,7 +888,7 @@ class PrepSamplesTool(Tool):
         components['transcribe_btn'].click(
             transcribe_audio_handler,
             inputs=[components['prep_audio_editor'], components['whisper_language'],
-                    components['transcribe_model']],
+                    components['transcribe_model'], components['qwen3_asr_size']],
             outputs=[components['transcription_output'], components['prep_status']]
         )
 
@@ -901,16 +937,24 @@ class PrepSamplesTool(Tool):
             batch_transcribe_handler,
             inputs=[components['finetune_folder_dropdown'],
                     components['batch_replace_existing'],
-                    components['whisper_language'], components['transcribe_model']],
+                    components['whisper_language'], components['transcribe_model'],
+                    components['qwen3_asr_size']],
             outputs=[components['prep_status']]
         )
 
         # --- Save preferences ---
         components['transcribe_model'].change(
             lambda x: (save_preference("transcribe_model", x),
-                       gr.update(visible=(x == "Whisper")))[1],
+                       gr.update(visible=(x in ("Whisper", "Qwen3 ASR"))),
+                       gr.update(visible=(x == "Qwen3 ASR")))[1:],
             inputs=[components['transcribe_model']],
-            outputs=[components['whisper_language']]
+            outputs=[components['whisper_language'], components['qwen3_asr_size']]
+        )
+
+        components['qwen3_asr_size'].change(
+            lambda x: save_preference("qwen3_asr_size", x),
+            inputs=[components['qwen3_asr_size']],
+            outputs=[]
         )
 
         components['whisper_language'].change(

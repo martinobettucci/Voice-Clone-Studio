@@ -83,6 +83,9 @@ RUN pip install --no-cache-dir git+https://github.com/ysharma3501/LinaCodec.git 
     pip install --no-cache-dir piper-phonemize --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html && \
     pip install --no-cache-dir "zipvoice @ git+https://github.com/ysharma3501/LuxTTS.git"
 
+# Qwen3 ASR (installed last as it updates transformers)
+RUN pip install --no-cache-dir -U qwen-asr
+
 RUN rustup self uninstall -y
 
 
