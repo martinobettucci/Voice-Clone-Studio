@@ -26,8 +26,9 @@ set LUXTTS_CHOICE=%errorlevel%
 echo.
 
 echo ========================================
-echo Optional (Highly Recommended): Install Qwen3 ASR speech recognition?
+echo Optional: Install Qwen3 ASR speech recognition?
 echo Qwen3 ASR provides high-quality multilingual speech recognition.
+echo As well as automatic splitting of clips under 5 minutes.
 echo Supports 52 languages with Small (0.6B) and Large (1.7B) models.
 echo Note: This will update transformers to 4.57.6+
 echo ========================================
@@ -42,6 +43,7 @@ echo.
 echo ========================================
 echo Optional: Install Whisper speech recognition?
 echo OpenAI Whisper is an alternative transcription engine.
+echo Supports automatic splitting of clips with no length limit.
 echo ========================================
 echo.
 echo   1. Yes - Install Whisper

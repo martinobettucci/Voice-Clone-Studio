@@ -4,8 +4,7 @@
 #### Version 1.3.0 - Auto-Split Audio, Dataset Management & Engine Controls
 
 **Auto-Split Audio**
-- **Automatic Audio Splitting** - Split long audio files into clean sentence-level clips using ASR-detected boundaries
-- **Smart Split Algorithm** - Configurable min/max duration with silence-based boundary detection for natural-sounding segments
+- **Automatic Audio Splitting** - Split long audio files into clean sentence-level clips using Qwen3 or Whisper's timestamp extraction.
 - **One-Click Dataset Creation** - Split audio and auto-save segments with transcripts directly into dataset folders
 
 **Unified ASR Engine**
@@ -27,7 +26,7 @@
 - **Renamed "Qwen CustomVoice" to "Qwen Speakers"** - Clearer label in Conversation and Voice Presets tabs
 - **Overwrite Protection** - Inline confirmation bar when saving a file that already exists
 - **Friendly Port Error** - Clean message when Voice Clone Studio is already running instead of a traceback
-- **Whisper Now Optional** - Moved from auto-install to optional in setup wizard (Qwen3 ASR recommended instead)
+- **Whisper Now Optional** - Moved from auto-install to optional in setup wizard, same as Qwen3-ASR.
 - **Suppressed Noisy Warnings** - Silenced verbose k2 and flash-attn warnings during engine checks
 
 ## February 8, 2026

@@ -313,7 +313,7 @@ class PrepSamplesTool(Tool):
             is_ds = is_dataset_mode(data_type)
             heading = "### Add or Edit Audio <small>(Drag and drop audio or video files)</small>"
             engine, _ = parse_asr_model(transcribe_model)
-            show_auto_split = is_ds and engine == "Qwen3 ASR"
+            show_auto_split = is_ds and engine in ("Qwen3 ASR", "Whisper")
             return (
                 gr.update(visible=not is_ds),    # samples_col
                 gr.update(visible=is_ds),        # datasets_col
@@ -699,9 +699,9 @@ class PrepSamplesTool(Tool):
                     if not clip_prefix:
                         return "Invalid clip name", gr.update(), gr.update(), gr.update()
 
-                    _, asr_size = parse_asr_model(transcribe_model)
+                    engine, asr_size = parse_asr_model(transcribe_model)
                     status, files = auto_split_audio_handler(
-                        clip_prefix, audio, folder, language, asr_size or "Large",
+                        clip_prefix, audio, folder, language, engine, asr_size or "Large",
                         split_min
                     )
                     return status, gr.update(), files, gr.update()
@@ -935,13 +935,16 @@ class PrepSamplesTool(Tool):
 
             return segments
 
-        def auto_split_audio_handler(clip_prefix, audio_file, folder, language, qwen3_asr_size,
+        def auto_split_audio_handler(clip_prefix, audio_file, folder, language, engine, asr_size,
                                      split_min=4.0,
                                      progress=gr.Progress()):
-            """Auto-split a long audio file into training clips using Qwen3 ASR + ForcedAligner.
+            """Auto-split a long audio file into training clips using word-level timestamps.
 
-            Transcribes audio, aligns words to timestamps, splits at natural sentence
-            boundaries, and saves numbered clips with transcripts to the dataset folder.
+            Supports two engines:
+            - Qwen3 ASR: Transcribes with Qwen3 ASR, then aligns with Qwen3-ForcedAligner
+            - Whisper: Transcribes with word_timestamps=True (built-in alignment)
+
+            Splits at natural sentence boundaries and saves numbered clips with transcripts.
             """
             if audio_file is None:
                 return "Load an audio file into the editor first (drag and drop).", gr.update()
@@ -956,63 +959,116 @@ class PrepSamplesTool(Tool):
                 # Check audio duration (ForcedAligner limit: 5 minutes)
                 info = sf.info(audio_file)
                 duration = info.duration
-                if duration > 300:
-                    return ("Audio exceeds 5 minute limit for auto-split. "
-                            "Please trim the audio first."), gr.update()
+                if engine == "Qwen3 ASR" and duration > 300:
+                    return ("Audio exceeds 5 minute limit for Qwen3 ASR auto-split. "
+                            "Please trim the audio first, or use Whisper instead."), gr.update()
                 if duration < 3:
                     return "Audio too short for auto-splitting (minimum 3 seconds).", gr.update()
 
-                # Step 1: Transcribe with Qwen3 ASR
-                progress(0.05, desc="Loading Qwen3 ASR model...")
-                try:
-                    model = asr_manager.get_qwen3_asr(size=qwen3_asr_size)
-                except Exception as e:
-                    return f"Failed to load Qwen3 ASR: {str(e)}", gr.update()
-
-                progress(0.10, desc="Transcribing audio...")
                 lang_option = language if language and language != "Auto-detect" else None
-                asr_result = model.transcribe(audio_file, language=lang_option)
-                full_text = asr_result["text"].strip()
-                detected_language = asr_result.get("language", None)
 
-                if not full_text:
-                    return "No speech detected in the audio.", gr.update()
+                if engine == "Whisper":
+                    # --- Whisper path: single call with word_timestamps ---
+                    if not asr_manager.whisper_available:
+                        return "Whisper not available. Use Qwen3 ASR instead.", gr.update()
 
-                print(f"[Auto-Split] Transcription: {full_text[:200]}...")
-                print(f"[Auto-Split] Detected language: {detected_language}")
+                    progress(0.05, desc="Loading Whisper...")
+                    model = asr_manager.get_whisper()
 
-                # Use detected language for alignment if user didn't specify one
-                align_language = lang_option or detected_language
+                    progress(0.15, desc="Transcribing with word timestamps...")
+                    whisper_options = {"word_timestamps": True}
+                    if lang_option:
+                        lang_code = {
+                            "English": "en", "Chinese": "zh", "Japanese": "ja",
+                            "Korean": "ko", "German": "de", "French": "fr",
+                            "Russian": "ru", "Portuguese": "pt", "Spanish": "es",
+                            "Italian": "it"
+                        }.get(lang_option, None)
+                        if lang_code:
+                            whisper_options["language"] = lang_code
 
-                # Step 2: Load forced aligner and get word timestamps
-                progress(0.25, desc="Loading forced aligner...")
-                try:
-                    aligner = asr_manager.get_qwen3_forced_aligner()
-                except Exception as e:
-                    return f"Failed to load forced aligner: {str(e)}", gr.update()
+                    result = model.transcribe(audio_file, **whisper_options)
+                    full_text = result["text"].strip()
 
-                progress(0.35, desc="Aligning words to audio...")
-                try:
-                    align_results = aligner.align(
-                        audio=audio_file,
-                        text=full_text,
-                        language=align_language,
-                    )
-                    word_timestamps = align_results[0] if align_results else []
-                except Exception as e:
-                    asr_manager.unload_forced_aligner()
-                    return f"Alignment failed: {str(e)}", gr.update()
+                    if not full_text:
+                        return "No speech detected in the audio.", gr.update()
 
-                if not word_timestamps:
-                    asr_manager.unload_forced_aligner()
-                    return "Alignment produced no word timestamps.", gr.update()
+                    print(f"[Auto-Split] Whisper transcription: {full_text[:200]}...")
 
-                print(f"[Auto-Split] Got {len(word_timestamps)} word timestamps")
-                # Log first few timestamps for debugging
-                for j, wt in enumerate(word_timestamps[:5]):
-                    print(f"  [{j}] '{wt.text}' {wt.start_time:.2f}-{wt.end_time:.2f}")
-                if len(word_timestamps) > 5:
-                    print(f"  ... ({len(word_timestamps) - 5} more)")
+                    # Extract word timestamps from Whisper segments
+                    # Whisper returns segments[].words[] with {word, start, end}
+                    class WhisperWordTimestamp:
+                        def __init__(self, word, start, end):
+                            self.text = word
+                            self.start_time = start
+                            self.end_time = end
+
+                    word_timestamps = []
+                    for seg in result.get("segments", []):
+                        for w in seg.get("words", []):
+                            word_timestamps.append(WhisperWordTimestamp(
+                                w["word"].strip(), w["start"], w["end"]
+                            ))
+
+                    if not word_timestamps:
+                        return "Whisper produced no word timestamps.", gr.update()
+
+                    print(f"[Auto-Split] Got {len(word_timestamps)} word timestamps from Whisper")
+                    for j, wt in enumerate(word_timestamps[:5]):
+                        print(f"  [{j}] '{wt.text}' {wt.start_time:.2f}-{wt.end_time:.2f}")
+                    if len(word_timestamps) > 5:
+                        print(f"  ... ({len(word_timestamps) - 5} more)")
+
+                else:
+                    # --- Qwen3 ASR path: transcribe + forced aligner ---
+                    progress(0.05, desc=f"Loading Qwen3 ASR ({asr_size})...")
+                    try:
+                        model = asr_manager.get_qwen3_asr(size=asr_size)
+                    except Exception as e:
+                        return f"Failed to load Qwen3 ASR: {str(e)}", gr.update()
+
+                    progress(0.10, desc="Transcribing audio...")
+                    asr_result = model.transcribe(audio_file, language=lang_option)
+                    full_text = asr_result["text"].strip()
+                    detected_language = asr_result.get("language", None)
+
+                    if not full_text:
+                        return "No speech detected in the audio.", gr.update()
+
+                    print(f"[Auto-Split] Transcription: {full_text[:200]}...")
+                    print(f"[Auto-Split] Detected language: {detected_language}")
+
+                    # Use detected language for alignment if user didn't specify one
+                    align_language = lang_option or detected_language
+
+                    # Load forced aligner and get word timestamps
+                    progress(0.25, desc="Loading forced aligner...")
+                    try:
+                        aligner = asr_manager.get_qwen3_forced_aligner()
+                    except Exception as e:
+                        return f"Failed to load forced aligner: {str(e)}", gr.update()
+
+                    progress(0.35, desc="Aligning words to audio...")
+                    try:
+                        align_results = aligner.align(
+                            audio=audio_file,
+                            text=full_text,
+                            language=align_language,
+                        )
+                        word_timestamps = align_results[0] if align_results else []
+                    except Exception as e:
+                        asr_manager.unload_forced_aligner()
+                        return f"Alignment failed: {str(e)}", gr.update()
+
+                    if not word_timestamps:
+                        asr_manager.unload_forced_aligner()
+                        return "Alignment produced no word timestamps.", gr.update()
+
+                    print(f"[Auto-Split] Got {len(word_timestamps)} word timestamps")
+                    for j, wt in enumerate(word_timestamps[:5]):
+                        print(f"  [{j}] '{wt.text}' {wt.start_time:.2f}-{wt.end_time:.2f}")
+                    if len(word_timestamps) > 5:
+                        print(f"  ... ({len(word_timestamps) - 5} more)")
 
                 # Step 3: Split into segments at sentence boundaries
                 progress(0.50, desc="Splitting into segments...")
@@ -1020,7 +1076,8 @@ class PrepSamplesTool(Tool):
                                                min_duration=split_min)
 
                 if not segments:
-                    asr_manager.unload_forced_aligner()
+                    if engine == "Qwen3 ASR":
+                        asr_manager.unload_forced_aligner()
                     return "Could not identify any segments to split.", gr.update()
 
                 print(f"[Auto-Split] Created {len(segments)} segments")
@@ -1066,8 +1123,9 @@ class PrepSamplesTool(Tool):
                     progress(0.55 + (0.40 * (i + 1) / len(segments)),
                              desc=f"Saving clip {i + 1}/{len(segments)}...")
 
-                # Step 5: Unload aligner to free VRAM
-                asr_manager.unload_forced_aligner()
+                # Step 5: Unload aligner to free VRAM (Qwen3 only)
+                if engine == "Qwen3 ASR":
+                    asr_manager.unload_forced_aligner()
 
                 progress(1.0, desc="Done!")
                 if play_completion_beep:
@@ -1081,9 +1139,10 @@ class PrepSamplesTool(Tool):
             except Exception as e:
                 import traceback
                 print(f"[Auto-Split] Error:\n{traceback.format_exc()}")
-                # Clean up aligner on error
+                # Clean up aligner on error (Qwen3 only)
                 try:
-                    asr_manager.unload_forced_aligner()
+                    if engine == "Qwen3 ASR":
+                        asr_manager.unload_forced_aligner()
                 except Exception:
                     pass
                 return f"Error: {str(e)}", gr.update()
@@ -1409,7 +1468,7 @@ class PrepSamplesTool(Tool):
             save_preference("transcribe_model", model)
             engine, _ = parse_asr_model(model)
             is_ds = is_dataset_mode(data_type)
-            show_auto_split = is_ds and engine == "Qwen3 ASR"
+            show_auto_split = is_ds and engine in ("Qwen3 ASR", "Whisper")
             show_lang = engine in ("Qwen3 ASR", "Whisper")
             return (
                 gr.update(visible=show_lang),
