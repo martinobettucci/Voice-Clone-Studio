@@ -1,7 +1,7 @@
 # Voice Clone Studio
 
 A modular Gradio-based web UI for voice cloning, voice design, multi-speaker conversation and sound effects, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [VibeVoice](https://github.com/microsoft/VibeVoice), [LuxTTS](https://github.com/ysharma3501/LuxTTS) and [MMAudio](https://github.com/hkchengrex/MMAudio).
-Supports both Whisper and VibeVoice ASR for automatic transcription.
+Supports Qwen3-ASR, VibeVoice ASR and  Whisper for automatic transcription.
 
 ![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-v1.4-blue) ![Qwen3-TTS](https://img.shields.io/badge/Qwen3--TTS-Powered-blue) ![LuxTTS](https://img.shields.io/badge/LuxTTS-TTS-orange) ![VibeVoice](https://img.shields.io/badge/VibeVoice-TTS-green) ![VibeVoice](https://img.shields.io/badge/VibeVoice-ASR-green) ![MMAudio](https://img.shields.io/badge/MMAudio-SFX-purple)
 
@@ -65,18 +65,6 @@ Perfect for:
 
 ### Voice Presets
 Generate with premium pre-built voices with optional style instructions using Qwen3-TTS Custom Model:
-
-| Speaker | Description | Language |
-|---------|-------------|----------|
-| Vivian | Bright, slightly edgy young female | Chinese |
-| Serena | Warm, gentle young female | Chinese |
-| Uncle_Fu | Seasoned male, low mellow timbre | Chinese |
-| Dylan | Youthful Beijing male, clear natural | Chinese (Beijing) |
-| Eric | Lively Chengdu male, husky brightness | Chinese (Sichuan) |
-| Ryan | Dynamic male, strong rhythmic drive | English |
-| Aiden | Sunny American male, clear midrange | English |
-| Ono_Anna | Playful Japanese female, light nimble | Japanese |
-| Sohee | Warm Korean female, rich emotion | Korean |
 
 - Style instructions supported (emotion, tone, speed)
 - Each speaker works best in native language but supports all
