@@ -38,6 +38,16 @@ echo ""
 read -t 30 -p "Install Qwen3 ASR? (y/N, default N in 30s): " INSTALL_QWEN3ASR
 INSTALL_QWEN3ASR=${INSTALL_QWEN3ASR:-N}
 echo ""
+
+echo "========================================="
+echo "Optional: Install llama.cpp for LLM prompt generation?"
+echo "llama.cpp powers the Prompt Manager's local LLM feature."
+echo "Lets you generate TTS and SFX prompts using Qwen3 models."
+echo "========================================="
+echo ""
+read -t 30 -p "Install llama.cpp? (y/N, default N in 30s): " INSTALL_LLAMA
+INSTALL_LLAMA=${INSTALL_LLAMA:-N}
+echo ""
 echo "All questions answered - installing now..."
 echo ""
 
@@ -129,6 +139,39 @@ if [[ "$INSTALL_QWEN3ASR" =~ ^[Yy]$ ]]; then
     fi
 else
     echo "Skipping Qwen3 ASR installation."
+fi
+
+# llama.cpp
+if [[ "$INSTALL_LLAMA" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Installing llama.cpp..."
+    if command -v brew >/dev/null 2>&1; then
+        if brew install llama.cpp; then
+            echo "llama.cpp installed successfully!"
+        else
+            echo "llama.cpp installation via Homebrew failed."
+            echo "You can install manually from: https://github.com/ggml-org/llama.cpp"
+        fi
+    elif command -v port >/dev/null 2>&1; then
+        if sudo port install llama.cpp; then
+            echo "llama.cpp installed successfully!"
+        else
+            echo "llama.cpp installation via MacPorts failed."
+            echo "You can install manually from: https://github.com/ggml-org/llama.cpp"
+        fi
+    elif command -v nix >/dev/null 2>&1; then
+        if nix profile install nixpkgs#llama-cpp; then
+            echo "llama.cpp installed successfully!"
+        else
+            echo "llama.cpp installation via Nix failed."
+            echo "You can install manually from: https://github.com/ggml-org/llama.cpp"
+        fi
+    else
+        echo "No supported package manager found (brew, port, nix)."
+        echo "Please install llama.cpp manually from: https://github.com/ggml-org/llama.cpp"
+    fi
+else
+    echo "Skipping llama.cpp installation."
 fi
 
 echo ""

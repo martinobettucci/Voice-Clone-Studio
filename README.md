@@ -1,7 +1,6 @@
 # Voice Clone Studio
 
-A modular Gradio-based web UI for voice cloning, voice design, multi-speaker conversation and sound effects, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [VibeVoice](https://github.com/microsoft/VibeVoice), [LuxTTS](https://github.com/ysharma3501/LuxTTS) and [MMAudio](https://github.com/hkchengrex/MMAudio).
-Supports Qwen3-ASR, VibeVoice ASR and  Whisper for automatic transcription.
+Is a multi model, modular Gradio-based web UI for voice cloning, voice design, multi-speaker conversation and sound effects, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [VibeVoice](https://github.com/microsoft/VibeVoice), [LuxTTS](https://github.com/ysharma3501/LuxTTS) and [MMAudio](https://github.com/hkchengrex/MMAudio). Supports Qwen3-ASR, VibeVoice ASR and  Whisper for automatic transcription. As well as Llama.cpp for Prompt Generation and a Prompt Saving, based on [ComfyUI Prompt-Manager](https://github.com/FranckyB/ComfyUI-Prompt-Manager)
 
 ![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-v1.4-blue) ![Qwen3-TTS](https://img.shields.io/badge/Qwen3--TTS-Powered-blue) ![LuxTTS](https://img.shields.io/badge/LuxTTS-TTS-orange) ![VibeVoice](https://img.shields.io/badge/VibeVoice-TTS-green) ![VibeVoice](https://img.shields.io/badge/VibeVoice-ASR-green) ![MMAudio](https://img.shields.io/badge/MMAudio-SFX-purple)
 
@@ -122,6 +121,18 @@ Generate sound effects and ambient audio using MMAudio (CVPR 2025, MIT license):
 - **Video Preview** - Source/Result toggle to compare original video against the audio-muxed result
 - **Fine Controls** - Adjustable duration, guidance strength, and negative prompts
 
+### Prompt Manager
+Save, browse, and generate text prompts for your TTS sessions. Includes a built-in LLM generator powered by [llama.cpp](https://github.com/ggml-org/llama.cpp):
+
+- **Saved Prompts** - Store and organize prompts in a local `prompts.json` file, browse with the file lister
+- **LLM Generation** - Generate prompts locally using Qwen3 language models via llama.cpp (no cloud API needed)
+- **System Prompt Presets** - Built-in presets for TTS/Voice and Sound Design/SFX workflows, or write your own
+- **Model Auto-Download** - Download Qwen3-4B (~4.8GB) or Qwen3-8B (~8.5GB) GGUF models directly from HuggingFace
+- **Custom Models** - Drop any `.gguf` file into `models/llama/` to use your own models
+- **Automatic Server Management** - llama.cpp server starts/stops automatically, cleaned up on exit or Clear VRAM
+
+Inspired by [ComfyUI-Prompt-Manager](https://github.com/FranckyB/ComfyUI-Prompt-Manager) by FranckyB.
+
 ### Output History
 View, play back, and manage your previously generated audio files. Multi-select for batch deletion, double-click to play.
 
@@ -144,6 +155,7 @@ Centralized application configuration:
 - **macOS:** Apple Silicon (M1/M2/M3/M4) for MPS acceleration, or Intel Mac (CPU-only)
 - **SOX**  (Sound eXchange) - Required for audio processing
 - **FFMPEG** - Multimedia framework required for audio format conversion
+- **llama.cpp** (optional) - Required only for the Prompt Manager's LLM generation feature. See [llama.cpp](https://github.com/ggml-org/llama.cpp)
 - [Flash Attention 2](https://github.com/Dao-AILab/flash-attention) (optional, CUDA only)
 
 **Note for Linux/macOS users:** `openai-whisper` is skipped (compatibility issues). Use VibeVoice ASR or Qwen3 ASR for transcription instead.
@@ -285,7 +297,19 @@ sudo dnf install ffmpeg
 brew install ffmpeg
 ```
 
-7. (Optional) Install FlashAttention 2 for faster generation (CUDA only):
+7. (Optional) Install llama.cpp for the Prompt Manager's LLM generation feature:
+
+```bash
+# Windows
+winget install llama.cpp
+
+# Linux
+brew install llama.cpp
+
+# Or build from source: https://github.com/ggml-org/llama.cpp
+```
+
+8. (Optional) Install FlashAttention 2 for faster generation (CUDA only):
 **Note:** The application automatically detects and uses the best available attention mechanism. Configure in Settings tab: `flash_attention_2` (CUDA only) → `sdpa` (CUDA/MPS) → `eager` (all devices)
 
 ## Troubleshooting

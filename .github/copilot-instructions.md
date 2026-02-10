@@ -46,6 +46,7 @@ modules/
 │   │   ├── voice_presets.py       # Voice Presets tool
 │   │   ├── conversation.py        # Conversation tool
 │   │   ├── voice_design.py        # Voice Design tool
+│   │   ├── sound_effects.py       # Sound Effects tool (MMAudio)
 │   │   ├── prep_audio.py          # Prep Audio tool (samples + datasets)
 │   │   ├── output_history.py      # Output History tool
 │   │   ├── train_model.py         # Train Model tool
@@ -53,9 +54,10 @@ modules/
 │   │
 │   ├── ai_models/                 # AI model managers
 │   │   ├── __init__.py            # get_tts_manager(), get_asr_manager()
-│   │   ├── tts_manager.py         # TTS: Qwen3 Base/Custom/Design, VibeVoice
-│   │   ├── asr_manager.py         # ASR: Whisper, VibeVoice ASR
-│   │   └── model_utils.py         # Shared model utilities
+│   │   ├── tts_manager.py         # TTS: Qwen3 Base/Custom/Design, VibeVoice, LuxTTS
+│   │   ├── asr_manager.py         # ASR: Whisper, Qwen3 ASR, VibeVoice ASR
+│   │   ├── foley_manager.py       # Sound Effects: MMAudio
+│   │   └── model_utils.py         # Shared model utilities (device, dtype, cache, seed)
 │   │
 │   ├── ui_components/             # Reusable UI components
 │   │   ├── __init__.py            # Component exports
@@ -67,6 +69,7 @@ modules/
 │   └── gradio_filelister/         # Custom Gradio component (v0.4.0)
 │
 ├── deepfilternet/                 # EXTERNAL: Audio denoising
+├── mmaudio_repo/                  # EXTERNAL: MMAudio sound effects
 ├── qwen_finetune/                 # EXTERNAL: Training logic
 ├── vibevoice_tts/                 # EXTERNAL: VibeVoice TTS
 └── vibevoice_asr/                 # EXTERNAL: VibeVoice ASR
@@ -260,9 +263,169 @@ Managers automatically unload the previous model when switching, and respect `of
 Custom Gradio component (v0.4.0) for file management. Pre-built wheel in `wheel/`.
 - Multi-select for batch file deletion
 - Double-click to play audio instantly
-- Used by voice_clone, prep_audio, and output_history tools
+- Used by voice_clone, prep_audio, output_history, and voice_presets tools
 
 To rebuild: `python -m build --wheel` in the gradio_filelister directory.
+
+**Creating a FileLister:**
+```python
+from gradio_filelister import FileLister
+
+components['my_lister'] = FileLister(
+    value=get_sample_choices(),  # List of filenames (strings)
+    height=250,                  # Pixel height
+    show_footer=False,           # Hide footer
+    interactive=True,            # Allow selection
+)
+```
+
+**Reading selections** — value is a dict with `"selected"` key:
+```python
+def get_selected_filename(lister_value):
+    if not lister_value:
+        return None
+    selected = lister_value.get("selected", [])
+    if len(selected) == 1:
+        return selected[0]  # Returns filename string (e.g., "sample.wav")
+    return None
+```
+
+**Updating file list:**
+```python
+return gr.update(value=get_sample_choices())  # Pass new list of filenames
+```
+
+**Double-click to play audio** — wire to a nearby `gr.Audio` preview:
+```python
+components['my_lister'].double_click(
+    fn=None,
+    js="() => { setTimeout(() => { const btn = document.querySelector('#my-audio-preview .play-pause-button'); if (btn) btn.click(); }, 150); }"
+)
+```
+
+## Modals (Confirmation & Input)
+
+Both modals are global components created once in the main UI. Tools access them via `shared_state`:
+
+```python
+show_confirmation_modal_js = shared_state['show_confirmation_modal_js']
+show_input_modal_js = shared_state['show_input_modal_js']
+confirm_trigger = shared_state['confirm_trigger']
+input_trigger = shared_state['input_trigger']
+```
+
+### Confirmation Modal
+
+Use for destructive actions (delete, clear, reset). Shows a Yes/Cancel dialog.
+
+**Step 1 — Open modal on button click:**
+```python
+components['delete_btn'].click(
+    fn=None,
+    inputs=None,
+    outputs=None,
+    js=show_confirmation_modal_js(
+        title="Delete Sample?",
+        message="This will permanently delete the selected sample.",
+        confirm_button_text="Delete",
+        context="my_delete_"          # Unique prefix to identify this action
+    )
+)
+```
+
+**Step 2 — Handle the result via `confirm_trigger`:**
+```python
+def handle_confirm(confirm_value, other_inputs...):
+    # CRITICAL: Filter by context prefix — other tools share this trigger
+    if not confirm_value or not confirm_value.startswith("my_delete_"):
+        return gr.update()
+
+    # User confirmed — do the action
+    # confirm_value = "my_delete_confirm" or "my_delete_cancel"
+    if "cancel" in confirm_value:
+        return gr.update()
+
+    # Perform the delete...
+    return "Deleted successfully"
+
+confirm_trigger.change(
+    handle_confirm,
+    inputs=[confirm_trigger, ...],
+    outputs=[components['status']]
+)
+```
+
+### Input Modal
+
+Use when you need text input from the user (naming, renaming). Shows a text field with Save/Cancel.
+
+**Step 1 — Open modal on button click:**
+```python
+save_modal_js = show_input_modal_js(
+    title="Save Voice Sample",
+    message="Enter a name for this voice sample:",
+    placeholder="e.g., MyVoice, Female-Accent",
+    context="save_sample_"            # Unique prefix to identify this action
+)
+
+# With a pre-populated default value (passed as input):
+components['save_btn'].click(
+    fn=None,
+    inputs=[components['suggested_name']],   # Gradio component with default value
+    js=f"""
+    (suggestedName) => {{
+        const openModal = {save_modal_js};
+        openModal(suggestedName);
+    }}
+    """
+)
+
+# Without a default value:
+components['save_btn'].click(
+    fn=None,
+    inputs=None,
+    js=show_input_modal_js(
+        title="Save Sample",
+        message="Enter a name:",
+        placeholder="e.g., MyVoice",
+        context="save_sample_"
+    )
+)
+```
+
+**Step 2 — Handle the result via `input_trigger`:**
+```python
+def handle_input_modal(input_value, other_inputs...):
+    # CRITICAL: Filter by context prefix — other tools share this trigger
+    if not input_value or not input_value.startswith("save_sample_"):
+        return gr.update()
+
+    # Check for cancel
+    parts = input_value.split("_")
+    if len(parts) >= 3 and parts[2] == "cancel":
+        return gr.update()
+
+    # Extract user-entered name: "save_sample_<name>_<uuid>"
+    raw_name = input_value[len("save_sample_"):]
+    name_parts = raw_name.rsplit("_", 1)       # Split off trailing UUID
+    chosen_name = name_parts[0] if len(name_parts) > 1 else raw_name
+
+    # Use chosen_name...
+    return f"Saved as: {chosen_name}"
+
+input_trigger.change(
+    handle_input_modal,
+    inputs=[input_trigger, ...],
+    outputs=[components['status']]
+)
+```
+
+**Key rules for modals:**
+- **Context prefix must be unique** across all tools (e.g., `"save_sfx_"`, `"save_design_"`, `"delete_output_"`)
+- **Always filter by prefix** in your handler — the trigger is shared globally
+- **Cancel detection**: Check for `"cancel"` in the value
+- **Input value format**: `"{context}{user_text}_{uuid}"` — strip context prefix and trailing UUID
+- **Confirm value format**: `"{context}confirm"` or `"{context}cancel"`
 
 ## Audio Standards
 
@@ -287,15 +450,36 @@ def long_operation(progress=gr.Progress()):
 
 ### Error Messages
 ```python
-return None, "Error: Clear description of what went wrong and how to fix it"
+return None, "❌ Error: Clear description of what went wrong and how to fix it"
 ```
 
 ### Status Updates
-- Never use emoji prefixes in console output
+- Never use emoji,  with ❌ being the only exception, to be used in error messages.
 - Provide actionable information
 - Include progress indicators
 
 ## Platform Compatibility
+
+**Supported platforms:** Windows (CUDA), Linux (CUDA), macOS (MPS/CPU)
+
+### Device Detection
+All device logic is centralized in `model_utils.py`:
+```python
+from modules.core_components.ai_models.model_utils import get_device, get_dtype, empty_device_cache, set_seed
+
+get_device()           # Returns "cuda:0" > "mps" > "cpu" (priority order)
+get_dtype()            # CUDA: bfloat16, MPS: float16, CPU: float32
+get_dtype("mps")       # Can pass explicit device
+empty_device_cache()   # Clears CUDA or MPS cache
+set_seed(42)           # torch.manual_seed + cuda.manual_seed_all if available
+```
+
+**NEVER hardcode `"cuda:0"` or `torch.bfloat16`** — always use `get_device()` / `get_dtype()`.
+
+### macOS Notes
+- Train Model tab is auto-disabled on macOS (runtime override, not persisted)
+- Flash Attention 2 is CUDA-only; use `sdpa` on MPS
+- `bfloat16` not supported on Apple Silicon — `get_dtype()` returns `float16`
 
 ```python
 import platform

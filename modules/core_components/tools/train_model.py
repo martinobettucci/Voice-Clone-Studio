@@ -29,7 +29,8 @@ class TrainModelTool(Tool):
         format_help_html = shared_state['format_help_html']
         get_dataset_folders = shared_state['get_dataset_folders']
 
-        with gr.TabItem("Train Model"):
+        with gr.TabItem("Train Model") as train_tab:
+            components['train_tab'] = train_tab
             gr.Markdown("Train a custom voice model using your finetuning dataset")
             with gr.Row():
                 # Left column - Dataset selection
@@ -44,7 +45,7 @@ class TrainModelTool(Tool):
                         interactive=True
                     )
 
-                    components['refresh_train_folder_btn'] = gr.Button("Refresh Datasets", size="sm")
+                    components['refresh_train_folder_btn'] = gr.Button("Refresh Datasets", size="sm", visible=False)
 
                     components['ref_audio_lister'] = FileLister(
                         value=[],
@@ -156,8 +157,8 @@ class TrainModelTool(Tool):
             outputs=[components['ref_audio_lister'], components['ref_audio_preview']]
         )
 
-        # --- Refresh folders ---
-        components['refresh_train_folder_btn'].click(
+        # Auto-refresh datasets when tab is selected
+        components['train_tab'].select(
             lambda: gr.update(choices=["(Select Dataset)"] + get_dataset_folders(), value="(Select Dataset)"),
             outputs=[components['train_folder_dropdown']]
         )

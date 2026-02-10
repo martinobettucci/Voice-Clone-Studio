@@ -10,7 +10,7 @@ import sys
 import torch
 from pathlib import Path
 
-from .model_utils import get_device, get_dtype, empty_device_cache
+from .model_utils import get_device, get_dtype, empty_device_cache, run_pre_load_hooks
 
 
 # MMAudio model configurations
@@ -223,6 +223,9 @@ class FoleyManager:
         if self._net is not None:
             print(f"Switching MMAudio model to {display_name} - unloading previous...")
             self.unload_all()
+
+        # Stop external servers (e.g., llama.cpp) to free VRAM before loading
+        run_pre_load_hooks()
 
         _ensure_mmaudio_path()
 

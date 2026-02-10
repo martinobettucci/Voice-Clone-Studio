@@ -251,9 +251,19 @@ def create_ui():
 
         # Wire up unload button
         def on_unload_all():
+            import gc
             _tts_manager.unload_all()
             _asr_manager.unload_all()
             _foley_manager.unload_all()
+            # Stop llama.cpp server if running
+            try:
+                from modules.core_components.tools.prompt_manager import _stop_server
+                _stop_server()
+            except Exception:
+                pass
+            gc.collect()
+            from modules.core_components.ai_models.model_utils import empty_device_cache
+            empty_device_cache()
             return "VRAM freed."
 
         # Clear status after 3 seconds to keep UI tidy

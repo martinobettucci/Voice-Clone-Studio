@@ -21,6 +21,7 @@ from modules.core_components.tools import voice_design
 from modules.core_components.tools import prep_audio
 from modules.core_components.tools import train_model
 from modules.core_components.tools import sound_effects
+from modules.core_components.tools import prompt_manager
 from modules.core_components.tools import output_history
 from modules.core_components.tools import settings
 
@@ -34,6 +35,7 @@ ALL_TOOLS = {
     'prep_audio': (prep_audio, prep_audio.PrepSamplesTool.config),
     'train_model': (train_model, train_model.TrainModelTool.config),
     'sound_effects': (sound_effects, sound_effects.SoundEffectsTool.config),
+    'prompt_manager': (prompt_manager, prompt_manager.PromptManagerTool.config),
     'output_history': (output_history, output_history.OutputHistoryTool.config),
     'settings': (settings, settings.SettingsTool.config),
 }
@@ -852,10 +854,10 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
 
     # Lambdas that reference shared_state (must be added after dict creation)
     shared_state['save_emotion_handler'] = lambda name, intensity, temp, rep_pen, top_p: handle_save_emotion(
-        shared_state['_active_emotions'], shared_state['_user_config'], CONFIG_FILE, name, intensity, temp, rep_pen, top_p
+        shared_state['_active_emotions'], name, intensity, temp, rep_pen, top_p
     )
     shared_state['delete_emotion_handler'] = lambda confirm_val, emotion_name: handle_delete_emotion(
-        shared_state['_active_emotions'], shared_state['_user_config'], CONFIG_FILE, confirm_val, emotion_name
+        shared_state['_active_emotions'], confirm_val, emotion_name
     )
     shared_state['save_preference'] = lambda k, v: save_config(shared_state['_user_config'], k, v)
 
@@ -921,9 +923,6 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
     # Load config and emotions
     user_config = load_config()
     active_emotions = load_emotions_from_config(user_config)
-
-    if 'emotions' not in user_config or user_config['emotions'] is None:
-        user_config['emotions'] = active_emotions
 
     # Setup directories
     OUTPUT_DIR = project_root / user_config.get("output_folder", "output")

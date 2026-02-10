@@ -88,7 +88,8 @@ class ConversationTool(Tool):
         is_qwen_custom = initial_conv_model == "Qwen Speakers"
         is_luxtts = initial_conv_model == "LuxTTS"
 
-        with gr.TabItem("Conversation"):
+        with gr.TabItem("Conversation") as conv_tab:
+            components['conv_tab'] = conv_tab
             gr.Markdown("Choose a model and create multi-speaker conversations with your custom voices")
             components['conv_model_type'] = gr.Radio(
                 choices=visible_choices,
@@ -215,7 +216,7 @@ class ConversationTool(Tool):
                                     info="Select from your prepared samples"
                                 )
 
-                        components['refresh_qwen_samples_btn'] = gr.Button("Refresh Voice Samples", size="md")
+                        components['refresh_qwen_samples_btn'] = gr.Button("Refresh Voice Samples", size="md", visible=False)
 
                     # LuxTTS voice sample selectors (reuse same layout as Qwen Base)
                     components['luxtts_voices_section'] = gr.Column(visible=is_luxtts)
@@ -286,7 +287,7 @@ class ConversationTool(Tool):
                                     info="Select from your prepared samples"
                                 )
 
-                        components['refresh_luxtts_samples_btn'] = gr.Button("Refresh Voice Samples", size="md")
+                        components['refresh_luxtts_samples_btn'] = gr.Button("Refresh Voice Samples", size="md", visible=False)
 
                     # VibeVoice voice sample selectors
                     components['vibevoice_voices_section'] = gr.Column(visible=is_vibevoice)
@@ -325,7 +326,7 @@ class ConversationTool(Tool):
                                     info="Select from your prepared samples"
                                 )
 
-                        components['refresh_conv_samples_btn'] = gr.Button("Refresh Voice Samples", size="md")
+                        components['refresh_conv_samples_btn'] = gr.Button("Refresh Voice Samples", size="md", visible=False)
 
                 # Right - Settings and output
                 with gr.Column(scale=1):
@@ -1442,39 +1443,27 @@ class ConversationTool(Tool):
         )
 
         # Refresh voice samples handler
-        def refresh_voice_samples():
-            """Refresh all voice sample dropdowns."""
+        def refresh_all_voice_samples():
+            """Refresh all voice sample dropdowns across all engines."""
             updated_samples = get_sample_choices()
-            return [gr.update(choices=updated_samples)] * 4
+            update = gr.update(choices=updated_samples)
+            return [update] * 20
 
-        def refresh_qwen_voice_samples():
-            """Refresh Qwen Base voice sample dropdowns."""
-            updated_samples = get_sample_choices()
-            return [gr.update(choices=updated_samples)] * 8
-
-        components['refresh_conv_samples_btn'].click(
-            refresh_voice_samples,
-            inputs=[],
-            outputs=[components['voice_sample_1'], components['voice_sample_2'], components['voice_sample_3'], components['voice_sample_4']]
-        )
-
-        components['refresh_qwen_samples_btn'].click(
-            refresh_qwen_voice_samples,
-            inputs=[],
-            outputs=[components['qwen_voice_sample_1'], components['qwen_voice_sample_2'], components['qwen_voice_sample_3'], components['qwen_voice_sample_4'],
-                     components['qwen_voice_sample_5'], components['qwen_voice_sample_6'], components['qwen_voice_sample_7'], components['qwen_voice_sample_8']]
-        )
-
-        def refresh_luxtts_voice_samples():
-            """Refresh LuxTTS voice sample dropdowns."""
-            updated_samples = get_sample_choices()
-            return [gr.update(choices=updated_samples)] * 8
-
-        components['refresh_luxtts_samples_btn'].click(
-            refresh_luxtts_voice_samples,
-            inputs=[],
-            outputs=[components['luxtts_voice_sample_1'], components['luxtts_voice_sample_2'], components['luxtts_voice_sample_3'], components['luxtts_voice_sample_4'],
-                     components['luxtts_voice_sample_5'], components['luxtts_voice_sample_6'], components['luxtts_voice_sample_7'], components['luxtts_voice_sample_8']]
+        # Auto-refresh all voice sample dropdowns when tab is selected
+        components['conv_tab'].select(
+            refresh_all_voice_samples,
+            outputs=[
+                components['voice_sample_1'], components['voice_sample_2'],
+                components['voice_sample_3'], components['voice_sample_4'],
+                components['qwen_voice_sample_1'], components['qwen_voice_sample_2'],
+                components['qwen_voice_sample_3'], components['qwen_voice_sample_4'],
+                components['qwen_voice_sample_5'], components['qwen_voice_sample_6'],
+                components['qwen_voice_sample_7'], components['qwen_voice_sample_8'],
+                components['luxtts_voice_sample_1'], components['luxtts_voice_sample_2'],
+                components['luxtts_voice_sample_3'], components['luxtts_voice_sample_4'],
+                components['luxtts_voice_sample_5'], components['luxtts_voice_sample_6'],
+                components['luxtts_voice_sample_7'], components['luxtts_voice_sample_8'],
+            ]
         )
 
         # Save preferences

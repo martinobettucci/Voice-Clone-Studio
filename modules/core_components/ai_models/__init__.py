@@ -16,6 +16,8 @@ from .model_utils import (
     get_trained_models,
     get_trained_model_names,
     train_model,
+    register_pre_load_hook,
+    run_pre_load_hooks,
 )
 
 from .tts_manager import (
@@ -46,6 +48,8 @@ __all__ = [
     "get_trained_models",
     "get_trained_model_names",
     "train_model",
+    "register_pre_load_hook",
+    "run_pre_load_hooks",
 
     # TTS
     "TTSManager",

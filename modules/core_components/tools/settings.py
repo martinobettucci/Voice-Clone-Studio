@@ -32,6 +32,7 @@ TOGGLEABLE_TOOLS = [
     ("Prep Samples", "Prep Samples"),
     ("Train Model", "Train Model"),
     ("Sound Effects", "Sound Effects"),
+    ("Prompt Manager", "Prompt Manager"),
     ("Output History", "Output History"),
 ]
 
@@ -155,17 +156,23 @@ class SettingsTool(Tool):
                                 TTS_ENGINES = shared_state.get('TTS_ENGINES', {})
                                 engine_settings = _user_config.get("enabled_engines", {})
 
-                                with gr.Column():
-                                    for engine_key, engine_info in TTS_ENGINES.items():
-                                        is_enabled = engine_settings.get(
-                                            engine_key, engine_info.get("default_enabled", True)
-                                        )
-                                        components[f'engine_toggle_{engine_key}'] = gr.Checkbox(
-                                            label=engine_info["label"],
-                                            value=is_enabled,
-                                            interactive=True
-                                        )
-  
+                                for engine_key, engine_info in TTS_ENGINES.items():
+                                    is_enabled = engine_settings.get(
+                                        engine_key, engine_info.get("default_enabled", True)
+                                    )
+                                    components[f'engine_toggle_{engine_key}'] = gr.Checkbox(
+                                        label=engine_info["label"],
+                                        value=is_enabled,
+                                        interactive=True
+                                    )
+
+                                gr.Markdown("### Audio Notifications")
+                                components['settings_audio_notifications'] = gr.Checkbox(
+                                    label="Enable Audio Notifications",
+                                    value=_user_config.get("browser_notifications", True),
+                                    info="Play sound when audio generation completes"
+                                )
+
                             with gr.Column():
                                 gr.Markdown("### Available Transcription Engines")
 
@@ -191,16 +198,25 @@ class SettingsTool(Tool):
                                     )
 
                             with gr.Column():
-                                gr.Markdown("### Audio Notifications")
-                                components['settings_audio_notifications'] = gr.Checkbox(
-                                    label="Enable Audio Notifications",
-                                    value=_user_config.get("browser_notifications", True),
-                                    info="Play sound when audio generation completes"
+                                gr.Markdown("### llama.cpp (Prompt Manager)")
+
+                                components['settings_llama_cpp_path'] = gr.Textbox(
+                                    label="llama.cpp Location",
+                                    value=_user_config.get("llama_cpp_path", ""),
+                                    info="Path to the folder containing llama-server. Leave empty to use system PATH.",
+                                    placeholder="e.g. C:\\llama.cpp\\build\\bin"
                                 )
+                                components['reset_llama_cpp_path_btn'] = gr.Button("Reset", size="sm")
 
-                        gr.Markdown("### Folder Paths")
+                                components['settings_llama_models_path'] = gr.Textbox(
+                                    label="Additional LLM Models Folder",
+                                    value=_user_config.get("llama_models_path", ""),
+                                    info="Extra folder to scan for .gguf models (in addition to models/llama/). Downloads go here if set.",
+                                    placeholder="e.g. D:\\models\\gguf"
+                                )
+                                components['reset_llama_models_path_btn'] = gr.Button("Reset", size="sm")
+
                         gr.Markdown("Configure where files are stored. Changes apply after clicking **Apply Changes**.")
-
                         # Default folder paths
                         default_folders = {
                             "samples": "samples",
@@ -431,6 +447,16 @@ class SettingsTool(Tool):
             outputs=[components['settings_trained_models_folder']]
         )
 
+        components['reset_llama_cpp_path_btn'].click(
+            lambda: "",
+            outputs=[components['settings_llama_cpp_path']]
+        )
+
+        components['reset_llama_models_path_btn'].click(
+            lambda: "",
+            outputs=[components['settings_llama_models_path']]
+        )
+
         def download_model_clicked(model_display_name):
             if not model_display_name or model_display_name.startswith("---"):
                 return "❌ Please select an actual model (not a category header)"
@@ -443,7 +469,7 @@ class SettingsTool(Tool):
             return status
 
         # Apply folder changes
-        def apply_folder_changes(samples, output, datasets, models, trained_models):
+        def apply_folder_changes(samples, output, datasets, models, trained_models, llama_cpp_path, llama_models_path):
             try:
                 # Get project root directory
                 base_dir = Path(__file__).parent.parent.parent.parent
@@ -472,9 +498,24 @@ class SettingsTool(Tool):
                 _user_config["datasets_folder"] = datasets
                 _user_config["models_folder"] = models
                 _user_config["trained_models_folder"] = trained_models
+                _user_config["llama_cpp_path"] = llama_cpp_path.strip()
+                _user_config["llama_models_path"] = llama_models_path.strip()
                 save_config(_user_config)
 
-                return f"Folder paths updated successfully!\n\nSamples: {new_samples}\nOutput: {new_output}\nDatasets: {new_datasets}\nDownloaded Models: {new_models}\nTrained Models: {new_trained_models}\n\nNote: Restart the app to fully apply changes to all components."
+                status_lines = [
+                    "Folder paths updated successfully!",
+                    f"\nSamples: {new_samples}",
+                    f"Output: {new_output}",
+                    f"Datasets: {new_datasets}",
+                    f"Downloaded Models: {new_models}",
+                    f"Trained Models: {new_trained_models}",
+                ]
+                if llama_cpp_path.strip():
+                    status_lines.append(f"llama.cpp: {llama_cpp_path.strip()}")
+                if llama_models_path.strip():
+                    status_lines.append(f"LLM Models: {llama_models_path.strip()}")
+                status_lines.append("\nNote: Restart the app to fully apply changes to all components.")
+                return "\n".join(status_lines)
 
             except Exception as e:
                 return f"❌ Error applying changes: {str(e)}"
@@ -487,7 +528,12 @@ class SettingsTool(Tool):
 
         components['apply_folders_btn'].click(
             apply_folder_changes,
-            inputs=[components['settings_samples_folder'], components['settings_output_folder'], components['settings_datasets_folder'], components['settings_models_folder'], components['settings_trained_models_folder']],
+            inputs=[
+                components['settings_samples_folder'], components['settings_output_folder'],
+                components['settings_datasets_folder'], components['settings_models_folder'],
+                components['settings_trained_models_folder'],
+                components['settings_llama_cpp_path'], components['settings_llama_models_path']
+            ],
             outputs=[components['settings_status']]
         )
 

@@ -1,5 +1,26 @@
 # Version History
 
+## February 9, 2026
+#### Version 1.5.0 - Prompt Manager & Emotion Storage
+
+**Prompt Manager**
+- **New Prompt Manager Tool** - Save, browse, and generate text prompts with a built-in LLM generator powered by llama.cpp
+- **Saved Prompts** - Store prompts in a local `prompts.json` file with save, delete, and clear functionality
+- **LLM Generation** - Generate prompts locally using Qwen3-4B or Qwen3-8B GGUF models via llama.cpp (no cloud API)
+- **System Prompt Presets** - Built-in presets for TTS/Voice and Sound Design/SFX workflows, plus a custom option
+- **Model Auto-Download** - Download Qwen3 models directly from HuggingFace into `models/llama/`
+- **Custom Models** - Drop any `.gguf` file into `models/llama/` to use your own models
+- **Automatic Server Management** - llama.cpp server starts/stops automatically, cleaned up on exit or Clear VRAM
+
+**Standalone Emotion Storage**
+- **Standalone emotions.json** - Emotion presets are now stored in a dedicated `emotions.json` file instead of inside `config.json`
+- **Automatic Migration** - Existing emotions in `config.json` are automatically migrated to the new file on first launch
+- **Independent Reset** - Resetting `config.json` no longer wipes saved emotion presets
+
+**Quality of Life**
+- **Clear VRAM Stops LLM** - The Clear VRAM button now also shuts down the llama.cpp server if running
+- **SFX Filename Simplification** - Sound effect filenames now use the first 8 words of the prompt instead of 40-char truncation with timestamp
+
 ## February 8, 2026
 #### Version 1.4.0 - Sound Effects with the addition of MMAudio
 

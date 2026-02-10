@@ -13,8 +13,8 @@ if __name__ == "__main__":
 
 import gradio as gr
 import soundfile as sf
+import shutil
 import random
-from datetime import datetime
 from pathlib import Path
 
 from modules.core_components.tool_base import Tool, ToolConfig
@@ -76,23 +76,23 @@ class SoundEffectsTool(Tool):
                         value="human sounds, music, speech, voices"
                     )
 
+                    with gr.Row():
+                        components['sfx_model_size'] = gr.Dropdown(
+                            choices=model_choices,
+                            value=model_choices[-1] if model_choices else "Large v2 (44kHz)",
+                            label="Model",
+                            scale=2
+                        )
+
+                        components['sfx_seed'] = gr.Number(
+                            label="Seed (-1 = random)",
+                            value=-1,
+                            precision=0,
+                            scale=1
+                        )
+
                     # Generation parameters
                     with gr.Accordion("Generation Settings", open=False):
-                        with gr.Row():
-                            components['sfx_model_size'] = gr.Dropdown(
-                                choices=model_choices,
-                                value=model_choices[-1] if model_choices else "Large v2 (44kHz)",
-                                label="Model",
-                                scale=2
-                            )
-
-                            components['sfx_seed'] = gr.Number(
-                                label="Seed (-1 = random)",
-                                value=-1,
-                                precision=0,
-                                scale=1
-                            )
-
                         with gr.Row():
                             components['sfx_duration'] = gr.Slider(
                                 minimum=1.0,
@@ -167,6 +167,24 @@ class SoundEffectsTool(Tool):
                         type="filepath"
                     )
 
+                    # Save button
+                    components['sfx_save_btn'] = gr.Button(
+                        "Save",
+                        variant="primary",
+                        interactive=False
+                    )
+
+                    # Hidden state for suggested filename, metadata, and existing files
+                    components['sfx_suggested_name'] = gr.Textbox(
+                        visible=False
+                    )
+                    components['sfx_metadata'] = gr.Textbox(
+                        visible=False
+                    )
+                    components['sfx_existing_files_json'] = gr.Textbox(
+                        visible=False
+                    )
+
         return components
 
     @classmethod
@@ -174,8 +192,11 @@ class SoundEffectsTool(Tool):
         """Wire up Sound Effects events."""
 
         OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
+        TEMP_DIR = shared_state.get('TEMP_DIR')
         play_completion_beep = shared_state.get('play_completion_beep')
         save_preference = shared_state.get('save_preference')
+        show_input_modal_js = shared_state['show_input_modal_js']
+        input_trigger = shared_state['input_trigger']
 
         foley_manager = get_foley_manager()
 
@@ -275,17 +296,23 @@ class SoundEffectsTool(Tool):
                         progress_callback=lambda frac, desc: progress(0.5 + frac * 0.4, desc=desc)
                     )
 
-                progress(0.9, desc="Saving audio...")
+                progress(0.9, desc="Saving preview...")
 
-                # Save output
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_prompt = prompt.strip()[:40].replace(" ", "_").replace("/", "_").replace("\\", "_") if prompt else "sfx"
-                safe_prompt = "".join(c for c in safe_prompt if c.isalnum() or c in "_-")
+                # Save to temp dir (not output — user saves manually)
+                # Build suggested name from first 8 words of prompt
+                if prompt and prompt.strip():
+                    words = prompt.strip().split()[:8]
+                    safe_prompt = "_".join(words)
+                    safe_prompt = safe_prompt.replace("/", "_").replace("\\", "_")
+                    safe_prompt = "".join(c for c in safe_prompt if c.isalnum() or c in "_-")
+                else:
+                    safe_prompt = "sfx"
                 if not safe_prompt:
                     safe_prompt = "sfx"
 
-                output_filename = f"sfx_{safe_prompt}_{timestamp}.wav"
-                output_path = OUTPUT_DIR / output_filename
+                suggested_name = f"sfx_{safe_prompt}"
+                temp_filename = f"{suggested_name}.wav"
+                temp_path = TEMP_DIR / temp_filename
 
                 # audio_np shape is [channels, samples] — squeeze to mono if needed
                 if audio_np.ndim > 1:
@@ -296,9 +323,9 @@ class SoundEffectsTool(Tool):
                 # Compute actual duration from audio length
                 actual_duration = round(len(audio_data) / sr, 2)
 
-                sf.write(str(output_path), audio_data, sr)
+                sf.write(str(temp_path), audio_data, sr)
 
-                # Save metadata
+                # Build metadata text
                 metadata_lines = [
                     f"Mode: {mode}",
                     f"Prompt: {' '.join(prompt.split()) if prompt else '(none)'}",
@@ -318,20 +345,17 @@ class SoundEffectsTool(Tool):
                 ])
                 metadata_text = "\n".join(metadata_lines)
 
-                metadata_path = output_path.with_suffix(".txt")
-                metadata_path.write_text(metadata_text, encoding="utf-8")
-
                 # If video mode, mux video + generated audio with ffmpeg
                 combined_video_path = None
                 if mode == "Video to Audio" and video:
                     try:
                         import subprocess
                         combined_filename = f"sfx_preview_{safe_prompt}_{timestamp}.mp4"
-                        combined_path = OUTPUT_DIR / combined_filename
+                        combined_path = TEMP_DIR / combined_filename
                         subprocess.run(
                             ["ffmpeg", "-y",
                              "-i", str(video),
-                             "-i", str(output_path),
+                             "-i", str(temp_path),
                              "-c:v", "copy",
                              "-c:a", "aac", "-b:a", "192k",
                              "-map", "0:v:0", "-map", "1:a:0",
@@ -347,23 +371,29 @@ class SoundEffectsTool(Tool):
                 progress(1.0, desc="Done!")
                 play_completion_beep()
 
-                status = f"Generated: {output_filename} | Seed: {seed} | {actual_duration}s @ {sr}Hz"
+                status = f"Ready to save | Seed: {seed} | {actual_duration}s @ {sr}Hz"
 
                 # In video mode, auto-switch preview to Result
                 if combined_video_path:
                     return (
-                        str(output_path),
+                        str(temp_path),
                         combined_video_path,
                         status,
-                        gr.update(value="Result"),         # toggle radio to Result
-                        gr.update(visible=False),          # hide source video
-                        gr.update(visible=True),           # show result video
+                        suggested_name,
+                        metadata_text,
+                        gr.update(interactive=True),
+                        gr.update(value="Result"),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
                     )
 
                 return (
-                    str(output_path),
+                    str(temp_path),
                     None,
                     status,
+                    suggested_name,
+                    metadata_text,
+                    gr.update(interactive=True),
                     gr.update(),
                     gr.update(),
                     gr.update()
@@ -372,7 +402,7 @@ class SoundEffectsTool(Tool):
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return None, None, f"Error: {str(e)}", gr.update(), gr.update(), gr.update()
+                return None, None, f"Error: {str(e)}", "", "", gr.update(interactive=False), gr.update(), gr.update(), gr.update()
 
         components['sfx_generate_btn'].click(
             generate_sfx,
@@ -391,10 +421,105 @@ class SoundEffectsTool(Tool):
                 components['sfx_output_audio'],
                 components['sfx_output_video'],
                 components['sfx_status'],
+                components['sfx_suggested_name'],
+                components['sfx_metadata'],
+                components['sfx_save_btn'],
                 components['sfx_video_toggle'],
                 components['sfx_video_input'],
                 components['sfx_output_video'],
             ]
+        )
+
+        # --- Save button: open input modal with suggested filename ---
+        save_sfx_modal_js = show_input_modal_js(
+            title="Save Sound Effect",
+            message="Enter a filename for this sound effect:",
+            placeholder="e.g., thunder_rumble, glass_shatter",
+            context="save_sfx_"
+        )
+
+        def get_sfx_existing_files():
+            """Return JSON list of existing WAV file stems in output dir for overwrite detection."""
+            import json as json_mod
+            names = [f.stem for f in OUTPUT_DIR.glob("*.wav")]
+            return json_mod.dumps(names)
+
+        save_sfx_js = f"""
+        (existingFilesJson, suggestedName) => {{
+            try {{
+                window.inputModalExistingFiles = JSON.parse(existingFilesJson || '[]');
+            }} catch(e) {{
+                window.inputModalExistingFiles = [];
+            }}
+            const openModal = {save_sfx_modal_js};
+            openModal(suggestedName);
+        }}
+        """
+
+        components['sfx_save_btn'].click(
+            fn=get_sfx_existing_files,
+            inputs=[],
+            outputs=[components['sfx_existing_files_json']],
+        ).then(
+            fn=None,
+            inputs=[components['sfx_existing_files_json'], components['sfx_suggested_name']],
+            js=save_sfx_js
+        )
+
+        # --- Input modal handler: save file from temp to output ---
+        def handle_sfx_input_modal(input_value, audio_path, metadata_text):
+            """Process input modal result for saving sound effects."""
+            no_update = gr.update(), gr.update()
+
+            if not input_value or not input_value.startswith("save_sfx_"):
+                return no_update
+
+            parts = input_value.split("_", 3)
+            # parts: ['save', 'sfx', 'cancel'] or ['save', 'sfx', '<user_name>', '<uuid>']
+            if len(parts) >= 3 and parts[2] == "cancel":
+                return no_update
+
+            # Extract user-chosen name (everything between 'save_sfx_' and last '_uuid')
+            raw_name = input_value[len("save_sfx_"):]
+            # Remove trailing UUID (last segment after _)
+            name_parts = raw_name.rsplit("_", 1)
+            chosen_name = name_parts[0] if len(name_parts) > 1 else raw_name
+
+            if not chosen_name.strip():
+                return "Error: No filename provided", gr.update()
+
+            if not audio_path:
+                return "Error: No audio to save", gr.update()
+
+            # Clean filename
+            clean_name = "".join(c if c.isalnum() or c in "-_ " else "" for c in chosen_name).strip()
+            clean_name = clean_name.replace(" ", "_")
+            if not clean_name:
+                return "Error: Invalid filename", gr.update()
+
+            try:
+                source_path = Path(audio_path)
+                if not source_path.exists():
+                    return "Error: Audio file not found", gr.update()
+
+                output_path = OUTPUT_DIR / f"{clean_name}.wav"
+                shutil.copy2(str(source_path), str(output_path))
+
+                # Save metadata
+                if metadata_text:
+                    metadata_path = output_path.with_suffix(".txt")
+                    metadata_path.write_text(metadata_text, encoding="utf-8")
+
+                return f"Saved: {output_path.name}", gr.update(interactive=False)
+
+            except Exception as e:
+                return f"Error saving: {str(e)}", gr.update()
+
+        input_trigger.change(
+            handle_sfx_input_modal,
+            inputs=[input_trigger, components['sfx_output_audio'],
+                    components['sfx_metadata']],
+            outputs=[components['sfx_status'], components['sfx_save_btn']]
         )
 
 

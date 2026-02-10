@@ -202,6 +202,34 @@ def empty_device_cache():
 empty_cuda_cache = empty_device_cache
 
 
+# ============================================================================
+# Pre-model-load hooks
+# External processes (e.g., llama.cpp server) register shutdown callbacks here
+# so they get stopped before any AI model loads to free VRAM.
+# ============================================================================
+
+_pre_load_hooks = []
+
+
+def register_pre_load_hook(hook):
+    """Register a callback to run before any AI model is loaded.
+
+    Used by external processes (e.g., llama.cpp) that need to be shut
+    down to free VRAM before loading GPU-resident models.
+    """
+    if hook not in _pre_load_hooks:
+        _pre_load_hooks.append(hook)
+
+
+def run_pre_load_hooks():
+    """Run all registered pre-load hooks (e.g., stop llama.cpp server)."""
+    for hook in _pre_load_hooks:
+        try:
+            hook()
+        except Exception:
+            pass
+
+
 def set_seed(seed):
     """Set random seed across all available devices for reproducibility."""
     torch.manual_seed(seed)

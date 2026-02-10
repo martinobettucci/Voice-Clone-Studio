@@ -102,7 +102,7 @@ class VoiceDesignTool(Tool):
                         type="filepath"
                     )
 
-                    components['design_save_btn'] = gr.Button("Save Sample", variant="primary")
+                    components['design_save_btn'] = gr.Button("Save Sample", variant="primary", interactive=False)
 
         return components
 
@@ -126,10 +126,10 @@ class VoiceDesignTool(Tool):
                                           progress=gr.Progress()):
             """Generate audio using voice design with natural language instructions."""
             if not text_to_generate or not text_to_generate.strip():
-                return None, "❌ Please enter text to generate."
+                return None, "❌ Please enter text to generate.", gr.update()
 
             if not instruct or not instruct.strip():
-                return None, "❌ Please enter voice design instructions."
+                return None, "❌ Please enter voice design instructions.", gr.update()
 
             try:
                 # Set the seed for reproducibility
@@ -177,10 +177,10 @@ class VoiceDesignTool(Tool):
                 progress(1.0, desc="Done!")
                 if play_completion_beep:
                     play_completion_beep()
-                return str(out_file), f"Voice design generated. Save to samples to keep.\n{seed_msg}"
+                return str(out_file), f"Voice design generated. Save to samples to keep.\n{seed_msg}", gr.update(interactive=True)
 
             except Exception as e:
-                return None, f"❌ Error generating audio: {str(e)}"
+                return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False)
 
         def save_designed_voice(audio, design_name, ref_text, instruct, seed):
             """Save a designed voice as a sample (tool-specific implementation)."""
@@ -230,7 +230,7 @@ class VoiceDesignTool(Tool):
                     components['design_seed'], components['save_to_output_checkbox'],
                     components['do_sample'], components['temperature'], components['top_k'],
                     components['top_p'], components['repetition_penalty'], components['max_new_tokens']],
-            outputs=[components['design_output_audio'], components['design_status']]
+            outputs=[components['design_output_audio'], components['design_status'], components['design_save_btn']]
         )
 
         # Save designed voice - show modal
@@ -261,16 +261,16 @@ class VoiceDesignTool(Tool):
                     # Remove context prefix and timestamp (last part)
                     design_name = "_".join(parts[2:-1])
                     status = save_designed_voice(audio, design_name, ref_text, instruct, seed)
-                    return status
+                    return status, gr.update(interactive=False)
 
-                return gr.update()
+                return gr.update(), gr.update()
 
             input_trigger.change(
                 handle_save_design_input,
                 inputs=[input_trigger, components['design_output_audio'], 
                         components['design_text_input'], components['design_instruct_input'],
                         components['design_seed']],
-                outputs=[components['design_status']]
+                outputs=[components['design_status'], components['design_save_btn']]
             )
 
         # Save language preference

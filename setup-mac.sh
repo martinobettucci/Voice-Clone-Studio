@@ -65,6 +65,16 @@ echo ""
 read -t 30 -p "Install Whisper? (y/N, default N in 30s): " INSTALL_WHISPER
 INSTALL_WHISPER=${INSTALL_WHISPER:-N}
 echo ""
+
+echo "========================================="
+echo "Optional: Install llama.cpp for LLM prompt generation?"
+echo "llama.cpp powers the Prompt Manager's local LLM feature."
+echo "Lets you generate TTS and SFX prompts using Qwen3 models."
+echo "========================================="
+echo ""
+read -t 30 -p "Install llama.cpp? (y/N, default N in 30s): " INSTALL_LLAMA
+INSTALL_LLAMA=${INSTALL_LLAMA:-N}
+echo ""
 echo "All questions answered - installing now..."
 echo ""
 
@@ -207,6 +217,32 @@ if [[ "$INSTALL_WHISPER" =~ ^[Yy]$ ]]; then
     fi
 else
     echo "Skipping Whisper installation."
+fi
+
+# llama.cpp
+if [[ "$INSTALL_LLAMA" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Installing llama.cpp..."
+    if command -v brew >/dev/null 2>&1; then
+        if brew install llama.cpp; then
+            echo "llama.cpp installed successfully!"
+        else
+            echo "llama.cpp installation via Homebrew failed."
+            echo "You can install manually from: https://github.com/ggml-org/llama.cpp"
+        fi
+    elif command -v port >/dev/null 2>&1; then
+        if sudo port install llama.cpp; then
+            echo "llama.cpp installed successfully!"
+        else
+            echo "llama.cpp installation via MacPorts failed."
+            echo "You can install manually from: https://github.com/ggml-org/llama.cpp"
+        fi
+    else
+        echo "Neither Homebrew nor MacPorts found."
+        echo "Please install llama.cpp manually from: https://github.com/ggml-org/llama.cpp"
+    fi
+else
+    echo "Skipping llama.cpp installation."
 fi
 
 echo ""

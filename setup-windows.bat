@@ -52,6 +52,19 @@ echo.
 choice /C 12 /T 15 /D 2 /M "Install Whisper?"
 set WHISPER_CHOICE=%errorlevel%
 echo.
+
+echo ========================================
+echo Optional: Install llama.cpp for LLM prompt generation?
+echo llama.cpp powers the Prompt Manager's local LLM feature.
+echo Lets you generate TTS and SFX prompts using Qwen3 models.
+echo ========================================
+echo.
+echo   1. Yes - Install llama.cpp
+echo   2. No  - Skip (DEFAULT)
+echo.
+choice /C 12 /T 15 /D 2 /M "Install llama.cpp?"
+set LLAMA_CHOICE=%errorlevel%
+echo.
 echo All questions answered - installing now...
 echo.
 
@@ -220,6 +233,25 @@ goto :whisper_done
 :skip_whisper
 echo Skipping Whisper installation.
 :whisper_done
+echo.
+
+REM llama.cpp
+if not "%LLAMA_CHOICE%"=="1" goto :skip_llama
+
+echo.
+echo Installing llama.cpp...
+winget install llama.cpp
+if %errorlevel% neq 0 (
+    echo WARNING: llama.cpp installation may have failed.
+    echo You can install manually from: https://github.com/ggml-org/llama.cpp
+    goto :skip_llama
+)
+echo llama.cpp installed successfully!
+goto :llama_done
+
+:skip_llama
+echo Skipping llama.cpp installation.
+:llama_done
 echo.
 
 echo ========================================

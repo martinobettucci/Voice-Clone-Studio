@@ -59,7 +59,8 @@ class OutputHistoryTool(Tool):
                 result.append({"name": f.name, "date": date_str})
             return result
 
-        with gr.TabItem("Output History"):
+        with gr.TabItem("Output History") as tab:
+            components['tab'] = tab
             gr.Markdown("Browse and manage previously generated audio files")
             with gr.Row():
                 with gr.Column(scale=1):
@@ -70,7 +71,6 @@ class OutputHistoryTool(Tool):
                         interactive=True,
                     )
                     with gr.Row():
-                        components['refresh_outputs_btn'] = gr.Button("Refresh", size="sm")
                         components['delete_output_btn'] = gr.Button("Delete Selected", size="sm", variant="stop")
 
                 with gr.Column(scale=1):
@@ -206,8 +206,8 @@ class OutputHistoryTool(Tool):
                 outputs=[components['delete_status'], components['file_lister']]
             )
 
-        # Refresh button
-        components['refresh_outputs_btn'].click(
+        # Auto-refresh when tab is selected
+        components['tab'].select(
             refresh_outputs,
             outputs=[components['file_lister']]
         )

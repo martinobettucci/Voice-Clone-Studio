@@ -149,7 +149,7 @@ class VoicePresetsTool(Tool):
                             info="Select your custom trained voice"
                         )
 
-                        components['refresh_trained_btn'] = gr.Button("Refresh", size="sm")
+                        components['refresh_trained_btn'] = gr.Button("Refresh", size="sm", visible=False)
 
                         # ICL (In-Context Learning) mode for enhanced voice cloning
                         components['icl_enabled'] = gr.Checkbox(
@@ -551,7 +551,8 @@ class VoicePresetsTool(Tool):
                 outputs=outputs
             )
 
-        components['refresh_trained_btn'].click(
+        # Auto-refresh trained models when tab is selected
+        components['voice_presets_tab'].select(
             lambda: (
                 gr.update(choices=["(Select Model)"] + [m['display_name'] for m in get_trained_models()] if get_trained_models() else ["(No trained models found)"])
             ),
