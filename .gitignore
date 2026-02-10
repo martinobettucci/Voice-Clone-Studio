@@ -48,6 +48,8 @@ models/*
 *.mp3
 *.prompt
 config.json
+emotions.json
+prompts.json
 Qwen/
 .hf_cache/
 
