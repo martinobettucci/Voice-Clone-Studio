@@ -18,6 +18,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
+from modules.core_components.ai_models.model_utils import set_seed, get_device
 from textwrap import dedent
 
 from modules.core_components.tool_base import Tool, ToolConfig
@@ -87,7 +88,9 @@ class ConversationTool(Tool):
         is_qwen_custom = initial_conv_model == "Qwen Speakers"
         is_luxtts = initial_conv_model == "LuxTTS"
 
-        with gr.TabItem("Conversation"):
+        with gr.TabItem("Conversation") as conv_tab:
+            components['conv_tab'] = conv_tab
+            gr.Markdown("Choose a model and create multi-speaker conversations with your custom voices")
             components['conv_model_type'] = gr.Radio(
                 choices=visible_choices,
                 value=initial_conv_model,
@@ -213,7 +216,7 @@ class ConversationTool(Tool):
                                     info="Select from your prepared samples"
                                 )
 
-                        components['refresh_qwen_samples_btn'] = gr.Button("Refresh Voice Samples", size="md")
+                        components['refresh_qwen_samples_btn'] = gr.Button("Refresh Voice Samples", size="md", visible=False)
 
                     # LuxTTS voice sample selectors (reuse same layout as Qwen Base)
                     components['luxtts_voices_section'] = gr.Column(visible=is_luxtts)
@@ -284,7 +287,7 @@ class ConversationTool(Tool):
                                     info="Select from your prepared samples"
                                 )
 
-                        components['refresh_luxtts_samples_btn'] = gr.Button("Refresh Voice Samples", size="md")
+                        components['refresh_luxtts_samples_btn'] = gr.Button("Refresh Voice Samples", size="md", visible=False)
 
                     # VibeVoice voice sample selectors
                     components['vibevoice_voices_section'] = gr.Column(visible=is_vibevoice)
@@ -323,7 +326,7 @@ class ConversationTool(Tool):
                                     info="Select from your prepared samples"
                                 )
 
-                        components['refresh_conv_samples_btn'] = gr.Button("Refresh Voice Samples", size="md")
+                        components['refresh_conv_samples_btn'] = gr.Button("Refresh Voice Samples", size="md", visible=False)
 
                 # Right - Settings and output
                 with gr.Column(scale=1):
@@ -685,9 +688,7 @@ class ConversationTool(Tool):
                 seed = int(seed) if seed is not None else -1
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                set_seed(seed)
 
                 progress(0.1, desc=f"Loading CustomVoice model ({model_size})...")
                 model = tts_manager.get_qwen3_custom_voice(model_size)
@@ -848,9 +849,7 @@ class ConversationTool(Tool):
                 seed = int(seed) if seed is not None else -1
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                set_seed(seed)
 
                 progress(0.1, desc=f"Loading Base model ({model_size})...")
                 model = tts_manager.get_qwen3_base(model_size)
@@ -1000,9 +999,7 @@ class ConversationTool(Tool):
                 seed = int(seed) if seed is not None else -1
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                set_seed(seed)
 
                 progress(0.1, desc=f"Loading VibeVoice TTS ({model_size})...")
                 model = tts_manager.get_vibevoice_tts(model_size)
@@ -1082,7 +1079,7 @@ class ConversationTool(Tool):
                 )
 
                 # Move to device
-                device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                device = get_device()
                 for k, v in inputs.items():
                     if torch.is_tensor(v):
                         inputs[k] = v.to(device)
@@ -1202,9 +1199,7 @@ class ConversationTool(Tool):
                 seed = int(seed) if seed is not None else -1
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                set_seed(seed)
 
                 progress(0.05, desc="Loading LuxTTS model...")
                 tts_manager.get_luxtts()
@@ -1448,39 +1443,27 @@ class ConversationTool(Tool):
         )
 
         # Refresh voice samples handler
-        def refresh_voice_samples():
-            """Refresh all voice sample dropdowns."""
+        def refresh_all_voice_samples():
+            """Refresh all voice sample dropdowns across all engines."""
             updated_samples = get_sample_choices()
-            return [gr.update(choices=updated_samples)] * 4
+            update = gr.update(choices=updated_samples)
+            return [update] * 20
 
-        def refresh_qwen_voice_samples():
-            """Refresh Qwen Base voice sample dropdowns."""
-            updated_samples = get_sample_choices()
-            return [gr.update(choices=updated_samples)] * 8
-
-        components['refresh_conv_samples_btn'].click(
-            refresh_voice_samples,
-            inputs=[],
-            outputs=[components['voice_sample_1'], components['voice_sample_2'], components['voice_sample_3'], components['voice_sample_4']]
-        )
-
-        components['refresh_qwen_samples_btn'].click(
-            refresh_qwen_voice_samples,
-            inputs=[],
-            outputs=[components['qwen_voice_sample_1'], components['qwen_voice_sample_2'], components['qwen_voice_sample_3'], components['qwen_voice_sample_4'],
-                     components['qwen_voice_sample_5'], components['qwen_voice_sample_6'], components['qwen_voice_sample_7'], components['qwen_voice_sample_8']]
-        )
-
-        def refresh_luxtts_voice_samples():
-            """Refresh LuxTTS voice sample dropdowns."""
-            updated_samples = get_sample_choices()
-            return [gr.update(choices=updated_samples)] * 8
-
-        components['refresh_luxtts_samples_btn'].click(
-            refresh_luxtts_voice_samples,
-            inputs=[],
-            outputs=[components['luxtts_voice_sample_1'], components['luxtts_voice_sample_2'], components['luxtts_voice_sample_3'], components['luxtts_voice_sample_4'],
-                     components['luxtts_voice_sample_5'], components['luxtts_voice_sample_6'], components['luxtts_voice_sample_7'], components['luxtts_voice_sample_8']]
+        # Auto-refresh all voice sample dropdowns when tab is selected
+        components['conv_tab'].select(
+            refresh_all_voice_samples,
+            outputs=[
+                components['voice_sample_1'], components['voice_sample_2'],
+                components['voice_sample_3'], components['voice_sample_4'],
+                components['qwen_voice_sample_1'], components['qwen_voice_sample_2'],
+                components['qwen_voice_sample_3'], components['qwen_voice_sample_4'],
+                components['qwen_voice_sample_5'], components['qwen_voice_sample_6'],
+                components['qwen_voice_sample_7'], components['qwen_voice_sample_8'],
+                components['luxtts_voice_sample_1'], components['luxtts_voice_sample_2'],
+                components['luxtts_voice_sample_3'], components['luxtts_voice_sample_4'],
+                components['luxtts_voice_sample_5'], components['luxtts_voice_sample_6'],
+                components['luxtts_voice_sample_7'], components['luxtts_voice_sample_8'],
+            ]
         )
 
         # Save preferences

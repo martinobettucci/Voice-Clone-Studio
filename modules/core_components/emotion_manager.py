@@ -2,11 +2,16 @@
 Emotion Management Module
 
 Handles loading, saving, and managing emotion presets for voice generation.
-Emotions are stored in config.json and can be customized by users.
+Emotions are stored in a standalone emotions.json file so users can reset
+config.json without losing their custom emotion presets.
 """
 
 import json
 from pathlib import Path
+
+
+# Path to standalone emotions file (next to config.json in project root)
+EMOTIONS_FILE = Path(__file__).parent.parent.parent / "emotions.json"
 
 
 # Core emotions - hardcoded defaults (read-only backup)
@@ -111,31 +116,76 @@ CORE_EMOTIONS = {
 }
 
 
-def load_emotions_from_config(config):
-    """Load emotions from config, or return CORE_EMOTIONS if not present.
+def _save_emotions_file(emotions):
+    """Save emotions dictionary to emotions.json, sorted alphabetically.
 
     Args:
-        config: Config dictionary
+        emotions: Dictionary of emotion presets
+
+    Returns:
+        Sorted emotions dictionary
+    """
+    sorted_emotions = dict(sorted(emotions.items(), key=lambda x: x[0].lower()))
+    with open(EMOTIONS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(sorted_emotions, f, indent=2)
+    return sorted_emotions
+
+
+def _load_emotions_file():
+    """Load emotions from emotions.json.
+
+    Returns:
+        Emotions dictionary, or None if file doesn't exist or is invalid
+    """
+    if EMOTIONS_FILE.exists():
+        try:
+            with open(EMOTIONS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data and isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, IOError):
+            pass
+    return None
+
+
+def load_emotions_from_config(config=None):
+    """Load emotions from emotions.json, with migration from config.json.
+
+    Priority:
+        1. emotions.json exists -> use it
+        2. config has "emotions" key -> migrate to emotions.json
+        3. Neither -> create emotions.json with CORE_EMOTIONS
+
+    Args:
+        config: Optional config dictionary (used only for one-time migration
+                from the old config.json format)
 
     Returns:
         Dictionary of emotion presets
     """
-    if "emotions" in config and config["emotions"]:
-        return config["emotions"]
-    else:
-        # First time - use core emotions
-        return CORE_EMOTIONS.copy()
+    # 1. Try emotions.json first
+    emotions = _load_emotions_file()
+    if emotions:
+        return emotions
+
+    # 2. Migrate from config.json if present
+    if config and "emotions" in config and config["emotions"]:
+        emotions = config["emotions"]
+        _save_emotions_file(emotions)
+        return emotions
+
+    # 3. First time - create emotions.json with core defaults
+    return _save_emotions_file(CORE_EMOTIONS.copy())
 
 
-def save_emotion_to_config(config, config_file, emotion_name, temp, penalty, top_p, intensity):
-    """Save or update an emotion preset in config.
+def save_emotion(emotions_dict, emotion_name, temp, penalty, top_p, intensity):
+    """Save or update an emotion preset to emotions.json.
 
     Calculates differences from default values and divides by intensity multiplier.
     Saves emotions in alphabetical order (case-insensitive).
 
     Args:
-        config: Config dictionary (will be modified)
-        config_file: Path to config.json file
+        emotions_dict: Current emotions dictionary (will be updated)
         emotion_name: Name of the emotion
         temp: Current temperature value (with intensity applied)
         penalty: Current penalty value (with intensity applied)
@@ -164,37 +214,26 @@ def save_emotion_to_config(config, config_file, emotion_name, temp, penalty, top
     diff_penalty = round((penalty - DEFAULT_PENALTY) / intensity, 3)
     diff_top_p = round((top_p - DEFAULT_TOP_P) / intensity, 3)
 
-    # Get current emotions or create new dict
-    emotions = config.get("emotions", CORE_EMOTIONS.copy())
-
     # Add/update emotion (store as differences)
-    emotions[emotion_name] = {
+    emotions_dict[emotion_name] = {
         "temp": diff_temp,
         "penalty": diff_penalty,
         "top_p": diff_top_p
     }
 
-    # Sort alphabetically (case-insensitive)
-    sorted_emotions = dict(sorted(emotions.items(), key=lambda x: x[0].lower()))
-
-    # Update config
-    config["emotions"] = sorted_emotions
-
-    # Save to file
+    # Save to emotions.json
     try:
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
-        return True, f"✅ Saved emotion: {emotion_name}", sorted_emotions
+        sorted_emotions = _save_emotions_file(emotions_dict)
+        return True, f"Saved emotion: {emotion_name}", sorted_emotions
     except Exception as e:
         return False, f"❌ Failed to save: {str(e)}", None
 
 
-def delete_emotion_from_config(config, config_file, emotion_name):
-    """Delete an emotion preset from config.
+def delete_emotion(emotions_dict, emotion_name):
+    """Delete an emotion preset from emotions.json.
 
     Args:
-        config: Config dictionary (will be modified)
-        config_file: Path to config.json file
+        emotions_dict: Current emotions dictionary (will be updated)
         emotion_name: Name of the emotion to delete
 
     Returns:
@@ -205,53 +244,33 @@ def delete_emotion_from_config(config, config_file, emotion_name):
 
     emotion_name = emotion_name.strip()
 
-    # Check if emotion exists
-    emotions = config.get("emotions", {})
-    if emotion_name not in emotions:
+    if emotion_name not in emotions_dict:
         return False, f"❌ Emotion not found: {emotion_name}", None
 
     # Prevent deleting if it's the last emotion
-    if len(emotions) <= 1:
+    if len(emotions_dict) <= 1:
         return False, "❌ Cannot delete the last emotion", None
 
     # Delete emotion
-    del emotions[emotion_name]
+    del emotions_dict[emotion_name]
 
-    # Sort alphabetically (case-insensitive)
-    sorted_emotions = dict(sorted(emotions.items(), key=lambda x: x[0].lower()))
-
-    # Update config
-    config["emotions"] = sorted_emotions
-
-    # Save to file
+    # Save to emotions.json
     try:
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
-        return True, f"✅ Deleted emotion: {emotion_name}", sorted_emotions
+        sorted_emotions = _save_emotions_file(emotions_dict)
+        return True, f"Deleted emotion: {emotion_name}", sorted_emotions
     except Exception as e:
         return False, f"❌ Failed to delete: {str(e)}", None
 
 
-def reset_emotions_to_core(config, config_file):
+def reset_emotions_to_core():
     """Reset emotions to CORE_EMOTIONS defaults.
-
-    Args:
-        config: Config dictionary (will be modified)
-        config_file: Path to config.json file
 
     Returns:
         Tuple: (success: bool, message: str, updated_emotions: dict)
     """
-    # Sort alphabetically (case-insensitive)
-    sorted_emotions = dict(sorted(CORE_EMOTIONS.items(), key=lambda x: x[0].lower()))
-
-    config["emotions"] = sorted_emotions
-
-    # Save to file
     try:
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
-        return True, "✅ Reset to core emotions", sorted_emotions
+        sorted_emotions = _save_emotions_file(CORE_EMOTIONS.copy())
+        return True, "Reset to core emotions", sorted_emotions
     except Exception as e:
         return False, f"❌ Failed to reset: {str(e)}", None
 
@@ -306,13 +325,11 @@ def calculate_emotion_values(emotions_dict, emotion_name, intensity, baseline_te
     return final_temp, final_top_p, final_penalty, intensity
 
 
-def handle_save_emotion(emotions_dict, config, config_file, emotion_name, intensity, temp, penalty, top_p):
+def handle_save_emotion(emotions_dict, emotion_name, intensity, temp, penalty, top_p):
     """Handle saving an emotion preset - returns data for UI update.
 
     Args:
         emotions_dict: Current emotions dictionary
-        config: Config dictionary (will be modified)
-        config_file: Path to config.json
         emotion_name: Name to save
         intensity: Current intensity value
         temp: Current temperature value
@@ -328,9 +345,9 @@ def handle_save_emotion(emotions_dict, config, config_file, emotion_name, intens
     if not emotion_key or emotion_key.strip() == "":
         return False, "❌ Please select or enter an emotion name", emotions_dict, [], ""
 
-    # Save to config
-    success, message, updated_emotions = save_emotion_to_config(
-        config, config_file, emotion_key, temp, penalty, top_p, intensity
+    # Save to emotions.json
+    success, message, updated_emotions = save_emotion(
+        emotions_dict, emotion_key, temp, penalty, top_p, intensity
     )
 
     if success:
@@ -341,13 +358,11 @@ def handle_save_emotion(emotions_dict, config, config_file, emotion_name, intens
         return False, message, emotions_dict, [], ""
 
 
-def handle_delete_emotion(emotions_dict, config, config_file, confirm_value, emotion_name):
+def handle_delete_emotion(emotions_dict, confirm_value, emotion_name):
     """Handle deleting an emotion preset (called after confirmation) - returns data for UI update.
 
     Args:
         emotions_dict: Current emotions dictionary
-        config: Config dictionary (will be modified)
-        config_file: Path to config.json
         confirm_value: Confirmation trigger value
         emotion_name: Name to delete
 
@@ -364,9 +379,9 @@ def handle_delete_emotion(emotions_dict, config, config_file, confirm_value, emo
     if not emotion_key or emotion_key.strip() == "":
         return False, "❌ Please select an emotion to delete", emotions_dict, [], ""
 
-    # Delete from config
-    success, message, updated_emotions = delete_emotion_from_config(
-        config, config_file, emotion_key
+    # Delete from emotions.json
+    success, message, updated_emotions = delete_emotion(
+        emotions_dict, emotion_key
     )
 
     if success:

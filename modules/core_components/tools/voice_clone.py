@@ -19,6 +19,7 @@ import random
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
+from modules.core_components.ai_models.model_utils import set_seed
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
@@ -93,7 +94,7 @@ class VoiceCloneTool(Tool):
                     )
 
                     with gr.Row():
-                        components['refresh_samples_btn'] = gr.Button("Refresh", size="sm")
+                        pass
 
                     components['sample_audio'] = gr.Audio(
                         label="Sample Preview",
@@ -207,12 +208,20 @@ class VoiceCloneTool(Tool):
                                 info="Number of diffusion steps"
                             )
 
-                        gr.Markdown("Stochastic Sampling Parameters")
                         with gr.Row():
                             components['vv_do_sample'] = gr.Checkbox(
                                 label="Enable Sampling",
                                 value=False,
                                 info="Enable stochastic sampling (default: False)"
+                            )
+
+                            components['vv_sentences_per_chunk'] = gr.Slider(
+                                minimum=0,
+                                maximum=5,
+                                value=0,
+                                step=1,
+                                label="Sentences per Chunk",
+                                info="Split long text into chunks of N sentences (0 = no split). Prevents quality degradation on long prompts."
                             )
                         with gr.Row():
                             components['vv_repetition_penalty'] = gr.Slider(
@@ -313,7 +322,7 @@ class VoiceCloneTool(Tool):
                                    qwen_do_sample=True, qwen_temperature=0.9, qwen_top_k=50, qwen_top_p=1.0, qwen_repetition_penalty=1.05,
                                    qwen_max_new_tokens=2048,
                                    vv_do_sample=False, vv_temperature=1.0, vv_top_k=50, vv_top_p=1.0, vv_repetition_penalty=1.0,
-                                   vv_cfg_scale=3.0, vv_num_steps=20,
+                                   vv_cfg_scale=3.0, vv_num_steps=20, vv_sentences_per_chunk=0,
                                    lux_num_steps=4, lux_t_shift=0.5, lux_speed=1.0, lux_return_smooth=False,
                                    lux_rms=0.01, lux_ref_duration=30, lux_guidance_scale=3.0,
                                    progress=gr.Progress()):
@@ -369,9 +378,7 @@ class VoiceCloneTool(Tool):
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
 
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                set_seed(seed)
                 seed_msg = f"Seed: {seed}"
 
                 if engine == "qwen":
@@ -425,6 +432,7 @@ class VoiceCloneTool(Tool):
                         repetition_penalty=vv_repetition_penalty,
                         cfg_scale=vv_cfg_scale,
                         num_steps=vv_num_steps,
+                        sentences_per_chunk=int(vv_sentences_per_chunk),
                         model_size=model_size,
                         user_config=shared_state.get('_user_config', {})
                     )
@@ -507,7 +515,8 @@ class VoiceCloneTool(Tool):
             js="() => { setTimeout(() => { const btn = document.querySelector('#voice-clone-sample-audio .play-pause-button'); if (btn) btn.click(); }, 150); }"
         )
 
-        components['refresh_samples_btn'].click(
+        # Auto-refresh samples when tab is selected
+        components['voice_clone_tab'].select(
             lambda: get_sample_choices(),
             outputs=[components['sample_lister']]
         )
@@ -606,7 +615,7 @@ class VoiceCloneTool(Tool):
                     components['qwen_do_sample'], components['qwen_temperature'], components['qwen_top_k'], components['qwen_top_p'], components['qwen_repetition_penalty'],
                     components['qwen_max_new_tokens'],
                     components['vv_do_sample'], components['vv_temperature'], components['vv_top_k'], components['vv_top_p'], components['vv_repetition_penalty'],
-                    components['vv_cfg_scale'], components['vv_num_steps'],
+                    components['vv_cfg_scale'], components['vv_num_steps'], components['vv_sentences_per_chunk'],
                     components['luxtts_num_steps'], components['luxtts_t_shift'], components['luxtts_speed'], components['luxtts_return_smooth'],
                     components['luxtts_rms'], components['luxtts_ref_duration'], components['luxtts_guidance_scale']],
 

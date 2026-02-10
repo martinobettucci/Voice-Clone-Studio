@@ -68,26 +68,24 @@ class PrepSamplesTool(Tool):
         # Let's hide dataset if train model is off
         train_model_enabled = _user_config.get("enabled_tools", {}).get("Train Model", True)
 
-        with gr.TabItem("Prep Audio Samples"):
+        with gr.TabItem("Prep Audio Samples") as prep_tab:
+            components['prep_tab'] = prep_tab
             if train_model_enabled is True:
                 gr.Markdown("Prepare audio samples for voice cloning or finetuning datasets.")
             else:
                 gr.Markdown("Prepare audio samples for voice cloning.")
 
+            components['prep_data_type'] = gr.Radio(
+                choices=['Samples', 'Datasets'],
+                value='Samples',
+                show_label=False,
+                container=False,
+                visible=train_model_enabled,
+            )
+
             with gr.Row():
                 # Left column - File browser
-
                 with gr.Column(scale=1):
-                    if train_model_enabled is True:
-                        gr.Markdown("### Select Samples or Dataset")
-
-                    components['prep_data_type'] = gr.Radio(
-                        choices=['Samples', 'Datasets'],
-                        value='Samples',
-                        show_label=False,
-                        visible=train_model_enabled,
-                    )
-
                     # --- Samples mode ---
                     with gr.Column(visible=True) as samples_col:
                         gr.Markdown("### Audio Samples")
@@ -111,7 +109,6 @@ class PrepSamplesTool(Tool):
                         )
                         with gr.Row():
                             components['create_folder_btn'] = gr.Button("New Folder", size="sm")
-                            components['refresh_folder_btn'] = gr.Button("Refresh Folders", size="sm")
                             components['delete_folder_btn'] = gr.Button("Delete Folder", size="sm", variant="stop")
                         components['dataset_lister'] = FileLister(
                             value=[],
@@ -123,7 +120,7 @@ class PrepSamplesTool(Tool):
 
                     # --- Shared buttons ---
                     with gr.Row():
-                        components['refresh_preview_btn'] = gr.Button("Refresh", size="sm")
+                        pass
 
                     with gr.Row():
                         components['clear_cache_btn'] = gr.Button("Clear Cache", size="sm")
@@ -156,20 +153,21 @@ class PrepSamplesTool(Tool):
                     if default_asr not in visible_asr_options:
                         default_asr = visible_asr_options[0]
 
-                    components['transcribe_model'] = gr.Dropdown(
-                        choices=visible_asr_options,
-                        value=default_asr,
-                        label="Transcription Engine",
-                    )
+                    with gr.Row():
+                        components['transcribe_model'] = gr.Dropdown(
+                            choices=visible_asr_options,
+                            value=default_asr,
+                            label="Transcription Engine",
+                        )
 
-                    # Language dropdown (shown for Qwen3 ASR and Whisper)
-                    show_lang = any(k in default_asr for k in ("Qwen3 ASR", "Whisper"))
-                    components['whisper_language'] = gr.Dropdown(
-                        choices=["Auto-detect"] + LANGUAGES[1:],
-                        value=_user_config.get("whisper_language", "Auto-detect"),
-                        label="Language",
-                        visible=show_lang
-                    )
+                        # Language dropdown (shown for Qwen3 ASR and Whisper)
+                        show_lang = any(k in default_asr for k in ("Qwen3 ASR", "Whisper"))
+                        components['whisper_language'] = gr.Dropdown(
+                            choices=["Auto-detect"] + LANGUAGES[1:],
+                            value=_user_config.get("whisper_language", "Auto-detect"),
+                            label="Language",
+                            visible=show_lang
+                        )
 
                 # Right column - Audio editing
                 with gr.Column(scale=2):
@@ -353,14 +351,13 @@ class PrepSamplesTool(Tool):
                 gr.update(visible=not is_ds),    # samples_col
                 gr.update(visible=is_ds),        # datasets_col
                 gr.update(visible=not is_ds),    # clear_cache_btn
-                gr.update(visible=not is_ds),    # refresh_preview_btn
                 gr.update(visible=is_ds),        # batch_col
                 gr.update(visible=True, value=None),  # prep_file_input (visible, cleared)
                 gr.update(visible=False),        # prep_audio_editor visibility
                 None,                            # prep_audio_editor value
                 "",                              # transcription_output
                 "",                              # prep_status
-                "",                              # existing_sample_info
+                gr.update(visible=not is_ds, value=""),  # existing_sample_info
                 heading,                         # editor_heading
                 gr.update(visible=show_auto_split),  # auto_split_accordion
                 gr.update(visible=show_auto_split),  # auto_split_btn
@@ -1418,7 +1415,6 @@ class PrepSamplesTool(Tool):
                 components['samples_col'],
                 components['datasets_col'],
                 components['clear_cache_btn'],
-                components['refresh_preview_btn'],
                 components['batch_col'],
                 components['prep_file_input'],
                 components['prep_audio_editor'],    # visibility
@@ -1450,12 +1446,6 @@ class PrepSamplesTool(Tool):
             lambda folder: get_dataset_files(folder),
             inputs=[components['finetune_folder_dropdown']],
             outputs=[components['dataset_lister']]
-        )
-
-        components['refresh_folder_btn'].click(
-            lambda: gr.update(choices=["(Select Dataset)"] + get_dataset_folders(),
-                              value="(Select Dataset)"),
-            outputs=[components['finetune_folder_dropdown']]
         )
 
         # --- Create dataset folder ---
@@ -1494,16 +1484,21 @@ class PrepSamplesTool(Tool):
             js="() => { setTimeout(() => { const btn = document.querySelector('#prep-audio-editor .play-pause-button'); if (btn) btn.click(); }, 150); }"
         )
 
-        # --- Refresh (mode-aware) ---
-        def refresh_handler(data_type, folder):
-            if is_dataset_mode(data_type):
-                return gr.update(), get_dataset_files(folder)
-            return get_sample_choices(), gr.update()
+        # --- Auto-refresh when tab is selected ---
+        def on_prep_tab_select(data_type, folder):
+            """Refresh all file lists when Prep Audio tab is selected."""
+            sample_files = get_sample_choices()
+            folder_choices = ["(Select Dataset)"] + get_dataset_folders()
+            if is_dataset_mode(data_type) and folder and folder not in ("(No folders)", "(Select Dataset)"):
+                dataset_files = get_dataset_files(folder)
+            else:
+                dataset_files = gr.update()
+            return sample_files, gr.update(choices=folder_choices), dataset_files
 
-        components['refresh_preview_btn'].click(
-            refresh_handler,
+        components['prep_tab'].select(
+            on_prep_tab_select,
             inputs=[components['prep_data_type'], components['finetune_folder_dropdown']],
-            outputs=[components['sample_lister'], components['dataset_lister']]
+            outputs=[components['sample_lister'], components['finetune_folder_dropdown'], components['dataset_lister']]
         )
 
         # --- Delete (mode-aware JS context) ---

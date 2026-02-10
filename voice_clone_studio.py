@@ -56,7 +56,8 @@ from modules.core_components.ui_components import (
 # AI Managers
 from modules.core_components.ai_models import (
     get_tts_manager,
-    get_asr_manager
+    get_asr_manager,
+    get_foley_manager
 )
 from modules.core_components.ai_models.model_utils import get_trained_models
 
@@ -84,19 +85,30 @@ sys.path.insert(0, str(Path(__file__).parent / "modules"))
 _user_config = load_config()
 
 # Check which engines are available before building UI
-from modules.core_components.constants import check_engine_availability
-print()
-print("=" * 50)
-print("Checking available engines...")
-print("=" * 50)
-check_engine_availability(
-    _user_config,
-    save_config_fn=lambda key, value: save_config(_user_config, key, value)
-)
-print("=" * 50)
-print()
+if _user_config.get("skip_engine_check", False):
+    print("\nSkipping engine availability check (skip_engine_check enabled)\n")
+else:
+    from modules.core_components.constants import check_engine_availability
+    print()
+    print("=" * 50)
+    print("Checking available engines...")
+    print("=" * 50)
+    check_engine_availability(
+        _user_config,
+        save_config_fn=lambda key, value: save_config(_user_config, key, value)
+    )
+    print("=" * 50)
+    print()
 
 _active_emotions = load_emotions_from_config(_user_config)
+
+# On macOS (MPS), training requires CUDA — auto-disable Train Model tab
+import platform
+if platform.system() == "Darwin":
+    if "enabled_tools" not in _user_config:
+        _user_config["enabled_tools"] = {}
+    _user_config["enabled_tools"]["Train Model"] = False
+    print("macOS detected: Train Model tab disabled (requires CUDA)")
 
 # Ensure config has emotions key set (emotion_manager expects it)
 if 'emotions' not in _user_config or _user_config['emotions'] is None:
@@ -144,6 +156,8 @@ from modules.core_components.constants import (
     DEFAULT_CONFIG as DEFAULT_CONFIG_TEMPLATE,
     QWEN_GENERATION_DEFAULTS,
     VIBEVOICE_GENERATION_DEFAULTS,
+    MODEL_SIZES_MMAUDIO,
+    MMAUDIO_GENERATION_DEFAULTS,
 )
 
 # ============================================================================
@@ -151,6 +165,7 @@ from modules.core_components.constants import (
 # ============================================================================
 _tts_manager = None
 _asr_manager = None
+_foley_manager = None
 
 # ============================================================================
 # UI CREATION
@@ -160,9 +175,10 @@ def create_ui():
     """Create the Gradio interface with modular tools."""
 
     # Initialize AI managers and make them available to wrapper functions
-    global _tts_manager, _asr_manager
+    global _tts_manager, _asr_manager, _foley_manager
     _tts_manager = get_tts_manager(_user_config, SAMPLES_DIR)
     _asr_manager = get_asr_manager(_user_config)
+    _foley_manager = get_foley_manager(_user_config, MODELS_DIR)
 
     # CSS to hide trigger widgets (use imported TRIGGER_HIDE_CSS)
     custom_css = TRIGGER_HIDE_CSS
@@ -207,6 +223,7 @@ def create_ui():
                 'MODEL_SIZES_DESIGN': MODEL_SIZES_DESIGN,
                 'MODEL_SIZES_VIBEVOICE': MODEL_SIZES_VIBEVOICE,
                 'MODEL_SIZES_QWEN3_ASR': MODEL_SIZES_QWEN3_ASR,
+                'MODEL_SIZES_MMAUDIO': MODEL_SIZES_MMAUDIO,
                 'VOICE_CLONE_OPTIONS': VOICE_CLONE_OPTIONS,
                 'DEFAULT_VOICE_CLONE_MODEL': DEFAULT_VOICE_CLONE_MODEL,
                 'TTS_ENGINES': TTS_ENGINES,
@@ -218,7 +235,8 @@ def create_ui():
             },
             managers={
                 'tts_manager': _tts_manager,
-                'asr_manager': _asr_manager
+                'asr_manager': _asr_manager,
+                'foley_manager': _foley_manager
             },
             confirm_trigger=confirm_trigger,
             input_trigger=input_trigger
@@ -233,8 +251,19 @@ def create_ui():
 
         # Wire up unload button
         def on_unload_all():
+            import gc
             _tts_manager.unload_all()
             _asr_manager.unload_all()
+            _foley_manager.unload_all()
+            # Stop llama.cpp server if running
+            try:
+                from modules.core_components.tools.prompt_manager import _stop_server
+                _stop_server()
+            except Exception:
+                pass
+            gc.collect()
+            from modules.core_components.ai_models.model_utils import empty_device_cache
+            empty_device_cache()
             return "VRAM freed."
 
         # Clear status after 3 seconds to keep UI tidy

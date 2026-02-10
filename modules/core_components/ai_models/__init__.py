@@ -10,11 +10,14 @@ from .model_utils import (
     get_attention_implementation,
     check_model_available_locally,
     download_model_from_huggingface,
+    empty_device_cache,
     empty_cuda_cache,
     log_gpu_memory,
     get_trained_models,
     get_trained_model_names,
     train_model,
+    register_pre_load_hook,
+    run_pre_load_hooks,
 )
 
 from .tts_manager import (
@@ -27,6 +30,11 @@ from .asr_manager import (
     get_asr_manager,
 )
 
+from .foley_manager import (
+    FoleyManager,
+    get_foley_manager,
+)
+
 __all__ = [
     # Utilities
     "get_device",
@@ -34,11 +42,14 @@ __all__ = [
     "get_attention_implementation",
     "check_model_available_locally",
     "download_model_from_huggingface",
+    "empty_device_cache",
     "empty_cuda_cache",
     "log_gpu_memory",
     "get_trained_models",
     "get_trained_model_names",
     "train_model",
+    "register_pre_load_hook",
+    "run_pre_load_hooks",
 
     # TTS
     "TTSManager",
@@ -47,4 +58,8 @@ __all__ = [
     # ASR
     "ASRManager",
     "get_asr_manager",
+
+    # Foley / Sound Effects
+    "FoleyManager",
+    "get_foley_manager",
 ]

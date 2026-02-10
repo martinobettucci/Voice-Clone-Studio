@@ -8,9 +8,12 @@ import torch
 from pathlib import Path
 from typing import Dict, Optional
 
+import gc
+
 from .model_utils import (
     get_device, get_dtype, get_attention_implementation,
-    check_model_available_locally, empty_cuda_cache, log_gpu_memory
+    check_model_available_locally, empty_device_cache, log_gpu_memory,
+    run_pre_load_hooks
 )
 
 
@@ -53,11 +56,15 @@ class ASRManager:
         except ImportError:
             return False
 
-    def _check_and_unload_if_different(self, model_id: str):
-        """If switching to a different model, unload all."""
+    def _check_and_unload_if_different(self, model_id):
+        """If switching to a different model, unload all. Stops external servers on first/new load."""
         if self._last_loaded_model is not None and self._last_loaded_model != model_id:
-            print(f"📦 Switching from {self._last_loaded_model} to {model_id} - unloading all ASR models...")
+            print(f"Switching from {self._last_loaded_model} to {model_id} - unloading all ASR models...")
             self.unload_all()
+            run_pre_load_hooks()
+        elif self._last_loaded_model is None:
+            # First model load — stop external servers (e.g., llama.cpp) to free VRAM
+            run_pre_load_hooks()
         self._last_loaded_model = model_id
 
     def _load_model_with_attention(self, model_class, model_name: str, **kwargs):
@@ -134,8 +141,7 @@ class ASRManager:
             self._whisper_model = None
             import gc, torch
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            empty_device_cache()
 
         self._check_and_unload_if_different("whisper_asr")
 
@@ -299,7 +305,7 @@ class ASRManager:
         if self._qwen3_aligner_model is not None:
             del self._qwen3_aligner_model
             self._qwen3_aligner_model = None
-            empty_cuda_cache()
+            empty_device_cache()
             print("Qwen3 ForcedAligner unloaded")
 
     def get_vibevoice_asr(self):
@@ -466,8 +472,9 @@ class ASRManager:
             freed.append("Qwen3 ForcedAligner")
 
         if freed:
-            empty_cuda_cache()
-            print(f"🗑️ Unloaded ASR models: {', '.join(freed)}")
+            gc.collect()
+            empty_device_cache()
+            print(f"Unloaded ASR models: {', '.join(freed)}")
 
         return bool(freed)
 

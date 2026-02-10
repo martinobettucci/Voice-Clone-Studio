@@ -1,9 +1,8 @@
 # Voice Clone Studio
 
-A modular Gradio-based web UI for voice cloning, voice design, and multi-speaker conversation, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [VibeVoice](https://github.com/microsoft/VibeVoice) and [LuxTTS](https://github.com/ysharma3501/LuxTTS)
-Supports both Whisper and VibeVoice ASR for automatic transcription.
+Is a multi model, modular Gradio-based web UI for voice cloning, voice design, multi-speaker conversation and sound effects, powered by [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [VibeVoice](https://github.com/microsoft/VibeVoice), [LuxTTS](https://github.com/ysharma3501/LuxTTS) and [MMAudio](https://github.com/hkchengrex/MMAudio). Supports Qwen3-ASR, VibeVoice ASR and  Whisper for automatic transcription. As well as Llama.cpp for Prompt Generation and a Prompt Saving, based on [ComfyUI Prompt-Manager](https://github.com/FranckyB/ComfyUI-Prompt-Manager)
 
-![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-v1.0-blue) ![Qwen3-TTS](https://img.shields.io/badge/Qwen3--TTS-Powered-blue) ![LuxTTS](https://img.shields.io/badge/LuxTTS-TTS-orange) ![VibeVoice](https://img.shields.io/badge/VibeVoice-TTS-green) ![VibeVoice](https://img.shields.io/badge/VibeVoice-ASR-green) 
+![Voice Clone Studio](https://img.shields.io/badge/Voice%20Clone%20Studio-v1.4-blue) ![Qwen3-TTS](https://img.shields.io/badge/Qwen3--TTS-Powered-blue) ![LuxTTS](https://img.shields.io/badge/LuxTTS-TTS-orange) ![VibeVoice](https://img.shields.io/badge/VibeVoice-TTS-green) ![VibeVoice](https://img.shields.io/badge/VibeVoice-ASR-green) ![MMAudio](https://img.shields.io/badge/MMAudio-SFX-purple)
 
 ## Architecture
 
@@ -26,6 +25,7 @@ Create multi-speaker dialogues using either Qwen's premium voices or your own cu
 **Choose Your Engine:**
 - **Qwen** - Fast generation with 9 preset voices, optimized for their native languages
 - **VibeVoice** - High-quality custom voices, up to 90 minutes continuous, perfect for podcasts/audiobooks
+- **LuxTTS** - 
 
 **Unified Script Format:**
 Write scripts using `[N]:` format - works seamlessly with both engines:
@@ -64,18 +64,6 @@ Perfect for:
 
 ### Voice Presets
 Generate with premium pre-built voices with optional style instructions using Qwen3-TTS Custom Model:
-
-| Speaker | Description | Language |
-|---------|-------------|----------|
-| Vivian | Bright, slightly edgy young female | Chinese |
-| Serena | Warm, gentle young female | Chinese |
-| Uncle_Fu | Seasoned male, low mellow timbre | Chinese |
-| Dylan | Youthful Beijing male, clear natural | Chinese (Beijing) |
-| Eric | Lively Chengdu male, husky brightness | Chinese (Sichuan) |
-| Ryan | Dynamic male, strong rhythmic drive | English |
-| Aiden | Sunny American male, clear midrange | English |
-| Ono_Anna | Playful Japanese female, light nimble | Japanese |
-| Sohee | Warm Korean female, rich emotion | Korean |
 
 - Style instructions supported (emotion, tone, speed)
 - Each speaker works best in native language but supports all
@@ -123,6 +111,28 @@ Unified audio preparation workspace for both voice samples and training datasets
 - **Save as Sample** - One-click sample creation
 - **Dataset Management** - Create, delete, and organize dataset folders directly from the UI
 
+### Sound Effects
+Generate sound effects and ambient audio using MMAudio (CVPR 2025, MIT license):
+
+- **Text-to-Audio** - Describe any sound and generate high-quality 44.1kHz audio
+- **Video-to-Audio** - Drop in a video clip and generate synchronized sound effects
+- **Multiple Models** - Medium (2.4GB) and Large v2 (3.9GB) built-in, plus custom model support
+- **Custom Models** - Load your own `.pth` or `.safetensors` checkpoints with automatic architecture detection
+- **Video Preview** - Source/Result toggle to compare original video against the audio-muxed result
+- **Fine Controls** - Adjustable duration, guidance strength, and negative prompts
+
+### Prompt Manager
+Save, browse, and generate text prompts for your TTS sessions. Includes a built-in LLM generator powered by [llama.cpp](https://github.com/ggml-org/llama.cpp):
+
+- **Saved Prompts** - Store and organize prompts in a local `prompts.json` file, browse with the file lister
+- **LLM Generation** - Generate prompts locally using Qwen3 language models via llama.cpp (no cloud API needed)
+- **System Prompt Presets** - Built-in presets for TTS/Voice and Sound Design/SFX workflows, or write your own
+- **Model Auto-Download** - Download Qwen3-4B (~4.8GB) or Qwen3-8B (~8.5GB) GGUF models directly from HuggingFace
+- **Custom Models** - Drop any `.gguf` file into `models/llama/` to use your own models
+- **Automatic Server Management** - llama.cpp server starts/stops automatically, cleaned up on exit or Clear VRAM
+
+Inspired by [ComfyUI-Prompt-Manager](https://github.com/FranckyB/ComfyUI-Prompt-Manager) by FranckyB.
+
 ### Output History
 View, play back, and manage your previously generated audio files. Multi-select for batch deletion, double-click to play.
 
@@ -141,12 +151,16 @@ Centralized application configuration:
 ### Prerequisites
 
 - Python 3.10+ (recommended for all platforms)
-- CUDA-compatible GPU (recommended: 8GB+ VRAM)
+- **Windows/Linux:** CUDA-compatible GPU (recommended: 8GB+ VRAM)
+- **macOS:** Apple Silicon (M1/M2/M3/M4) for MPS acceleration, or Intel Mac (CPU-only)
 - **SOX**  (Sound eXchange) - Required for audio processing
 - **FFMPEG** - Multimedia framework required for audio format conversion
-- [Flash Attention 2](https://github.com/Dao-AILab/flash-attention) (optional but recommended)
+- **llama.cpp** (optional) - Required only for the Prompt Manager's LLM generation feature. See [llama.cpp](https://github.com/ggml-org/llama.cpp)
+- [Flash Attention 2](https://github.com/Dao-AILab/flash-attention) (optional, CUDA only)
 
-**Note for Linux users:** The Linux installation skips `openai-whisper` (compatibility issues). VibeVoice ASR is used for transcription instead.
+**Note for Linux/macOS users:** `openai-whisper` is skipped (compatibility issues). Use VibeVoice ASR or Qwen3 ASR for transcription instead.
+
+**Note for macOS users:** Model training is not supported on macOS. The Train Model tab is automatically hidden.
 
 ### Setup
 
@@ -193,6 +207,28 @@ This will automatically:
 - Handle ONNX Runtime installation issues
 - Warn about Whisper compatibility if needed
 
+#### Quick Setup (macOS)
+
+1. Clone the repository:
+```bash
+git clone https://github.com/FranckyB/Voice-Clone-Studio.git
+cd Voice-Clone-Studio
+```
+
+2. Make the setup script executable and run it:
+```bash
+chmod +x setup-mac.sh
+./setup-mac.sh
+```
+
+This will automatically:
+- Detect Apple Silicon vs Intel Mac
+- Install ffmpeg and sox via Homebrew
+- Create virtual environment
+- Install PyTorch with MPS support (no CUDA needed)
+- Install all dependencies with macOS-compatible fallbacks
+- Offer optional LuxTTS and Qwen3 ASR installation
+
 #### Manual Setup (All Platforms)
 
 1. Clone the repository:
@@ -210,10 +246,13 @@ venv\Scripts\activate
 source venv/bin/activate
 ```
 
-3. (NVIDIA GPU) Install PyTorch with CUDA support:
+3. Install PyTorch:
 ```bash
-# Linux/Windows
+# Windows/Linux (NVIDIA GPU)
 pip install torch==2.9.1 torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+# macOS (MPS support built-in)
+pip install torch==2.9.1 torchaudio
 ```
 
 4. Install dependencies:
@@ -258,8 +297,20 @@ sudo dnf install ffmpeg
 brew install ffmpeg
 ```
 
-7. (Optional) Install FlashAttention 2  for faster generation:
-**Note:** The application automatically detects and uses the best available attention mechanism. Configure in Settings tab: `auto` (recommended) → `flash_attention_2` → `sdpa` → `eager`
+7. (Optional) Install llama.cpp for the Prompt Manager's LLM generation feature:
+
+```bash
+# Windows
+winget install llama.cpp
+
+# Linux
+brew install llama.cpp
+
+# Or build from source: https://github.com/ggml-org/llama.cpp
+```
+
+8. (Optional) Install FlashAttention 2 for faster generation (CUDA only):
+**Note:** The application automatically detects and uses the best available attention mechanism. Configure in Settings tab: `flash_attention_2` (CUDA only) → `sdpa` (CUDA/MPS) → `eager` (all devices)
 
 ## Troubleshooting
 For troubleshooting solutions, see [docs/troubleshooting.md](docs/troubleshooting.md).
@@ -307,9 +358,13 @@ docker-compose exec voice-clone-studio python tests/integration_test_denoiser.py
 python voice_clone_studio.py
 ```
 
-Or use the batch file (Windows):
+Or use the launcher scripts:
 ```bash
+# Windows
 launch.bat
+
+# Linux/macOS
+./launch.sh
 ```
 
 The UI will open at `http://127.0.0.1:7860`
@@ -344,6 +399,7 @@ Voice-Clone-Studio/
 ├── config.json                    # User preferences & enabled tools
 ├── requirements.txt               # Python dependencies
 ├── launch.bat / launch.sh         # Launcher scripts
+├── setup-windows.bat / setup-linux.sh / setup-mac.sh  # Platform setup scripts
 ├── wheel/                         # Pre-built custom Gradio components
 │   └── gradio_filelister-0.4.0-py3-none-any.whl
 ├── samples/                       # Voice samples (.wav + .json)
@@ -361,6 +417,7 @@ Voice-Clone-Studio/
     │   │   ├── voice_presets.py
     │   │   ├── conversation.py
     │   │   ├── voice_design.py
+    │   │   ├── sound_effects.py
     │   │   ├── prep_audio.py
     │   │   ├── output_history.py
     │   │   ├── train_model.py
@@ -387,9 +444,11 @@ Each tab lets you choose between model sizes:
 | **Qwen3-TTS Base** | Small, Large | Voice cloning from samples |
 | **Qwen3-TTS CustomVoice** | Small, Large | Premium speakers with style control |
 | **Qwen3-TTS VoiceDesign** | 1.7B only | Voice design from descriptions |
+| **LuxTTS** | Large | Voice cloning with speaker encoder |
 | **VibeVoice-TTS** | Small, Large | Voice cloning & Long-form multi-speaker (up to 90 min) |
 | **VibeVoice-ASR** | Large | Audio transcription |
 | **Whisper** | Medium | Audio transcription |
+| **MMAudio** | Medium, Large v2 | Sound effects generation (text & video to audio) |
 
 - **Small** = Faster, less VRAM (Qwen: 0.6B ~4GB, VibeVoice: 1.5B)
 - **Large** = Better quality, more expressive (Qwen: 1.7B ~8GB, VibeVoice: Large model)
@@ -411,7 +470,9 @@ This project is licensed under the **Apache License 2.0** - see the [LICENSE](LI
 This project is based on and uses code from:
 - **[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)**    - Apache 2.0 License (Alibaba)
 - **[VibeVoice](https://github.com/microsoft/VibeVoice)** - MIT License
+- **[LuxTTS](https://github.com/ysharma3501/LuxTTS)**     - Apache 2.0 License
 - **[Gradio](https://gradio.app/)**                       - Apache 2.0 License
+- **[MMAudio](https://github.com/hkchengrex/MMAudio)**       - MIT License
 - **[DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)** - MIT License
 
 ## Updates

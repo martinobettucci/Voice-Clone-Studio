@@ -7,6 +7,7 @@ RUN apt-get update && \
         libssl-dev libffi-dev \
         libsndfile1 \
         libsox-dev libsox-fmt-all sox \
+        libgl1 libglib2.0-0 \
         ffmpeg && \
     rm -rf /var/lib/apt/lists/*
     
@@ -22,6 +23,7 @@ RUN apt-get update && \
         sox \
         git \
         git-lfs \
+        libgl1 libglib2.0-0 \
         ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
@@ -49,7 +51,7 @@ RUN pip install --no-cache-dir \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/user/.cargo/bin:${PATH}"
 RUN pip install --no-cache-dir \
-    gradio==6.5.0 \
+    gradio==6.5.1 \
     soundfile==0.13.1 \
     librosa==0.11.0 \
     numpy==1.26.4 \
@@ -64,6 +66,7 @@ RUN pip install --no-cache-dir \
     packaging \
     wheel \
     ninja \
+    requests \
     openai-whisper \
     pytz \
     "flash_attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
@@ -71,7 +74,13 @@ RUN pip install --no-cache-dir \
     onnxruntime \
     onnxruntime-gpu==1.23.2 \
     markdown==3.10.1 \
-    einops
+    einops \
+    open_clip_torch \
+    torchdiffeq \
+    timm \
+    colorlog \
+    omegaconf \
+    opencv-python
 
 COPY ./wheel /home/user/app/wheel
 COPY ./requirements.txt /home/user/app/requirements.txt
@@ -109,6 +118,7 @@ COPY ./tests /home/user/app/tests
 COPY ./docs /home/user/app/docs
 COPY ./config.json /home/user/app/config.json
 COPY ./voice_clone_studio.py /home/user/app/voice_clone_studio.py
+COPY ./.github/copilot-instructions.md /home/user/app/.github/copilot-instructions.md
 WORKDIR /home/user/app
 EXPOSE 7860
 CMD ["python3", "voice_clone_studio.py"]

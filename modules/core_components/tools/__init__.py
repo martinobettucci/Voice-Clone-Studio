@@ -20,6 +20,8 @@ from modules.core_components.tools import conversation
 from modules.core_components.tools import voice_design
 from modules.core_components.tools import prep_audio
 from modules.core_components.tools import train_model
+from modules.core_components.tools import sound_effects
+from modules.core_components.tools import prompt_manager
 from modules.core_components.tools import output_history
 from modules.core_components.tools import settings
 
@@ -32,6 +34,8 @@ ALL_TOOLS = {
     'voice_design': (voice_design, voice_design.VoiceDesignTool.config),
     'prep_audio': (prep_audio, prep_audio.PrepSamplesTool.config),
     'train_model': (train_model, train_model.TrainModelTool.config),
+    'sound_effects': (sound_effects, sound_effects.SoundEffectsTool.config),
+    'prompt_manager': (prompt_manager, prompt_manager.PromptManagerTool.config),
     'output_history': (output_history, output_history.OutputHistoryTool.config),
     'settings': (settings, settings.SettingsTool.config),
 }
@@ -743,9 +747,8 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         if hasattr(get_deepfilter_lazy, '_model_cache'):
             del get_deepfilter_lazy._model_cache
             try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                from modules.core_components.ai_models.model_utils import empty_device_cache
+                empty_device_cache()
             except ImportError:
                 pass
             import gc
@@ -775,6 +778,7 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         'MODEL_SIZES_DESIGN': constants.get('MODEL_SIZES_DESIGN'),
         'MODEL_SIZES_VIBEVOICE': constants.get('MODEL_SIZES_VIBEVOICE'),
         'MODEL_SIZES_QWEN3_ASR': constants.get('MODEL_SIZES_QWEN3_ASR', ['Small', 'Large']),
+        'MODEL_SIZES_MMAUDIO': constants.get('MODEL_SIZES_MMAUDIO', ['Medium (44kHz)', 'Large v2 (44kHz)']),
         'VOICE_CLONE_OPTIONS': constants.get('VOICE_CLONE_OPTIONS'),
         'DEFAULT_VOICE_CLONE_MODEL': constants.get('DEFAULT_VOICE_CLONE_MODEL'),
         'TTS_ENGINES': constants.get('TTS_ENGINES', {}),
@@ -850,10 +854,10 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
 
     # Lambdas that reference shared_state (must be added after dict creation)
     shared_state['save_emotion_handler'] = lambda name, intensity, temp, rep_pen, top_p: handle_save_emotion(
-        shared_state['_active_emotions'], shared_state['_user_config'], CONFIG_FILE, name, intensity, temp, rep_pen, top_p
+        shared_state['_active_emotions'], name, intensity, temp, rep_pen, top_p
     )
     shared_state['delete_emotion_handler'] = lambda confirm_val, emotion_name: handle_delete_emotion(
-        shared_state['_active_emotions'], shared_state['_user_config'], CONFIG_FILE, confirm_val, emotion_name
+        shared_state['_active_emotions'], confirm_val, emotion_name
     )
     shared_state['save_preference'] = lambda k, v: save_config(shared_state['_user_config'], k, v)
 
@@ -861,6 +865,7 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
     if managers:
         shared_state['tts_manager'] = managers.get('tts_manager')
         shared_state['asr_manager'] = managers.get('asr_manager')
+        shared_state['foley_manager'] = managers.get('foley_manager')
 
     return shared_state
 
@@ -918,9 +923,6 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
     # Load config and emotions
     user_config = load_config()
     active_emotions = load_emotions_from_config(user_config)
-
-    if 'emotions' not in user_config or user_config['emotions'] is None:
-        user_config['emotions'] = active_emotions
 
     # Setup directories
     OUTPUT_DIR = project_root / user_config.get("output_folder", "output")

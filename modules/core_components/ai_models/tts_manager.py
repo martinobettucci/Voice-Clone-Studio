@@ -9,9 +9,12 @@ import hashlib
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
+import gc
+
 from .model_utils import (
     get_device, get_dtype, get_attention_implementation,
-    check_model_available_locally, empty_cuda_cache, log_gpu_memory
+    check_model_available_locally, empty_device_cache, log_gpu_memory, set_seed,
+    run_pre_load_hooks
 )
 
 
@@ -44,11 +47,15 @@ class TTSManager:
         self._luxtts_prompt_cache = {}
         self._last_loaded_model = None
 
-    def _check_and_unload_if_different(self, model_id: str):
-        """If switching to a different model, unload all."""
+    def _check_and_unload_if_different(self, model_id):
+        """If switching to a different model, unload all. Stops external servers on first/new load."""
         if self._last_loaded_model is not None and self._last_loaded_model != model_id:
-            print(f"📦 Switching from {self._last_loaded_model} to {model_id} - unloading all TTS models...")
+            print(f"Switching from {self._last_loaded_model} to {model_id} - unloading all TTS models...")
             self.unload_all()
+            run_pre_load_hooks()
+        elif self._last_loaded_model is None:
+            # First model load — stop external servers (e.g., llama.cpp) to free VRAM
+            run_pre_load_hooks()
         self._last_loaded_model = model_id
 
     def _load_model_with_attention(self, model_class, model_name: str, **kwargs):
@@ -119,8 +126,8 @@ class TTSManager:
             self._qwen3_base_model, _ = self._load_model_with_attention(
                 Qwen3TTSModel,
                 model_name,
-                device_map="cuda:0",
-                dtype=torch.bfloat16,
+                device_map=get_device(),
+                dtype=get_dtype(),
                 low_cpu_mem_usage=self.user_config.get("low_cpu_mem_usage", False)
             )
             self._qwen3_base_size = size
@@ -140,8 +147,8 @@ class TTSManager:
             self._qwen3_voice_design_model, _ = self._load_model_with_attention(
                 Qwen3TTSModel,
                 "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-                device_map="cuda:0",
-                dtype=torch.bfloat16,
+                device_map=get_device(),
+                dtype=get_dtype(),
                 low_cpu_mem_usage=self.user_config.get("low_cpu_mem_usage", False)
             )
             print("VoiceDesign model loaded!")
@@ -162,8 +169,8 @@ class TTSManager:
             self._qwen3_custom_voice_model, _ = self._load_model_with_attention(
                 Qwen3TTSModel,
                 model_name,
-                device_map="cuda:0",
-                dtype=torch.bfloat16,
+                device_map=get_device(),
+                dtype=get_dtype(),
                 low_cpu_mem_usage=self.user_config.get("low_cpu_mem_usage", False)
             )
             self._qwen3_custom_voice_size = size
@@ -205,8 +212,8 @@ class TTSManager:
                     self._vibevoice_tts_model, _ = self._load_model_with_attention(
                         VibeVoiceForConditionalGenerationInference,
                         model_path,
-                        dtype=torch.bfloat16,
-                        device_map="cuda:0" if torch.cuda.is_available() else "cpu",
+                        dtype=get_dtype(),
+                        device_map=get_device(),
                         low_cpu_mem_usage=self.user_config.get("low_cpu_mem_usage", False)
                     )
 
@@ -242,8 +249,11 @@ class TTSManager:
                     warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.cuda.amp.autocast.*")
                     from zipvoice.luxvoice import LuxTTS
 
-                    if torch.cuda.is_available():
+                    device = get_device()
+                    if device.startswith("cuda"):
                         self._luxtts_model = LuxTTS("YatharthS/LuxTTS", device="cuda")
+                    elif device == "mps":
+                        self._luxtts_model = LuxTTS("YatharthS/LuxTTS", device="mps")
                     else:
                         threads = int(self.user_config.get("luxtts_cpu_threads", 2))
                         self._luxtts_model = LuxTTS(
@@ -295,8 +305,9 @@ class TTSManager:
             freed.append("LuxTTS")
 
         if freed:
-            empty_cuda_cache()
-            print(f"🗑️ Unloaded TTS models: {', '.join(freed)}")
+            gc.collect()
+            empty_device_cache()
+            print(f"Unloaded TTS models: {', '.join(freed)}")
 
         return bool(freed)
 
@@ -332,9 +343,7 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        set_seed(seed)
 
         # Load model
         model = self.get_qwen3_voice_design()
@@ -392,9 +401,7 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        set_seed(seed)
 
         # Load model
         model = self.get_qwen3_custom_voice(model_size)
@@ -467,16 +474,14 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        set_seed(seed)
 
         if user_config is None:
             user_config = {}
 
         # Determine device and dtype
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        device = get_device()
+        dtype = get_dtype(device)
 
         # Load the trained model checkpoint with attention fallback
         mechanisms = get_attention_implementation(
@@ -540,7 +545,7 @@ class TTSManager:
                 model.model.speaker_encoder = base_model.model.speaker_encoder
                 model.model.speaker_encoder_sample_rate = base_model.model.speaker_encoder_sample_rate
                 del base_model
-                torch.cuda.empty_cache()
+                empty_device_cache()
                 print("Speaker encoder transplanted successfully")
 
             # Create voice clone prompt with ICL (not x-vector only)
@@ -632,9 +637,7 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        set_seed(seed)
 
         # Load BASE model (not CustomVoice - Base supports voice cloning)
         model = self.get_qwen3_base(model_size)
@@ -670,11 +673,44 @@ class TTSManager:
 
         return audio_data, sr
 
-    def generate_voice_clone_vibevoice(self, text: str, voice_sample_path: str, seed: int = -1,
-                                       do_sample: bool = False, temperature: float = 1.0, top_k: int = 50,
-                                       top_p: float = 1.0, repetition_penalty: float = 1.0,
-                                       cfg_scale: float = 3.0, num_steps: int = 20,
-                                       model_size: str = "Large", user_config: dict = None) -> Tuple[str, int]:
+    @staticmethod
+    def _chunk_text_for_vibevoice(text, sentences_per_chunk):
+        """Split text into multi-turn Speaker 1 format for VibeVoice stability.
+
+        Long single-speaker text causes VibeVoice to degrade (screaming/rushing).
+        Per Microsoft's official guidance, splitting into repeated Speaker 1 turns
+        resets the generation state and prevents quality loss.
+
+        Args:
+            text: The full text to chunk
+            sentences_per_chunk: Number of sentences per chunk
+
+        Returns:
+            Formatted multi-turn script string
+        """
+        import re
+        # Split on sentence-ending punctuation, keeping the delimiter attached
+        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        # Filter empty
+        parts = [p.strip() for p in parts if p.strip()]
+
+        if not parts:
+            return f"Speaker 1: {text}"
+
+        # Group into chunks of N sentences
+        chunks = []
+        for i in range(0, len(parts), sentences_per_chunk):
+            chunk = ' '.join(parts[i:i + sentences_per_chunk])
+            chunks.append(f"Speaker 1: {chunk}")
+
+        return '\n'.join(chunks)
+
+    def generate_voice_clone_vibevoice(self, text, voice_sample_path, seed=-1,
+                                       do_sample=False, temperature=1.0, top_k=50,
+                                       top_p=1.0, repetition_penalty=1.0,
+                                       cfg_scale=3.0, num_steps=20,
+                                       sentences_per_chunk=0,
+                                       model_size="Large", user_config=None):
         """
         Generate audio using VibeVoice voice cloning.
 
@@ -689,6 +725,8 @@ class TTSManager:
             repetition_penalty: Repetition penalty
             cfg_scale: Classifier-free guidance scale
             num_steps: DDPM inference steps
+            sentences_per_chunk: Split into chunks of N sentences (0 = no split).
+                Prevents quality degradation on long text.
             model_size: Model size (Large, 1.5B, or Large (4-bit))
             user_config: User configuration dict
 
@@ -703,9 +741,7 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        set_seed(seed)
 
         # Load model
         model = self.get_vibevoice_tts(model_size)
@@ -731,7 +767,77 @@ class TTSManager:
 
         logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
 
-        # Format script for VibeVoice (single speaker)
+        # Build generation config
+        gen_config = {'do_sample': do_sample}
+        if do_sample:
+            gen_config['temperature'] = temperature
+            if top_k > 0:
+                gen_config['top_k'] = int(top_k)
+            if top_p < 1.0:
+                gen_config['top_p'] = top_p
+            if repetition_penalty != 1.0:
+                gen_config['repetition_penalty'] = repetition_penalty
+
+        sr = 24000  # VibeVoice uses 24kHz
+        device = get_device()
+
+        # If chunking is enabled, generate each chunk separately and concatenate.
+        # Each chunk gets its own inference call so the generation state resets,
+        # preventing quality degradation (screaming/rushing) on long text.
+        if sentences_per_chunk and sentences_per_chunk > 0:
+            import re
+            import numpy as np
+            parts = re.split(r'(?<=[.!?])\s+', text.strip())
+            parts = [p.strip() for p in parts if p.strip()]
+
+            if len(parts) > 1:
+                chunks = []
+                for i in range(0, len(parts), sentences_per_chunk):
+                    chunks.append(' '.join(parts[i:i + sentences_per_chunk]))
+
+                print(f"VibeVoice chunking: {len(chunks)} chunks of ~{sentences_per_chunk} sentence(s)")
+                audio_segments = []
+
+                for idx, chunk in enumerate(chunks):
+                    chunk_script = f"Speaker 1: {chunk}"
+
+                    chunk_inputs = processor(
+                        text=[chunk_script],
+                        voice_samples=[[voice_sample_path]],
+                        padding=True,
+                        return_tensors="pt",
+                        return_attention_mask=True,
+                    )
+
+                    for k, v in chunk_inputs.items():
+                        if torch.is_tensor(v):
+                            chunk_inputs[k] = v.to(device)
+
+                    model.set_ddpm_inference_steps(num_steps=int(num_steps))
+
+                    outputs = model.generate(
+                        **chunk_inputs,
+                        max_new_tokens=None,
+                        cfg_scale=cfg_scale,
+                        tokenizer=processor.tokenizer,
+                        generation_config=gen_config,
+                        verbose=False,
+                    )
+
+                    if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
+                        audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
+                        audio_segments.append(audio_tensor.squeeze().numpy())
+                        print(f"  Chunk {idx + 1}/{len(chunks)} done ({len(chunk.split())} words)")
+                    else:
+                        print(f"  Chunk {idx + 1}/{len(chunks)} produced no audio, skipping")
+
+                if not audio_segments:
+                    raise RuntimeError("VibeVoice failed to generate audio for any chunk")
+
+                audio_data = np.concatenate(audio_segments)
+                return audio_data, sr
+
+        # Standard single-pass generation (no chunking)
         formatted_script = f"Speaker 1: {text.strip()}"
 
         # Process inputs
@@ -744,24 +850,12 @@ class TTSManager:
         )
 
         # Move to device
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         for k, v in inputs.items():
             if torch.is_tensor(v):
                 inputs[k] = v.to(device)
 
         # Set inference steps
         model.set_ddpm_inference_steps(num_steps=int(num_steps))
-
-        # Prepare generation config
-        gen_config = {'do_sample': do_sample}
-        if do_sample:
-            gen_config['temperature'] = temperature
-            if top_k > 0:
-                gen_config['top_k'] = int(top_k)
-            if top_p < 1.0:
-                gen_config['top_p'] = top_p
-            if repetition_penalty != 1.0:
-                gen_config['repetition_penalty'] = repetition_penalty
 
         # Generate
         outputs = model.generate(
@@ -1086,9 +1180,7 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        set_seed(seed)
 
         # Get or create encoded prompt (with caching)
         encoded_prompt, was_cached = self.get_or_create_luxtts_prompt(

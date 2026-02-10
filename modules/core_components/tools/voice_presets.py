@@ -68,17 +68,18 @@ class VoicePresetsTool(Tool):
             initial_voice_type = _user_config.get("voice_type", "Trained Models")
             is_premium = (initial_voice_type.strip() == "Qwen Speakers")
 
+            components['voice_type_radio'] = gr.Radio(
+                choices=["Trained Models", "Qwen Speakers"],
+                value=initial_voice_type,
+                show_label=False,
+                container=False,
+                label="Voice Source"
+            )
+
             with gr.Row():
                 # Left - Speaker selection
                 with gr.Column(scale=1):
                     gr.Markdown("### Select Voice Type")
-
-                    components['voice_type_radio'] = gr.Radio(
-                        choices=["Trained Models", "Qwen Speakers"],
-                        value=initial_voice_type,
-                        label="Voice Source"
-                    )
-
                     # Qwen Speakers dropdown
                     components['speaker_section'] = gr.Column(visible=is_premium)
                     with components['speaker_section']:
@@ -148,7 +149,7 @@ class VoicePresetsTool(Tool):
                             info="Select your custom trained voice"
                         )
 
-                        components['refresh_trained_btn'] = gr.Button("Refresh", size="sm")
+                        components['refresh_trained_btn'] = gr.Button("Refresh", size="sm", visible=False)
 
                         # ICL (In-Context Learning) mode for enhanced voice cloning
                         components['icl_enabled'] = gr.Checkbox(
@@ -460,7 +461,7 @@ class VoicePresetsTool(Tool):
 
         def toggle_voice_type(voice_type):
             """Toggle between premium and trained model sections."""
-            is_premium = voice_type == "Premium Speakers"
+            is_premium = voice_type == "Qwen Speakers"
 
             if is_premium:
                 # Return in order: speaker_section, trained_section, instruct_input, emotion_row, emotion_buttons_row,
@@ -497,7 +498,7 @@ class VoicePresetsTool(Tool):
             """Generate audio with either premium or trained voice."""
             icl_sample_name = get_selected_icl_filename(icl_lister_value) if icl_lister_value else None
 
-            if voice_type == "Premium Speakers":
+            if voice_type == "Qwen Speakers":
                 speaker = extract_speaker_name(premium_speaker)
                 if not speaker:
                     return None, "❌ Please select a premium speaker"
@@ -550,7 +551,8 @@ class VoicePresetsTool(Tool):
                 outputs=outputs
             )
 
-        components['refresh_trained_btn'].click(
+        # Auto-refresh trained models when tab is selected
+        components['voice_presets_tab'].select(
             lambda: (
                 gr.update(choices=["(Select Model)"] + [m['display_name'] for m in get_trained_models()] if get_trained_models() else ["(No trained models found)"])
             ),

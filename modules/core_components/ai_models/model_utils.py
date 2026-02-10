@@ -9,19 +9,28 @@ from pathlib import Path
 
 
 def get_device():
-    """Get the appropriate device (CUDA or CPU)."""
+    """Get the best available device (CUDA > MPS > CPU)."""
     if torch.cuda.is_available():
         return "cuda:0"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
     return "cpu"
 
 
 def get_dtype(device=None):
-    """Get appropriate dtype based on device."""
+    """Get appropriate dtype based on device.
+
+    CUDA uses bfloat16 for best quality.
+    MPS uses float16 (bfloat16 not fully supported on Apple Silicon).
+    CPU uses float32.
+    """
     if device is None:
         device = get_device()
 
     if device.startswith("cuda"):
         return torch.bfloat16
+    if device == "mps":
+        return torch.float16
     return torch.float32
 
 
@@ -181,10 +190,51 @@ def download_model_from_huggingface(model_id, models_dir=None, local_folder_name
         return False, f"Unexpected error: {str(e)}", None
 
 
-def empty_cuda_cache():
-    """Empty CUDA cache if available."""
+def empty_device_cache():
+    """Empty GPU cache (CUDA or MPS) if available."""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+# Keep old name as alias for compatibility
+empty_cuda_cache = empty_device_cache
+
+
+# ============================================================================
+# Pre-model-load hooks
+# External processes (e.g., llama.cpp server) register shutdown callbacks here
+# so they get stopped before any AI model loads to free VRAM.
+# ============================================================================
+
+_pre_load_hooks = []
+
+
+def register_pre_load_hook(hook):
+    """Register a callback to run before any AI model is loaded.
+
+    Used by external processes (e.g., llama.cpp) that need to be shut
+    down to free VRAM before loading GPU-resident models.
+    """
+    if hook not in _pre_load_hooks:
+        _pre_load_hooks.append(hook)
+
+
+def run_pre_load_hooks():
+    """Run all registered pre-load hooks (e.g., stop llama.cpp server)."""
+    for hook in _pre_load_hooks:
+        try:
+            hook()
+        except Exception:
+            pass
+
+
+def set_seed(seed):
+    """Set random seed across all available devices for reproducibility."""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def log_gpu_memory(label=""):
@@ -194,6 +244,10 @@ def log_gpu_memory(label=""):
         reserved = torch.cuda.memory_reserved() / 1024**3
         label_str = f" ({label})" if label else ""
         print(f"GPU Memory{label_str}: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # MPS doesn't expose detailed memory stats, just note it's active
+        label_str = f" ({label})" if label else ""
+        print(f"GPU Memory{label_str}: MPS device active (detailed stats not available)")
 
 
 def get_trained_models(models_dir=None):
@@ -440,7 +494,7 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
         sys.executable,
         "-u",
         str(prepare_script.absolute()),
-        "--device", "cuda:0",
+        "--device", get_device(),
         "--tokenizer_model_path", "Qwen/Qwen3-TTS-Tokenizer-12Hz",
         "--input_jsonl", str(train_raw_path),
         "--output_jsonl", str(train_with_codes_path)

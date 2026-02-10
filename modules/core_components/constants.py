@@ -50,6 +50,18 @@ MODEL_SIZES_DESIGN = ["1.7B"]  # VoiceDesign only has 1.7B
 MODEL_SIZES_VIBEVOICE = ["Small", "Large (4-bit)", "Large"]  # VibeVoice: 1.5B, 7B-4bit, 7B
 MODEL_SIZES_QWEN3_ASR = ["Small", "Large"]  # Qwen3-ASR: 0.6B, 1.7B
 
+# MMAudio Sound Effects model sizes - populated dynamically by FoleyManager
+# Default built-in choices shown when manager hasn't scanned yet
+MODEL_SIZES_MMAUDIO = ["Medium (44kHz)", "Large v2 (44kHz)"]
+
+# MMAudio generation defaults
+MMAUDIO_GENERATION_DEFAULTS = {
+    "duration": 8.0,
+    "num_steps": 25,
+    "cfg_strength": 4.5,
+    "seed": 42,
+}
+
 # Voice Clone engine and model options
 VOICE_CLONE_OPTIONS = [
     "Qwen3 - Small",
