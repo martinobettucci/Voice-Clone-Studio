@@ -21,7 +21,9 @@ def get_dtype(device=None):
     """Get appropriate dtype based on device.
 
     CUDA uses bfloat16 for best quality.
-    MPS uses float16 (bfloat16 not fully supported on Apple Silicon).
+    MPS uses float32 (float16 causes torch.multinomial failures during
+    sampling due to NaN/subnormal values from softmax precision loss;
+    unified memory makes float32 low-cost on Apple Silicon).
     CPU uses float32.
     """
     if device is None:
@@ -29,8 +31,6 @@ def get_dtype(device=None):
 
     if device.startswith("cuda"):
         return torch.bfloat16
-    if device == "mps":
-        return torch.float16
     return torch.float32
 
 

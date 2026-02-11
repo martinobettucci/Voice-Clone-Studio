@@ -467,6 +467,10 @@ def show_tips_help():
         - **Poor quality**: Use better reference samples
         - **Slow generation**: Normal for first time, fast after caching
         - **Model not loading**: Check CUDA installation
+        - **VibeVoice repeating/looping**: This is a known behavior of LLM-based TTS models. 
+                  Try increasing **Repetition Penalty** (1.2-1.3), 
+                  enabling **Do Sample** with Temperature 0.7-0.9,
+                  or lowering **Sentences Per Chunk** to process shorter segments
 
         &nbsp;
 

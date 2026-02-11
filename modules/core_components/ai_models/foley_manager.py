@@ -37,8 +37,8 @@ MMAUDIO_SHARED_WEIGHTS = {
 
 def _ensure_mmaudio_path():
     """Add MMAudio repo to sys.path if not already present."""
-    mmaudio_repo = Path(__file__).parent.parent.parent / "mmaudio_repo"
-    repo_str = str(mmaudio_repo)
+    mmaudio = Path(__file__).parent.parent.parent / "mmaudio"
+    repo_str = str(mmaudio)
     if repo_str not in sys.path:
         sys.path.insert(0, repo_str)
 
@@ -266,7 +266,13 @@ class FoleyManager:
         if progress_callback:
             progress_callback(0.6, "Loading feature utilities (CLIP, VAE, vocoder)...")
 
-        # Load feature utilities
+        # Load feature utilities — suppress verbose logging from open_clip,
+        # synchformer (MotionFormer), and BigVGAN during initialization
+        import logging as _logging
+        _root_logger = _logging.getLogger()
+        _prev_root_level = _root_logger.level
+        _root_logger.setLevel(_logging.ERROR)
+
         from mmaudio.model.utils.features_utils import FeaturesUtils
         feature_utils = FeaturesUtils(
             tod_vae_ckpt=vae_path,
@@ -277,6 +283,8 @@ class FoleyManager:
             need_vae_encoder=False
         )
         feature_utils = feature_utils.to(device, dtype).eval()
+
+        _root_logger.setLevel(_prev_root_level)
 
         if progress_callback:
             progress_callback(0.9, "Model ready!")

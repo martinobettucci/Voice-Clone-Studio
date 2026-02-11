@@ -458,11 +458,13 @@ class ConversationTool(Tool):
                         vv_conv_params = create_vibevoice_advanced_params(
                             initial_num_steps=20,
                             initial_cfg_scale=3.0,
+                            include_sentences_per_chunk=True,
                             visible=True
                         )
                         components['vv_conv_num_steps'] = vv_conv_params['num_steps']
                         components['longform_cfg_scale'] = vv_conv_params['cfg_scale']
                         components['vv_conv_do_sample'] = vv_conv_params['do_sample']
+                        components['vv_conv_sentences_per_chunk'] = vv_conv_params['sentences_per_chunk']
                         components['vv_conv_repetition_penalty'] = vv_conv_params['repetition_penalty']
                         components['vv_conv_temperature'] = vv_conv_params['temperature']
                         components['vv_conv_top_k'] = vv_conv_params['top_k']
@@ -987,7 +989,7 @@ class ConversationTool(Tool):
 
         def generate_vibevoice_longform_handler(script_text, voice_samples_dict, model_size, cfg_scale, seed,
                                                 num_steps, do_sample, temperature, top_k, top_p, repetition_penalty,
-                                                progress=gr.Progress()):
+                                                sentences_per_chunk=0, progress=gr.Progress()):
             """Generate long-form multi-speaker audio with VibeVoice (up to 90 min)."""
             if not script_text or not script_text.strip():
                 return None, "❌ Please enter a script."
@@ -1084,33 +1086,93 @@ class ConversationTool(Tool):
                     if torch.is_tensor(v):
                         inputs[k] = v.to(device)
 
-                progress(0.6, desc="Generating audio...")
+                progress(0.5, desc="Generating audio...")
 
-                # Set inference steps
+                # Build generation config
+                gen_config = {'do_sample': do_sample}
+                if do_sample:
+                    gen_config['temperature'] = temperature
+                    if top_k > 0:
+                        gen_config['top_k'] = int(top_k)
+                    if top_p < 1.0:
+                        gen_config['top_p'] = top_p
+                    if repetition_penalty != 1.0:
+                        gen_config['repetition_penalty'] = repetition_penalty
+
                 model.set_ddpm_inference_steps(num_steps=num_steps)
+                sr = 24000
 
-                # Generate
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=None,
-                    cfg_scale=cfg_scale,
-                    tokenizer=processor.tokenizer,
-                    generation_config={
-                        'do_sample': do_sample,
-                        'temperature': temperature,
-                        'top_k': top_k,
-                        'top_p': top_p,
-                        'repetition_penalty': repetition_penalty
-                    },
-                    verbose=False,
-                )
+                sentences_per_chunk = int(sentences_per_chunk) if sentences_per_chunk else 0
 
-                progress(0.8, desc="Saving audio...")
+                # Chunked generation: process N lines at a time to prevent
+                # quality degradation (screaming/rushing) on long conversations.
+                if sentences_per_chunk > 0 and len(formatted_lines) > sentences_per_chunk:
+                    import numpy as np
+                    chunks = []
+                    for i in range(0, len(formatted_lines), sentences_per_chunk):
+                        chunks.append(formatted_lines[i:i + sentences_per_chunk])
 
-                if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
-                    audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
-                    generated_audio = audio_tensor.squeeze().numpy()
-                    sr = 24000
+                    print(f"VibeVoice conversation chunking: {len(chunks)} chunks of ~{sentences_per_chunk} line(s)")
+                    audio_segments = []
+
+                    for idx, chunk_lines in enumerate(chunks):
+                        chunk_script = '\n'.join(chunk_lines)
+                        progress_val = 0.5 + (0.4 * idx / len(chunks))
+                        progress(progress_val, desc=f"Generating chunk {idx + 1}/{len(chunks)}...")
+
+                        chunk_inputs = processor(
+                            text=[chunk_script],
+                            voice_samples=[voice_samples],
+                            padding=True,
+                            return_tensors="pt",
+                            return_attention_mask=True,
+                        )
+
+                        for k, v in chunk_inputs.items():
+                            if torch.is_tensor(v):
+                                chunk_inputs[k] = v.to(device)
+
+                        outputs = model.generate(
+                            **chunk_inputs,
+                            max_new_tokens=None,
+                            cfg_scale=cfg_scale,
+                            tokenizer=processor.tokenizer,
+                            generation_config=gen_config,
+                            verbose=False,
+                        )
+
+                        if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
+                            audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
+                            audio_segments.append(audio_tensor.squeeze().numpy())
+                            print(f"  Chunk {idx + 1}/{len(chunks)} done ({len(chunk_lines)} lines)")
+                        else:
+                            print(f"  Chunk {idx + 1}/{len(chunks)} produced no audio, skipping")
+
+                    if not audio_segments:
+                        return None, "❌ VibeVoice failed to generate audio for any chunk"
+
+                    generated_audio = np.concatenate(audio_segments)
+
+                else:
+                    # Standard single-pass generation
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=None,
+                        cfg_scale=cfg_scale,
+                        tokenizer=processor.tokenizer,
+                        generation_config=gen_config,
+                        verbose=False,
+                    )
+
+                    if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
+                        audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
+                        generated_audio = audio_tensor.squeeze().numpy()
+                    else:
+                        return None, "❌ No audio generated"
+
+                progress(0.9, desc="Saving audio...")
+
+                if generated_audio is not None:
 
                     # Save
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1120,12 +1182,14 @@ class ConversationTool(Tool):
                     # Save metadata
                     metadata_file = output_file.with_suffix(".txt")
                     duration = len(generated_audio) / sr
+                    chunk_info = f"Lines per Chunk: {sentences_per_chunk}" if sentences_per_chunk > 0 else "Chunking: Off"
                     metadata = dedent(f"""\
                         Generated: {timestamp}
                         Type: VibeVoice Conversation
                         Model: VibeVoice-{model_size}
                         Seed: {seed}
                         CFG Scale: {cfg_scale}
+                        {chunk_info}
                         Lines: {len(lines)}
                         Speakers: {len(available_samples)}
 
@@ -1138,8 +1202,6 @@ class ConversationTool(Tool):
                     if play_completion_beep:
                         play_completion_beep()
                     return str(output_file), f"Conversation saved: {output_file.name}\n{len(lines)} lines | {duration:.1f}s | Seed: {seed}"
-                else:
-                    return None, "❌ No audio generated"
 
             except Exception as e:
                 import traceback
@@ -1309,6 +1371,7 @@ class ConversationTool(Tool):
             vv_v1, vv_v2, vv_v3, vv_v4, vv_model_size, vv_cfg,
             # VibeVoice advanced params
             vv_num_steps, vv_do_sample, vv_temperature, vv_top_k, vv_top_p, vv_repetition_penalty,
+            vv_sentences_per_chunk,
             # LuxTTS params
             lux_v1, lux_v2, lux_v3, lux_v4, lux_v5, lux_v6, lux_v7, lux_v8,
             lux_pause_linebreak,
@@ -1357,7 +1420,8 @@ class ConversationTool(Tool):
                 voice_samples = prepare_voice_samples_dict(vv_v1, vv_v2, vv_v3, vv_v4)
                 return generate_vibevoice_longform_handler(script, voice_samples, vv_size, vv_cfg, seed,
                                                            vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
-                                                           vv_top_p, vv_repetition_penalty, progress)
+                                                           vv_top_p, vv_repetition_penalty,
+                                                           vv_sentences_per_chunk, progress)
 
         # Event handlers
         components['conv_generate_btn'].click(
@@ -1383,6 +1447,7 @@ class ConversationTool(Tool):
                 # VibeVoice advanced params
                 components['vv_conv_num_steps'], components['vv_conv_do_sample'], components['vv_conv_temperature'], components['vv_conv_top_k'],
                 components['vv_conv_top_p'], components['vv_conv_repetition_penalty'],
+                components['vv_conv_sentences_per_chunk'],
                 # LuxTTS
                 components['luxtts_voice_sample_1'], components['luxtts_voice_sample_2'], components['luxtts_voice_sample_3'], components['luxtts_voice_sample_4'],
                 components['luxtts_voice_sample_5'], components['luxtts_voice_sample_6'], components['luxtts_voice_sample_7'], components['luxtts_voice_sample_8'],

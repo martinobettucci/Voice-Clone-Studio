@@ -100,7 +100,12 @@ class SettingsTool(Tool):
                                     value=_user_config.get("skip_engine_check", False),
                                     info="Assumes all engines are available. Faster launch. (Restart required)"
                                 )
-
+                                gr.Markdown("### Network")
+                                components['settings_listen_on_network'] = gr.Checkbox(
+                                    label="Listen on Network",
+                                    value=_user_config.get("listen_on_network", False),
+                                    info="Allow other devices on your local network to connect. (Restart required)"
+                                )
                             with gr.Column():
                                 gr.Markdown("### Model Downloading")
                                 components['settings_offline_mode'] = gr.Checkbox(
@@ -352,6 +357,13 @@ class SettingsTool(Tool):
         components['settings_audio_notifications'].change(
             lambda x: save_preference("browser_notifications", x),
             inputs=[components['settings_audio_notifications']],
+            outputs=[]
+        )
+
+        # Save listen on network setting
+        components['settings_listen_on_network'].change(
+            lambda x: save_preference("listen_on_network", x),
+            inputs=[components['settings_listen_on_network']],
             outputs=[]
         )
 

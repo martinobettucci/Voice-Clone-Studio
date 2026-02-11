@@ -288,11 +288,41 @@ if __name__ == "__main__":
     theme = gr.themes.Base.load('modules/core_components/ui_components/theme.json')
     app = create_ui()
     try:
+        # Use 0.0.0.0 if user enabled network listening, otherwise localhost only
+        network_mode = _user_config.get("listen_on_network", False)
+        default_host = "0.0.0.0" if network_mode else "127.0.0.1"
+        server_host = os.getenv("GRADIO_SERVER_NAME", default_host)
+
+        # In network mode, don't auto-open browser — print the LAN address instead
+        if network_mode or server_host == "0.0.0.0":
+            import socket
+            # Get actual LAN IP by checking which interface routes to external networks
+            # This never sends data — just checks which local IP the OS would use
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("10.255.255.255", 1))
+                lan_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                lan_ip = "<your-local-ip>"
+            print()
+            print("=" * 50)
+            print("Network listening enabled")
+            print(f"Local:   http://127.0.0.1:7860")
+            print(f"Network: http://{lan_ip}:7860")
+            print()
+            print("NOTE: Only devices on your local network can")
+            print("connect. Your router's firewall blocks outside")
+            print("traffic unless you have port forwarding enabled.")
+            print("Do NOT use this on public/untrusted WiFi.")
+            print("=" * 50)
+            print()
+
         app.launch(
-            server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+            server_name=server_host,
             server_port=7860,
             share=False,
-            inbrowser=True,
+            inbrowser=not (network_mode or server_host == "0.0.0.0"),
             theme=theme,
             css=TRIGGER_HIDE_CSS + CONFIRMATION_MODAL_CSS + INPUT_MODAL_CSS,
             head=CONFIRMATION_MODAL_HEAD + INPUT_MODAL_HEAD
@@ -301,6 +331,10 @@ if __name__ == "__main__":
         print()
         print("=" * 50)
         print("Voice Clone Studio is already running!")
-        print("Check your browser at http://127.0.0.1:7860")
+        if network_mode or server_host == "0.0.0.0":
+            print(f"Local:   http://127.0.0.1:7860")
+            print(f"Network: http://{lan_ip}:7860")
+        else:
+            print("Check your browser at http://127.0.0.1:7860")
         print("=" * 50)
         print()

@@ -69,7 +69,7 @@ modules/
 │   └── gradio_filelister/         # Custom Gradio component (v0.4.0)
 │
 ├── deepfilternet/                 # EXTERNAL: Audio denoising
-├── mmaudio_repo/                  # EXTERNAL: MMAudio sound effects
+├── mmaudio/                       # EXTERNAL: MMAudio sound effects
 ├── qwen_finetune/                 # EXTERNAL: Training logic
 ├── vibevoice_tts/                 # EXTERNAL: VibeVoice TTS
 └── vibevoice_asr/                 # EXTERNAL: VibeVoice ASR
