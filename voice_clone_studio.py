@@ -197,7 +197,7 @@ def create_ui():
             with gr.Column(scale=20):
                 gr.Markdown("""
                     # 🎙️ Voice Clone Studio
-                    <p style="font-size: 0.9em; color: #ffffff; margin-top: -10px;">Powered by Qwen3-TTS, VibeVoice, LuxTTS and Whisper</p>
+                    <p style="font-size: 0.9em; color: var(--body-text-color-subdued); margin-top: -10px;">Powered by Qwen3-TTS, VibeVoice, LuxTTS and Whisper</p>
                     """)
 
             with gr.Column(scale=1, min_width=180):
