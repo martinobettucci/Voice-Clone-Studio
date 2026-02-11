@@ -402,7 +402,7 @@ VIBEVOICE_GENERATION_DEFAULTS = {
     "temperature": 1.0,
     "top_k": 50,
     "top_p": 1.0,
-    "repetition_penalty": 1.0,
+    "repetition_penalty": 1.1,
     "cfg_scale": 3.0,
     "num_steps": 20
 }

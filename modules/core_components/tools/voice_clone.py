@@ -187,78 +187,20 @@ class VoiceCloneTool(Tool):
 
                     # VibeVoice Advanced Parameters
                     is_vv_initial = "VibeVoice" in saved_model
-                    components['vv_params_accordion'] = gr.Accordion("VibeVoice Advanced Parameters", open=False, visible=is_vv_initial)
-                    with components['vv_params_accordion']:
-
-                        with gr.Row():
-                            components['vv_cfg_scale'] = gr.Slider(
-                                minimum=1.0,
-                                maximum=5.0,
-                                value=3.0,
-                                step=0.1,
-                                label="CFG Scale",
-                                info="Controls audio adherence to voice prompt"
-                            )
-                            components['vv_num_steps'] = gr.Slider(
-                                minimum=5,
-                                maximum=50,
-                                value=20,
-                                step=1,
-                                label="Inference Steps",
-                                info="Number of diffusion steps"
-                            )
-
-                        with gr.Row():
-                            components['vv_do_sample'] = gr.Checkbox(
-                                label="Enable Sampling",
-                                value=False,
-                                info="Enable stochastic sampling (default: False)"
-                            )
-
-                            components['vv_sentences_per_chunk'] = gr.Slider(
-                                minimum=0,
-                                maximum=5,
-                                value=0,
-                                step=1,
-                                label="Sentences per Chunk",
-                                info="Split long text into chunks of N sentences (0 = no split). Prevents quality degradation on long prompts."
-                            )
-                        with gr.Row():
-                            components['vv_repetition_penalty'] = gr.Slider(
-                                minimum=1.0,
-                                maximum=2.0,
-                                value=1.0,
-                                step=0.05,
-                                label="Repetition Penalty",
-                                info="Penalize repeated tokens"
-                            )
-
-                            components['vv_temperature'] = gr.Slider(
-                                minimum=0.1,
-                                maximum=2.0,
-                                value=1.0,
-                                step=0.05,
-                                label="Temperature",
-                                info="Sampling temperature"
-                            )
-
-                        with gr.Row():
-                            components['vv_top_k'] = gr.Slider(
-                                minimum=0,
-                                maximum=100,
-                                value=50,
-                                step=1,
-                                label="Top-K",
-                                info="Keep only top K tokens"
-                            )
-                            components['vv_top_p'] = gr.Slider(
-                                minimum=0.0,
-                                maximum=1.0,
-                                value=1.0,
-                                step=0.05,
-                                label="Top-P (Nucleus)",
-                                info="Cumulative probability threshold"
-                            )
+                    create_vibevoice_advanced_params = shared_state['create_vibevoice_advanced_params']
+                    vv_params = create_vibevoice_advanced_params(
+                        include_sentences_per_chunk=True,
+                        visible=is_vv_initial
+                    )
+                    components['vv_params_accordion'] = vv_params['accordion']
+                    components['vv_cfg_scale'] = vv_params['cfg_scale']
+                    components['vv_num_steps'] = vv_params['num_steps']
+                    components['vv_do_sample'] = vv_params['do_sample']
+                    components['vv_sentences_per_chunk'] = vv_params['sentences_per_chunk']
+                    components['vv_repetition_penalty'] = vv_params['repetition_penalty']
+                    components['vv_temperature'] = vv_params['temperature']
+                    components['vv_top_k'] = vv_params['top_k']
+                    components['vv_top_p'] = vv_params['top_p']
 
                     # LuxTTS Advanced Parameters
                     is_lux_initial = "LuxTTS" in saved_model
@@ -321,7 +263,7 @@ class VoiceCloneTool(Tool):
         def generate_audio_handler(sample_name, text_to_generate, language, seed, model_selection="Qwen3 - Small",
                                    qwen_do_sample=True, qwen_temperature=0.9, qwen_top_k=50, qwen_top_p=1.0, qwen_repetition_penalty=1.05,
                                    qwen_max_new_tokens=2048,
-                                   vv_do_sample=False, vv_temperature=1.0, vv_top_k=50, vv_top_p=1.0, vv_repetition_penalty=1.0,
+                                   vv_do_sample=False, vv_temperature=1.0, vv_top_k=50, vv_top_p=1.0, vv_repetition_penalty=1.1,
                                    vv_cfg_scale=3.0, vv_num_steps=20, vv_sentences_per_chunk=0,
                                    lux_num_steps=4, lux_t_shift=0.5, lux_speed=1.0, lux_return_smooth=False,
                                    lux_rms=0.01, lux_ref_duration=30, lux_guidance_scale=3.0,

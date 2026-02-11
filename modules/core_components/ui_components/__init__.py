@@ -187,7 +187,9 @@ def create_vibevoice_advanced_params(
     initial_temperature=1.0,
     initial_top_k=50,
     initial_top_p=1.0,
-    initial_repetition_penalty=1.0,
+    initial_repetition_penalty=1.1,
+    initial_sentences_per_chunk=0,
+    include_sentences_per_chunk=False,
     visible=True
 ):
     """
@@ -201,6 +203,8 @@ def create_vibevoice_advanced_params(
         initial_top_k: Default top_k
         initial_top_p: Default top_p
         initial_repetition_penalty: Default penalty
+        initial_sentences_per_chunk: Default sentences per chunk (0 = no split)
+        include_sentences_per_chunk: Show sentences per chunk control
         visible: Make accordion visible
 
     Returns:
@@ -208,16 +212,8 @@ def create_vibevoice_advanced_params(
     """
     components = {}
 
-    with gr.Accordion("Advanced Parameters", open=False, visible=visible):
+    with gr.Accordion("VibeVoice Advanced Parameters", open=False, visible=visible) as accordion:
         with gr.Row():
-            components['num_steps'] = gr.Slider(
-                minimum=5,
-                maximum=50,
-                value=initial_num_steps,
-                step=1,
-                label="Inference Steps",
-                info="Number of diffusion steps"
-            )
             components['cfg_scale'] = gr.Slider(
                 minimum=1.0,
                 maximum=5.0,
@@ -226,14 +222,30 @@ def create_vibevoice_advanced_params(
                 label="CFG Scale",
                 info="Controls audio adherence to voice prompt"
             )
+            components['num_steps'] = gr.Slider(
+                minimum=5,
+                maximum=50,
+                value=initial_num_steps,
+                step=1,
+                label="Inference Steps",
+                info="Number of diffusion steps"
+            )
 
-        gr.Markdown("**Stochastic Sampling Parameters**")
         with gr.Row():
             components['do_sample'] = gr.Checkbox(
                 label="Enable Sampling",
                 value=initial_do_sample,
                 info="Enable stochastic sampling (default: False)"
             )
+            if include_sentences_per_chunk:
+                components['sentences_per_chunk'] = gr.Slider(
+                    minimum=0,
+                    maximum=10,
+                    value=initial_sentences_per_chunk,
+                    step=1,
+                    label="Sentences per Chunk",
+                    info="Split long text into chunks of N sentences (0 = no split). Prevents quality degradation on long prompts."
+                )
 
         with gr.Row():
             components['repetition_penalty'] = gr.Slider(
@@ -270,6 +282,8 @@ def create_vibevoice_advanced_params(
                 label="Top-P (Nucleus)",
                 info="Cumulative probability threshold"
             )
+
+    components['accordion'] = accordion
 
     return components
 

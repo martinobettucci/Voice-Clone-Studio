@@ -1,5 +1,11 @@
 # Version History
 
+## February 10, 2026
+#### Version 1.5.2 - Network Mode & Tweaks
+- **Sentence Per Chunk**  - To prevent VibeVoice from going off the rail, we add the option of resetting after a certain amount of Sentences.
+- **New System Prompt for Conversations** - Added an extra System prompt to help generate conversations.
+- **Network Mode** - Now possible to launch Voice Clone Studio in network mode, so it can be access by other local machines. (In Settings)
+
 ## February 9, 2026
 #### Version 1.5.0 - Prompt Manager & Emotion Storage
 

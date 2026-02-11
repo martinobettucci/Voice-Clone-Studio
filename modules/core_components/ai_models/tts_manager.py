@@ -6,6 +6,7 @@ Centralized management for all TTS models (Qwen3, VibeVoice, etc.)
 
 import torch
 import hashlib
+import logging
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
@@ -16,6 +17,19 @@ from .model_utils import (
     check_model_available_locally, empty_device_cache, log_gpu_memory, set_seed,
     run_pre_load_hooks
 )
+
+# Suppress noisy info/warning messages from upstream libraries:
+# - qwen_tts config init: "speaker_encoder_config is None...", "talker_config is None...", etc.
+# - transformers generation: "Setting pad_token_id to eos_token_id..."
+# - transformers modeling: "Flash Attention 2 without specifying a torch dtype..."
+# - transformers tensor_parallel: "TP rules were not applied...", "layers were not sharded..."
+for _logger_name in [
+    "qwen_tts",
+    "transformers.modeling_utils",
+    "transformers.generation.utils",
+    "transformers.integrations.tensor_parallel",
+]:
+    logging.getLogger(_logger_name).setLevel(logging.ERROR)
 
 
 class TTSManager:
@@ -93,7 +107,7 @@ class TTSManager:
                     trust_remote_code=True,
                     **kwargs
                 )
-                print(f"✓ Model loaded with {attn}")
+                print(f"[OK] Model loaded with {attn}")
                 return model, attn
             except Exception as e:
                 error_msg = str(e).lower()

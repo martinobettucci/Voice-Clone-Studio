@@ -46,6 +46,19 @@ SYSTEM_PROMPTS = {
         "Focus on tone, emotion, pacing, and natural speech patterns. "
         "Output ONLY the spoken text, nothing else — no stage directions, no quotation marks."
     ),
+    "Conversation": (
+        "You are a script writer for multi-speaker conversations. The user will give you a topic, scenario, "
+        "or concept along with the number of speakers to use. "
+        "Your job is to write a natural conversation where each speaker talks in FIRST PERSON to the others. "
+        "Each speaker's line MUST start on a new line with their number in brackets, like [1]: or [2]: etc. "
+        "Example format:\n"
+        "[1]: Hey, did you hear about the new project?\n"
+        "[2]: Yeah, I just got the email this morning.\n"
+        "[1]: What do you think about the timeline?\n"
+        "Write natural, flowing dialogue with realistic turn-taking. "
+        "Vary sentence length and speaking style between speakers to give each a distinct voice. "
+        "Output ONLY the conversation lines in the [n]: format, nothing else — no narration, no stage directions, no quotation marks."
+    ),
     "Sound Design / SFX": (
         "You are a sound design prompt writer. The user will give you a short idea or concept. "
         "Your job is to expand it into a detailed, evocative description of a sound or soundscape. "
@@ -609,13 +622,20 @@ class PromptManagerTool(Tool):
         user_config = shared_state.get('_user_config', {})
         model_choices = _get_all_model_choices(user_config)
 
+        # Restore saved LLM model selection
+        saved_llm_model = user_config.get("llm_model", "")
+        if saved_llm_model and saved_llm_model in model_choices:
+            default_llm_model = saved_llm_model
+        else:
+            default_llm_model = model_choices[0] if model_choices else None
+
         components = {}
 
         with gr.TabItem("Prompt Manager"):
             with gr.Row():
                 # Left column: prompt editor and saved prompts
                 with gr.Column(scale=2):
-                    gr.Markdown("### Prompt Editor")
+                    gr.Markdown("### Prompt Result")
 
                     components['prompt_text'] = gr.Textbox(
                         label="Prompt",
@@ -683,7 +703,7 @@ class PromptManagerTool(Tool):
                         components['llm_model'] = gr.Dropdown(
                             label="LLM Model",
                             choices=model_choices,
-                            value=model_choices[0] if model_choices else None,
+                            value=default_llm_model,
                             interactive=True
                         )
 
@@ -713,6 +733,7 @@ class PromptManagerTool(Tool):
     def setup_events(cls, components, shared_state):
         """Wire up Prompt Manager events."""
         user_config = shared_state.get('_user_config', {})
+        save_preference = shared_state.get('save_preference')
         show_input_modal_js = shared_state.get('show_input_modal_js')
         show_confirmation_modal_js = shared_state.get('show_confirmation_modal_js')
         input_trigger = shared_state.get('input_trigger')
@@ -988,6 +1009,13 @@ class PromptManagerTool(Tool):
         components['stop_server_btn'].click(
             stop_llm_server,
             outputs=[components['llm_status']]
+        )
+
+        # Save LLM model selection to config
+        components['llm_model'].change(
+            lambda x: save_preference("llm_model", x),
+            inputs=[components['llm_model']],
+            outputs=[]
         )
 
 
