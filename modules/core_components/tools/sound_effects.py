@@ -15,6 +15,7 @@ import gradio as gr
 import soundfile as sf
 import shutil
 import random
+import time
 from pathlib import Path
 
 from modules.core_components.tool_base import Tool, ToolConfig
@@ -250,10 +251,10 @@ class SoundEffectsTool(Tool):
                          progress=gr.Progress()):
             """Generate a sound effect."""
             if mode == "Text to Audio" and (not prompt or not prompt.strip()):
-                return None, None, "Error: Please enter a text prompt.", "", gr.update(), gr.update(), gr.update()
+                return None, None, "Error: Please enter a text prompt.", "", "", gr.update(interactive=False), gr.update(), gr.update()
 
             if mode == "Video to Audio" and not video:
-                return None, None, "Error: Please upload a video file.", "", gr.update(), gr.update(), gr.update()
+                return None, None, "Error: Please upload a video file.", "", "", gr.update(interactive=False), gr.update(), gr.update()
 
             try:
                 # Handle seed
@@ -350,6 +351,7 @@ class SoundEffectsTool(Tool):
                 if mode == "Video to Audio" and video:
                     try:
                         import subprocess
+                        timestamp = int(time.time())
                         combined_filename = f"sfx_preview_{safe_prompt}_{timestamp}.mp4"
                         combined_path = TEMP_DIR / combined_filename
                         subprocess.run(
@@ -377,14 +379,13 @@ class SoundEffectsTool(Tool):
                 if combined_video_path:
                     return (
                         str(temp_path),
-                        combined_video_path,
+                        gr.update(value=combined_video_path, visible=True),
                         status,
                         suggested_name,
                         metadata_text,
                         gr.update(interactive=True),
                         gr.update(value="Result"),
                         gr.update(visible=False),
-                        gr.update(visible=True),
                     )
 
                 return (
@@ -396,13 +397,12 @@ class SoundEffectsTool(Tool):
                     gr.update(interactive=True),
                     gr.update(),
                     gr.update(),
-                    gr.update()
                 )
 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return None, None, f"Error: {str(e)}", "", "", gr.update(interactive=False), gr.update(), gr.update(), gr.update()
+                return None, None, f"Error: {str(e)}", "", "", gr.update(interactive=False), gr.update(), gr.update()
 
         components['sfx_generate_btn'].click(
             generate_sfx,
@@ -426,7 +426,6 @@ class SoundEffectsTool(Tool):
                 components['sfx_save_btn'],
                 components['sfx_video_toggle'],
                 components['sfx_video_input'],
-                components['sfx_output_video'],
             ]
         )
 
@@ -508,7 +507,8 @@ class SoundEffectsTool(Tool):
                 # Save metadata
                 if metadata_text:
                     metadata_path = output_path.with_suffix(".txt")
-                    metadata_path.write_text(metadata_text, encoding="utf-8")
+                    metadata_out = '\n'.join(line.lstrip() for line in metadata_text.lstrip().splitlines())
+                    metadata_path.write_text(metadata_out, encoding="utf-8")
 
                 return f"Saved: {output_path.name}", gr.update(interactive=False)
 

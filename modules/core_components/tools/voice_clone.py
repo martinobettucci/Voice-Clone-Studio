@@ -425,7 +425,8 @@ class VoiceCloneTool(Tool):
                     Seed: {seed}
                     Text: {' '.join(text_to_generate.split())}
                     """)
-                metadata_file.write_text(metadata, encoding="utf-8")
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 if play_completion_beep:

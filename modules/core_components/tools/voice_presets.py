@@ -345,7 +345,8 @@ class VoicePresetsTool(Tool):
                     Instruct: {instruct.strip() if instruct else ''}
                     Text: {' '.join(text_to_generate.split())}
                     """)
-                metadata_file.write_text(metadata, encoding="utf-8")
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 instruct_msg = f" with style: {instruct.strip()[:30]}..." if instruct and instruct.strip() else ""
@@ -439,7 +440,8 @@ class VoicePresetsTool(Tool):
                     Instruct: {instruct.strip() if instruct and not icl_enabled else ''}
                     Text: {' '.join(text_to_generate.split())}
                     """)
-                metadata_file.write_text(metadata, encoding="utf-8")
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 instruct_msg = f" with style: {instruct.strip()[:30]}..." if instruct and instruct.strip() and not icl_enabled else ""

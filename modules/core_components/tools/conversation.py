@@ -798,7 +798,9 @@ class ConversationTool(Tool):
                     --- Script ---
                     {conversation_data.strip()}
                     """)
-                metadata_file.write_text(metadata, encoding="utf-8")
+                # Strip leading blank lines and left-strip all lines for flush-left output
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
@@ -974,7 +976,8 @@ class ConversationTool(Tool):
                     --- Script ---
                     {conversation_data.strip()}
                     """)
-                metadata_file.write_text(metadata, encoding="utf-8")
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
@@ -1196,7 +1199,8 @@ class ConversationTool(Tool):
                         --- Script ---
                         {script_text.strip()}
                         """)
-                    metadata_file.write_text(metadata, encoding="utf-8")
+                    metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                    metadata_file.write_text(metadata_out, encoding="utf-8")
 
                     progress(1.0, desc="Done!")
                     if play_completion_beep:
@@ -1341,7 +1345,8 @@ class ConversationTool(Tool):
                     --- Script ---
                     {conversation_data.strip()}
                     """)
-                metadata_file.write_text(metadata, encoding="utf-8")
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
