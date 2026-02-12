@@ -116,9 +116,7 @@ COPY ./modules /home/user/app/modules
 COPY ./wheel /home/user/app/wheel
 COPY ./tests /home/user/app/tests
 COPY ./docs /home/user/app/docs
-COPY ./config.json /home/user/app/config.json
 COPY ./voice_clone_studio.py /home/user/app/voice_clone_studio.py
-COPY ./.github/copilot-instructions.md /home/user/app/.github/copilot-instructions.md
 WORKDIR /home/user/app
 EXPOSE 7860
 CMD ["python3", "voice_clone_studio.py"]
