@@ -15,6 +15,7 @@ class AutoEncoderModule(nn.Module):
                  *,
                  vae_ckpt_path,
                  vocoder_ckpt_path: Optional[str] = None,
+                 bigvgan_pretrained_source: Optional[str] = None,
                  mode: Literal['16k', '44k'],
                  need_vae_encoder: bool = True):
         super().__init__()
@@ -27,8 +28,8 @@ class AutoEncoderModule(nn.Module):
             assert vocoder_ckpt_path is not None
             self.vocoder = BigVGAN(vocoder_ckpt_path).eval()
         elif mode == '44k':
-            self.vocoder = BigVGANv2.from_pretrained('nvidia/bigvgan_v2_44khz_128band_512x',
-                                                     use_cuda_kernel=False)
+            source = bigvgan_pretrained_source or 'nvidia/bigvgan_v2_44khz_128band_512x'
+            self.vocoder = BigVGANv2.from_pretrained(str(source), use_cuda_kernel=False)
             self.vocoder.remove_weight_norm()
         else:
             raise ValueError(f'Unknown mode: {mode}')

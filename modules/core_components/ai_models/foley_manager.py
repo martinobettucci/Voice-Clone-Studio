@@ -6,11 +6,17 @@ Supports text-to-audio and video-to-audio synthesis.
 """
 
 import gc
+import os
 import sys
 import torch
+from contextlib import contextmanager
 from pathlib import Path
 
-from .model_utils import get_device, get_dtype, empty_device_cache, run_pre_load_hooks
+from .model_utils import (
+    get_device, get_dtype, check_model_available_locally,
+    download_model_from_huggingface,
+    empty_device_cache, run_pre_load_hooks
+)
 
 
 # MMAudio model configurations
@@ -33,6 +39,9 @@ MMAUDIO_SHARED_WEIGHTS = {
     "vae": "v1-44.pth",
     "synchformer": "synchformer_state_dict.pth",
 }
+
+MMAUDIO_CLIP_REPO = "apple/DFN5B-CLIP-ViT-H-14-384"
+MMAUDIO_BIGVGAN_REPO = "nvidia/bigvgan_v2_44khz_128band_512x"
 
 
 def _ensure_mmaudio_path():
@@ -66,6 +75,30 @@ class FoleyManager:
         self._feature_utils = None
         self._current_model_name = None
         self._current_mode = None
+
+    def _is_offline_mode(self):
+        """Return whether offline mode is currently enabled in user config."""
+        return bool(self.user_config.get("offline_mode", False))
+
+    @contextmanager
+    def _hf_offline_context(self):
+        """Temporarily force HF-backed loaders to offline mode."""
+        if not self._is_offline_mode():
+            yield
+            return
+
+        keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
+        previous = {k: os.environ.get(k) for k in keys}
+        try:
+            for key in keys:
+                os.environ[key] = "1"
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def _get_model_config(self, display_name):
         """
@@ -184,19 +217,62 @@ class FoleyManager:
 
     def _download_if_needed(self, weight_path):
         """Download a weight file if it doesn't exist locally."""
-        if weight_path.exists():
+        weight_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # In offline mode, never download; require local files.
+        if self._is_offline_mode():
+            if not weight_path.exists():
+                raise RuntimeError(
+                    "Offline mode enabled but required MMAudio file is missing locally: "
+                    f"{weight_path}\n"
+                    "Disable offline mode or download this file first."
+                )
             return
 
         _ensure_mmaudio_path()
         from mmaudio.utils.download_utils import download_model_if_needed
 
-        # MMAudio's download system uses relative paths from CWD
-        # We need to override by creating the path structure it expects
-        weight_path.parent.mkdir(parents=True, exist_ok=True)
+        # Online mode: always run through MMAudio's validator/downloader.
+        # It checks md5 and re-downloads corrupted files automatically.
+        try:
+            download_model_if_needed(weight_path)
+        except ValueError as e:
+            # Filename not in MMAudio's download registry (e.g., custom user file).
+            # If user already provided it, continue; otherwise fail with context.
+            if weight_path.exists():
+                return
+            raise RuntimeError(
+                f"Missing MMAudio file: {weight_path}\n"
+                "This filename is not auto-downloadable. Please place it manually in the models folder."
+            ) from e
 
-        # Create a temporary Path that mimics the expected relative structure
-        # The download function matches by filename
-        download_model_if_needed(weight_path)
+    def download_model_files(self, display_name="Large v2 (44kHz)", progress_callback=None):
+        """Download/validate required MMAudio files without loading the model into memory."""
+        cfg = self._get_model_config(display_name)
+
+        self._weights_dir.mkdir(parents=True, exist_ok=True)
+        self._ext_weights_dir.mkdir(parents=True, exist_ok=True)
+
+        if progress_callback:
+            progress_callback(0.1, "Preparing MMAudio model files...")
+
+        self._download_if_needed(cfg["weight_path"])
+        if progress_callback:
+            progress_callback(0.45, "Preparing shared MMAudio components...")
+
+        vae_path = self._ext_weights_dir / MMAUDIO_SHARED_WEIGHTS["vae"]
+        synchformer_path = self._ext_weights_dir / MMAUDIO_SHARED_WEIGHTS["synchformer"]
+        self._download_if_needed(vae_path)
+        self._download_if_needed(synchformer_path)
+
+        if progress_callback:
+            progress_callback(1.0, "MMAudio files ready.")
+
+        return {
+            "model_weight": cfg["weight_path"],
+            "vae": vae_path,
+            "synchformer": synchformer_path,
+        }
 
     def load_model(self, display_name="Large v2 (44kHz)", progress_callback=None):
         """
@@ -230,7 +306,10 @@ class FoleyManager:
         _ensure_mmaudio_path()
 
         if progress_callback:
-            progress_callback(0.1, "Downloading weights if needed...")
+            if self._is_offline_mode():
+                progress_callback(0.1, "Checking local MMAudio weights (offline mode)...")
+            else:
+                progress_callback(0.1, "Downloading weights if needed...")
 
         # Ensure weight directories exist
         self._weights_dir.mkdir(parents=True, exist_ok=True)
@@ -255,11 +334,34 @@ class FoleyManager:
         net = get_my_mmaudio(cfg["model_name"]).to(device, dtype).eval()
 
         weight_path = cfg["weight_path"]
-        if str(weight_path).endswith(".safetensors"):
-            from safetensors.torch import load_file
-            state_dict = load_file(str(weight_path), device=str(device))
-        else:
-            state_dict = torch.load(weight_path, map_location=device, weights_only=True)
+        try:
+            if str(weight_path).endswith(".safetensors"):
+                from safetensors.torch import load_file
+                state_dict = load_file(str(weight_path), device=str(device))
+            else:
+                state_dict = torch.load(weight_path, map_location=device, weights_only=True)
+        except Exception as e:
+            # Corrupted/truncated checkpoint is common after interrupted downloads.
+            if self._is_offline_mode():
+                raise RuntimeError(
+                    "MMAudio checkpoint appears corrupted and offline mode is enabled:\n"
+                    f"{weight_path}\n"
+                    "Disable offline mode once to re-download, or replace this file manually."
+                ) from e
+
+            print(f"Detected corrupted MMAudio checkpoint, retrying download: {weight_path.name}")
+            try:
+                if weight_path.exists():
+                    weight_path.unlink()
+            except Exception:
+                pass
+            self._download_if_needed(weight_path)
+
+            if str(weight_path).endswith(".safetensors"):
+                from safetensors.torch import load_file
+                state_dict = load_file(str(weight_path), device=str(device))
+            else:
+                state_dict = torch.load(weight_path, map_location=device, weights_only=True)
         net.load_weights(state_dict)
         print(f"Loaded MMAudio weights from {weight_path.name}")
 
@@ -274,14 +376,79 @@ class FoleyManager:
         _root_logger.setLevel(_logging.ERROR)
 
         from mmaudio.model.utils.features_utils import FeaturesUtils
-        feature_utils = FeaturesUtils(
-            tod_vae_ckpt=vae_path,
-            synchformer_ckpt=synchformer_path,
-            enable_conditions=True,
-            mode=cfg["mode"],
-            bigvgan_vocoder_ckpt=None,  # 44kHz vocoder auto-downloads from HF
-            need_vae_encoder=False
-        )
+
+        clip_local_path = check_model_available_locally(MMAUDIO_CLIP_REPO)
+        if clip_local_path:
+            clip_source = str(clip_local_path)
+            print(f"Using local MMAudio CLIP dependency: {clip_local_path}")
+        elif self._is_offline_mode():
+            raise RuntimeError(
+                "Offline mode enabled and MMAudio CLIP dependency is missing locally: "
+                f"{MMAUDIO_CLIP_REPO}\n"
+                "Download it in Settings -> Model Downloading ('MMAudio-CLIP-DFN5B') "
+                "or disable Offline Mode."
+            )
+        else:
+            success, message, downloaded_path = download_model_from_huggingface(MMAUDIO_CLIP_REPO)
+            if success and downloaded_path:
+                clip_source = downloaded_path
+                print(
+                    "Downloaded MMAudio CLIP dependency for local offline reuse: "
+                    f"{downloaded_path}"
+                )
+            else:
+                print(
+                    "Could not pre-download MMAudio CLIP dependency to local models folder; "
+                    f"falling back to online hub loading. Reason: {message}"
+                )
+                clip_source = None
+
+        bigvgan_local_path = check_model_available_locally(MMAUDIO_BIGVGAN_REPO)
+        if bigvgan_local_path:
+            bigvgan_source = str(bigvgan_local_path)
+            print(f"Using local MMAudio BigVGAN dependency: {bigvgan_local_path}")
+        elif self._is_offline_mode():
+            raise RuntimeError(
+                "Offline mode enabled and MMAudio BigVGAN dependency is missing locally: "
+                f"{MMAUDIO_BIGVGAN_REPO}\n"
+                "Download it in Settings -> Model Downloading ('MMAudio-BigVGAN-v2-44k') "
+                "or disable Offline Mode."
+            )
+        else:
+            success, message, downloaded_path = download_model_from_huggingface(MMAUDIO_BIGVGAN_REPO)
+            if success and downloaded_path:
+                bigvgan_source = downloaded_path
+                print(
+                    "Downloaded MMAudio BigVGAN dependency for local offline reuse: "
+                    f"{downloaded_path}"
+                )
+            else:
+                print(
+                    "Could not pre-download MMAudio BigVGAN dependency to local models folder; "
+                    f"falling back to online hub loading. Reason: {message}"
+                )
+                bigvgan_source = MMAUDIO_BIGVGAN_REPO
+
+        try:
+            with self._hf_offline_context():
+                feature_utils = FeaturesUtils(
+                    tod_vae_ckpt=vae_path,
+                    synchformer_ckpt=synchformer_path,
+                    enable_conditions=True,
+                    mode=cfg["mode"],
+                    bigvgan_vocoder_ckpt=None,  # 44kHz vocoder auto-downloads from HF
+                    clip_pretrained_source=clip_source,
+                    bigvgan_pretrained_source=bigvgan_source,
+                    need_vae_encoder=False
+                )
+        except Exception as e:
+            if self._is_offline_mode():
+                raise RuntimeError(
+                    "Offline mode enabled, but MMAudio auxiliary assets are missing from local/HF cache "
+                    "(e.g., CLIP or BigVGAN dependencies). Run once online to populate cache, then retry offline.\n"
+                    f"Original error: {e}"
+                ) from e
+            raise
         feature_utils = feature_utils.to(device, dtype).eval()
 
         _root_logger.setLevel(_prev_root_level)
@@ -524,4 +691,11 @@ def get_foley_manager(user_config=None, models_dir=None):
     global _foley_manager
     if _foley_manager is None:
         _foley_manager = FoleyManager(user_config, models_dir)
+    else:
+        if user_config is not None:
+            _foley_manager.user_config = user_config
+        if models_dir is not None:
+            _foley_manager.models_dir = Path(models_dir)
+            _foley_manager._weights_dir = _foley_manager.models_dir / "mmaudio" / "weights"
+            _foley_manager._ext_weights_dir = _foley_manager.models_dir / "mmaudio" / "ext_weights"
     return _foley_manager

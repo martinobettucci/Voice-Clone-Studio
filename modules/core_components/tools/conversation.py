@@ -18,7 +18,9 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
-from modules.core_components.ai_models.model_utils import set_seed, get_device
+from modules.core_components.ai_models.model_utils import (
+    set_seed, get_device, resolve_model_source
+)
 from textwrap import dedent
 
 from modules.core_components.tool_base import Tool, ToolConfig
@@ -526,9 +528,10 @@ class ConversationTool(Tool):
         _active_emotions = shared_state.get('_active_emotions', {})
         play_completion_beep = shared_state.get('play_completion_beep')
         get_or_create_voice_prompt = shared_state.get('get_or_create_voice_prompt')
+        _user_config = shared_state.get('_user_config', {})
 
         # Get TTS manager (singleton)
-        tts_manager = get_tts_manager()
+        tts_manager = get_tts_manager(_user_config)
 
         def prepare_voice_samples_dict(v1, v2=None, v3=None, v4=None, v5=None, v6=None, v7=None, v8=None):
             """Prepare voice samples dictionary for generation."""
@@ -957,9 +960,27 @@ class ConversationTool(Tool):
 
                 # Map model size
                 if model_size == "Large (4-bit)":
-                    model_path = "FranckyB/VibeVoice-Large-4bit"
+                    model_repo_id = "FranckyB/VibeVoice-Large-4bit"
+                    download_label = "VibeVoice-Large (4-bit)"
                 else:
-                    model_path = f"FranckyB/VibeVoice-{model_size}"
+                    model_repo_id = f"FranckyB/VibeVoice-{model_size}"
+                    download_label = "VibeVoice-Large" if model_size == "Large" else "VibeVoice-1.5B"
+
+                offline_mode = _user_config.get("offline_mode", False)
+                processor_source = resolve_model_source(
+                    model_repo_id,
+                    offline_mode=offline_mode,
+                    settings_download_name=download_label,
+                    auto_download_when_online=True,
+                )
+
+                tokenizer_repo_id = "Qwen/Qwen2.5-1.5B"
+                tokenizer_source = resolve_model_source(
+                    tokenizer_repo_id,
+                    offline_mode=offline_mode,
+                    settings_download_name="Qwen2.5-1.5B (VibeVoice Tokenizer)",
+                    auto_download_when_online=True,
+                )
 
                 # Suppress tokenizer warning
                 prev_level = logging.getLogger("transformers.tokenization_utils_base").level
@@ -967,7 +988,11 @@ class ConversationTool(Tool):
 
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
-                    processor = VibeVoiceProcessor.from_pretrained(model_path, local_files_only=False)
+                    processor = VibeVoiceProcessor.from_pretrained(
+                        processor_source,
+                        local_files_only=offline_mode,
+                        language_model_pretrained_name=tokenizer_source,
+                    )
 
                 logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
 

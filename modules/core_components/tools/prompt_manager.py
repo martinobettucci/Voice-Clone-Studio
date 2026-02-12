@@ -2,21 +2,16 @@
 Prompt Manager Tool
 
 Save, browse, and generate text prompts for TTS and sound effects.
-Includes an LLM-powered prompt generator using llama.cpp.
+Uses OpenAI-compatible chat completion endpoints with optional local Ollama mode.
 Prompts are stored in a standalone prompts.json at the project root.
 """
 
 import json
-import os
-import sys
-import subprocess
-import signal
-import atexit
-import time
-import ctypes
-import requests
-import gradio as gr
+import re
 from pathlib import Path
+
+import gradio as gr
+import requests
 
 from modules.core_components.tool_base import Tool, ToolConfig
 
@@ -25,17 +20,8 @@ from modules.core_components.tool_base import Tool, ToolConfig
 # ============================================================================
 PROMPTS_FILE = Path(__file__).parent.parent.parent.parent / "prompts.json"
 
-# ============================================================================
-# LLM Models available for download
-# ============================================================================
-LLM_MODELS = {
-    "Qwen3-4B-Q8_0.gguf": {
-        "repo": "Qwen/Qwen3-4B-GGUF",
-    },
-    "Qwen3-8B-Q8_0.gguf": {
-        "repo": "Qwen/Qwen3-8B-GGUF",
-    },
-}
+DEFAULT_OPENAI_ENDPOINT = "https://api.openai.com/v1"
+DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/v1"
 
 # System prompt presets
 SYSTEM_PROMPTS = {
@@ -44,7 +30,7 @@ SYSTEM_PROMPTS = {
         "Your job is to write dialogue or monologue in FIRST PERSON, as if the speaker is saying it aloud. "
         "Never describe the speaker in third person. Write the actual words they would speak. "
         "Focus on tone, emotion, pacing, and natural speech patterns. "
-        "Output ONLY the spoken text, nothing else — no stage directions, no quotation marks."
+        "Output ONLY the spoken text, nothing else - no stage directions, no quotation marks."
     ),
     "Conversation": (
         "You are a script writer for multi-speaker conversations. The user will give you a topic, scenario, "
@@ -57,7 +43,7 @@ SYSTEM_PROMPTS = {
         "[1]: What do you think about the timeline?\n"
         "Write natural, flowing dialogue with realistic turn-taking. "
         "Vary sentence length and speaking style between speakers to give each a distinct voice. "
-        "Output ONLY the conversation lines in the [n]: format, nothing else — no narration, no stage directions, no quotation marks."
+        "Output ONLY the conversation lines in the [n]: format, nothing else - no narration, no stage directions, no quotation marks."
     ),
     "Sound Design / SFX": (
         "You are a sound design prompt writer. The user will give you a short idea or concept. "
@@ -70,491 +56,199 @@ SYSTEM_PROMPTS = {
 
 SYSTEM_PROMPT_CHOICES = list(SYSTEM_PROMPTS.keys()) + ["Custom"]
 
+
 # ============================================================================
-# llama.cpp server management
+# Endpoint helpers
 # ============================================================================
-_server_process = None
-_current_model = None
-_job_handle = None
-SERVER_PORT = 8099  # Use a different port to avoid conflicts
 
-
-def _setup_windows_job_object():
-    """Create a Windows Job Object that kills child processes when parent exits."""
-    global _job_handle
-    if os.name != 'nt' or _job_handle:
-        return
-    try:
-        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-        JobObjectExtendedLimitInformation = 9
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", ctypes.c_uint32),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", ctypes.c_uint32),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", ctypes.c_uint32),
-                ("SchedulingClass", ctypes.c_uint32),
-            ]
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_ulonglong),
-                ("WriteOperationCount", ctypes.c_ulonglong),
-                ("OtherOperationCount", ctypes.c_ulonglong),
-                ("ReadTransferCount", ctypes.c_ulonglong),
-                ("WriteTransferCount", ctypes.c_ulonglong),
-                ("OtherTransferCount", ctypes.c_ulonglong),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            raise ctypes.WinError(ctypes.get_last_error())
-
-        extended_info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        extended_info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-
-        if not kernel32.SetInformationJobObject(
-            job, JobObjectExtendedLimitInformation,
-            ctypes.byref(extended_info), ctypes.sizeof(extended_info)
-        ):
-            kernel32.CloseHandle(job)
-            raise ctypes.WinError(ctypes.get_last_error())
-
-        _job_handle = job
-    except Exception:
-        pass
-
-
-def _assign_process_to_job(pid):
-    """Assign subprocess pid to job object so it gets killed when parent exits."""
-    global _job_handle
-    if os.name != 'nt' or not _job_handle or not pid:
-        return
-    try:
-        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-        PROCESS_ALL_ACCESS = 0x1F0FFF
-        proc_handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))
-        if not proc_handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        if not kernel32.AssignProcessToJobObject(_job_handle, proc_handle):
-            kernel32.CloseHandle(proc_handle)
-            raise ctypes.WinError(ctypes.get_last_error())
-        kernel32.CloseHandle(proc_handle)
-    except Exception:
-        pass
-
-
-def _cleanup_server():
-    """Cleanup function to stop server on exit."""
-    global _server_process, _job_handle
-    if _server_process:
-        try:
-            _server_process.terminate()
-            _server_process.wait(timeout=5)
-        except Exception:
-            try:
-                _server_process.kill()
-            except Exception:
-                pass
-        _server_process = None
-
-    if os.name == 'nt' and _job_handle:
-        try:
-            ctypes.WinDLL('kernel32').CloseHandle(_job_handle)
-        except Exception:
-            pass
-        _job_handle = None
-
-
-# Register cleanup
-atexit.register(_cleanup_server)
-
-
-def _is_server_alive():
-    """Check if llama.cpp server is responding."""
-    try:
-        r = requests.get(f"http://localhost:{SERVER_PORT}/health", timeout=2)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-def _kill_llama_on_port():
-    """Kill any process listening on our server port (safety net for orphans)."""
-    try:
-        if os.name == 'nt':
-            # Parse netstat for PIDs on our port
-            result = subprocess.run(
-                ["netstat", "-aon"],
-                capture_output=True, text=True, timeout=10
-            )
-            pids = set()
-            for line in result.stdout.splitlines():
-                if f":{SERVER_PORT}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    if parts:
-                        try:
-                            pid = int(parts[-1])
-                            if pid > 0:
-                                pids.add(pid)
-                        except ValueError:
-                            pass
-            for pid in pids:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", str(pid)],
-                        capture_output=True, timeout=5
-                    )
-                except Exception:
-                    pass
-        else:
-            subprocess.run(
-                f"lsof -ti:{SERVER_PORT} | xargs -r kill -9",
-                shell=True, capture_output=True, timeout=10
-            )
-    except Exception:
-        pass
-
-
-def _get_llama_models_dir(user_config):
-    """Get the path to the default models/llama/ directory."""
-    project_root = PROMPTS_FILE.parent
-    models_base = project_root / user_config.get("models_folder", "models")
-    llama_dir = models_base / "llama"
-    llama_dir.mkdir(parents=True, exist_ok=True)
-    return llama_dir
-
-
-def _get_user_llama_models_dir(user_config):
-    """Get the user-specified llama models directory, if configured.
-
-    Returns:
-        Path or None if not configured / empty.
-    """
-    user_path = user_config.get("llama_models_path", "").strip()
-    if not user_path:
-        return None
-    p = Path(user_path)
-    if p.exists() and p.is_dir():
-        return p
-    # Try creating it
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-    except Exception:
-        return None
-
-
-def _get_local_gguf_models(user_config):
-    """Get list of local .gguf model filenames from all search directories."""
-    seen = set()
-    models = []
-
-    # 1. Default models/llama/ folder
-    llama_dir = _get_llama_models_dir(user_config)
-    if llama_dir.exists():
-        for f in sorted(llama_dir.glob("*.gguf")):
-            if f.name not in seen:
-                seen.add(f.name)
-                models.append(f.name)
-
-    # 2. User-specified models folder
-    user_dir = _get_user_llama_models_dir(user_config)
-    if user_dir and user_dir.exists():
-        for f in sorted(user_dir.glob("*.gguf")):
-            if f.name not in seen:
-                seen.add(f.name)
-                models.append(f.name)
-
-    return models
-
-
-def _get_all_model_choices(user_config):
-    """Get combined list: local models first, then downloadable ones not yet local."""
-    local = _get_local_gguf_models(user_config)
-    all_choices = list(local)
-    for name in LLM_MODELS:
-        if name not in all_choices:
-            all_choices.append(name)
-    return all_choices
-
-
-def _find_model_path(model_name, user_config):
-    """Find the full path to a local model, searching all directories.
-
-    Returns:
-        Path string or None if not found.
-    """
-    # Check default models/llama/ first
-    llama_dir = _get_llama_models_dir(user_config)
-    default_path = llama_dir / model_name
-    if default_path.exists():
-        return str(default_path)
-
-    # Check user-specified directory
-    user_dir = _get_user_llama_models_dir(user_config)
-    if user_dir:
-        user_path = user_dir / model_name
-        if user_path.exists():
-            return str(user_path)
-
-    return None
-
-
-def _is_model_local(model_name, user_config):
-    """Check if a model exists locally in any search directory."""
-    return _find_model_path(model_name, user_config) is not None
-
-
-def _download_model(model_name, user_config, progress=None):
-    """Download a model from HuggingFace.
-
-    Args:
-        model_name: Filename of the model
-        user_config: User config dict
-        progress: Optional Gradio progress callback
-
-    Returns:
-        Path to downloaded model or None on error
-    """
-    if model_name not in LLM_MODELS:
-        return None
-
-    model_info = LLM_MODELS[model_name]
-    repo_id = model_info["repo"]
-
-    # Download to user-specified directory if configured, otherwise default
-    user_dir = _get_user_llama_models_dir(user_config)
-    download_dir = user_dir if user_dir else _get_llama_models_dir(user_config)
-    local_path = download_dir / model_name
-
-    if local_path.exists():
-        return str(local_path)
-
-    try:
-        from huggingface_hub import HfApi
-        if progress:
-            progress(0.0, desc=f"Downloading {model_name}...")
-
-        api = HfApi()
-        repo_info = api.repo_info(repo_id=repo_id, files_metadata=True)
-        file_metadata = next((f for f in repo_info.siblings if f.rfilename == model_name), None)
-        if not file_metadata or file_metadata.size is None:
-            return None
-
-        total_size = file_metadata.size
-        download_url = f"https://huggingface.co/{repo_id}/resolve/main/{model_name}"
-
-        downloaded = 0
-        with requests.get(download_url, stream=True) as r, open(str(local_path), "wb") as f:
-            r.raise_for_status()
-            for chunk in r.iter_content(chunk_size=65536):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress and total_size > 0:
-                        pct = downloaded / total_size
-                        progress(pct, desc=f"Downloading {model_name}... {downloaded // (1024 * 1024)}MB / {total_size // (1024 * 1024)}MB")
-
-        if progress:
-            progress(1.0, desc="Download complete")
-        return str(local_path)
-    except Exception as e:
-        # Clean up partial download
-        if local_path.exists():
-            try:
-                local_path.unlink()
-            except Exception:
-                pass
-        print(f"[Prompt Manager] Error downloading {model_name}: {e}")
-        return None
-
-
-def _start_server(model_name, user_config, progress=None):
-    """Start llama.cpp server with specified model.
-
-    Returns:
-        Tuple: (success, error_message)
-    """
-    global _server_process, _current_model
-
-    # If already running with same model, reuse
-    if _server_process and _current_model == model_name and _is_server_alive():
-        return True, None
-
-    # Stop any existing server
-    _stop_server()
-
-    # Unload all AI models to free VRAM before starting llama.cpp
-    try:
-        from modules.core_components.ai_models.tts_manager import get_tts_manager
-        from modules.core_components.ai_models.asr_manager import get_asr_manager
-        from modules.core_components.ai_models.foley_manager import get_foley_manager
-
-        tts = get_tts_manager()
-        if tts:
-            tts.unload_all()
-        asr = get_asr_manager()
-        if asr:
-            asr.unload_all()
-        foley = get_foley_manager()
-        if foley:
-            foley.unload_all()
-    except Exception:
-        pass
-
-    # Download if not local
-    if not _is_model_local(model_name, user_config):
-        if model_name in LLM_MODELS:
-            if progress:
-                progress(0.1, desc=f"Downloading {model_name}...")
-            model_path = _download_model(model_name, user_config, progress)
-            if not model_path:
-                return False, f"Failed to download model: {model_name}"
-        else:
-            return False, f"Model not found: {model_name}"
-    else:
-        model_path = _find_model_path(model_name, user_config)
-
-    if not os.path.exists(model_path):
-        return False, f"Model file not found: {model_path}"
-
-    try:
-        if progress:
-            progress(0.3, desc="Starting llama.cpp server...")
-
-        # Determine executable — use custom path from config if set
-        custom_llama_path = user_config.get("llama_cpp_path", "").strip()
-        if os.name == 'nt':
-            if custom_llama_path:
-                server_cmd = str(Path(custom_llama_path) / "llama-server.exe")
-            else:
-                server_cmd = "llama-server.exe"
-            creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            if custom_llama_path:
-                server_cmd = str(Path(custom_llama_path) / "llama-server")
-            else:
-                server_cmd = "llama-server"
-            creation_flags = 0
-
-        cmd_args = [
-            server_cmd, "-m", model_path,
-            "--port", str(SERVER_PORT),
-            "--no-warmup",
-            "-c", "4096"
-        ]
-
-        popen_kwargs = {
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-        }
-
-        if os.name == 'nt':
-            popen_kwargs["creationflags"] = creation_flags
-        else:
-            # On Unix, set PR_SET_PDEATHSIG so child gets SIGTERM when parent dies
-            def _set_pdeathsig():
-                try:
-                    for libname in ("libc.so.6", "libc.dylib", "libc.so"):
-                        try:
-                            libc = ctypes.CDLL(libname)
-                            break
-                        except Exception:
-                            libc = None
-                    if not libc:
-                        return
-                    PR_SET_PDEATHSIG = 1
-                    libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
-                except Exception:
-                    return
-            popen_kwargs["preexec_fn"] = _set_pdeathsig
-
-        _server_process = subprocess.Popen(cmd_args, **popen_kwargs)
-
-        # On Windows, attach to job object
-        if os.name == 'nt':
-            _setup_windows_job_object()
-            _assign_process_to_job(_server_process.pid)
-
-        _current_model = model_name
-
-        # Wait for server to be ready (up to 60 seconds for large models)
-        for i in range(60):
-            time.sleep(1)
-            if progress:
-                progress(0.3 + (i / 60) * 0.3, desc=f"Waiting for server... ({i + 1}s)")
-            if _is_server_alive():
-                return True, None
-            # Check if process crashed
-            if _server_process.poll() is not None:
-                stderr = _server_process.stderr.read().decode(errors='replace') if _server_process.stderr else ""
-                return False, f"Server exited unexpectedly.\n{stderr[:500]}"
-
-        _stop_server()
-        return False, "Server did not start in time (60s timeout)"
-
-    except FileNotFoundError:
-        custom_hint = ""
-        if not user_config.get("llama_cpp_path", "").strip():
-            custom_hint = "\nOr set the llama.cpp path in Settings > Folder Paths."
-        return False, (
-            "llama-server not found. Please install llama.cpp and add to PATH."
-            f"{custom_hint}\n"
-            "Installation: https://github.com/ggml-org/llama.cpp"
+def _normalize_v1_base_url(url: str, fallback: str = DEFAULT_OPENAI_ENDPOINT) -> str:
+    """Normalize endpoint base URL to include /v1 exactly once."""
+    base = (url or "").strip()
+    if not base:
+        base = fallback
+
+    base = base.rstrip("/")
+
+    # If user pasted full completion path, normalize back to /v1
+    for suffix in ("/chat/completions", "/completions"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+
+    if base.endswith("/v1"):
+        return base
+    return f"{base}/v1"
+
+
+def _get_ollama_tags_url(ollama_v1_url: str) -> str:
+    """Convert Ollama v1 URL to Ollama native tags endpoint URL."""
+    v1 = _normalize_v1_base_url(ollama_v1_url, fallback=DEFAULT_OLLAMA_ENDPOINT)
+    root = v1[:-3] if v1.endswith("/v1") else v1
+    return f"{root}/api/tags"
+
+
+def _get_effective_base_url(use_local_ollama: bool, endpoint_url: str, user_config: dict) -> str:
+    """Get the active endpoint base URL."""
+    if use_local_ollama:
+        return _normalize_v1_base_url(
+            user_config.get("llm_ollama_url", DEFAULT_OLLAMA_ENDPOINT),
+            fallback=DEFAULT_OLLAMA_ENDPOINT,
         )
-    except Exception as e:
-        return False, f"Error starting server: {e}"
+
+    return _normalize_v1_base_url(
+        endpoint_url or user_config.get("llm_endpoint_url", DEFAULT_OPENAI_ENDPOINT),
+        fallback=DEFAULT_OPENAI_ENDPOINT,
+    )
 
 
-def _stop_server():
-    """Stop the llama.cpp server and ensure VRAM is freed."""
-    global _server_process, _current_model
-    was_running = _server_process is not None
+def _build_headers(user_config: dict, use_local_ollama: bool) -> dict:
+    """Build request headers with optional bearer auth."""
+    headers = {"Content-Type": "application/json"}
+    api_key = (user_config.get("llm_api_key") or "").strip()
+    if api_key and not use_local_ollama:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
-    if _server_process:
+
+def _extract_error_message(response: requests.Response) -> str:
+    """Extract best-effort message from endpoint error payload."""
+    try:
+        payload = response.json()
+    except ValueError:
+        text = (response.text or "").strip()
+        return text[:300] if text else f"HTTP {response.status_code}"
+
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("error")
+            if msg:
+                return str(msg)
+        if isinstance(err, str):
+            return err
+        msg = payload.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+
+    return f"HTTP {response.status_code}"
+
+
+def _format_http_error(response: requests.Response, base_url: str) -> str:
+    """Map common HTTP statuses to actionable messages."""
+    detail = _extract_error_message(response)
+    if response.status_code in (401, 403):
+        return (
+            "Authentication failed (401/403). "
+            "Check your API key in Settings > LLM Endpoint, then retry. "
+            f"Endpoint: {base_url}\nDetails: {detail}"
+        )
+    if response.status_code == 404:
+        return (
+            "Endpoint or model not found (404). "
+            "Verify endpoint URL includes the correct /v1 API and model name is valid. "
+            f"Endpoint: {base_url}\nDetails: {detail}"
+        )
+    if response.status_code == 400:
+        return f"Invalid request (400): {detail}"
+    return f"Request failed ({response.status_code}): {detail}"
+
+
+def _parse_openai_model_ids(payload: dict) -> list[str]:
+    """Extract model IDs from OpenAI-compatible /models response."""
+    models = []
+    for item in payload.get("data", []) if isinstance(payload, dict) else []:
+        if isinstance(item, dict):
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id.strip():
+                models.append(model_id.strip())
+    # De-duplicate while preserving case, sort case-insensitive for stable UI
+    unique = sorted(set(models), key=lambda x: x.lower())
+    return unique
+
+
+def _discover_available_models(user_config: dict, use_local_ollama: bool, endpoint_url: str) -> tuple[list[str], str]:
+    """Discover available models from active provider."""
+    timeout = 12
+
+    if use_local_ollama:
+        ollama_v1 = _normalize_v1_base_url(
+            user_config.get("llm_ollama_url", DEFAULT_OLLAMA_ENDPOINT),
+            fallback=DEFAULT_OLLAMA_ENDPOINT,
+        )
+
+        # Preferred Ollama API
+        tags_url = _get_ollama_tags_url(ollama_v1)
         try:
-            _server_process.terminate()
-            _server_process.wait(timeout=5)
+            response = requests.get(tags_url, timeout=timeout)
+            if response.status_code == 200:
+                payload = response.json()
+                models = []
+                for item in payload.get("models", []) if isinstance(payload, dict) else []:
+                    if isinstance(item, dict):
+                        name = item.get("model") or item.get("name")
+                        if isinstance(name, str) and name.strip():
+                            models.append(name.strip())
+                if models:
+                    deduped = sorted(set(models), key=lambda x: x.lower())
+                    return deduped, f"Found {len(deduped)} local Ollama model(s)."
+        except requests.exceptions.ConnectionError:
+            return [], (
+                f"Could not connect to local Ollama at {ollama_v1}. "
+                "Start Ollama with `ollama serve` and retry."
+            )
+        except requests.exceptions.Timeout:
+            return [], f"Timed out while querying local Ollama at {ollama_v1}."
         except Exception:
-            try:
-                _server_process.kill()
-                _server_process.wait(timeout=3)
-            except Exception:
-                pass
-        _server_process = None
-        _current_model = None
+            # Fall through to OpenAI-compatible /models fallback
+            pass
 
-    _kill_llama_on_port()
+        # Fallback: OpenAI-compatible Ollama endpoint
+        try:
+            response = requests.get(f"{ollama_v1}/models", timeout=timeout)
+            if response.status_code != 200:
+                return [], _format_http_error(response, ollama_v1)
 
-    if was_running:
-        # Give the GPU driver a moment to reclaim VRAM after process death
-        time.sleep(0.5)
+            models = _parse_openai_model_ids(response.json())
+            if not models:
+                return [], (
+                    "Ollama responded but no models were discovered. "
+                    "Pull a model first, e.g. `ollama pull llama3.1`."
+                )
+            return models, f"Found {len(models)} local Ollama model(s)."
+        except requests.exceptions.ConnectionError:
+            return [], (
+                f"Could not connect to local Ollama at {ollama_v1}. "
+                "Start Ollama with `ollama serve` and retry."
+            )
+        except requests.exceptions.Timeout:
+            return [], f"Timed out while querying local Ollama at {ollama_v1}."
+        except Exception as e:
+            return [], f"Failed to query local Ollama models: {e}"
 
+    base_url = _get_effective_base_url(False, endpoint_url, user_config)
+    headers = _build_headers(user_config, use_local_ollama=False)
 
-# Register llama.cpp shutdown as a pre-model-load hook so that loading
-# any AI model (TTS, ASR, Foley) will stop the server first to free VRAM.
-try:
-    from modules.core_components.ai_models.model_utils import register_pre_load_hook
-    register_pre_load_hook(_stop_server)
-except Exception:
-    pass
+    try:
+        response = requests.get(f"{base_url}/models", headers=headers, timeout=timeout)
+        if response.status_code != 200:
+            return [], _format_http_error(response, base_url)
+
+        models = _parse_openai_model_ids(response.json())
+        if not models:
+            return [], (
+                "No models returned by endpoint /models. "
+                "If this provider does not implement /models, type the model name manually."
+            )
+        return models, f"Found {len(models)} model(s) from endpoint."
+    except requests.exceptions.ConnectionError:
+        return [], (
+            f"Could not connect to endpoint: {base_url}. "
+            "Check URL/network and retry."
+        )
+    except requests.exceptions.Timeout:
+        return [], f"Timed out while querying models from {base_url}."
+    except Exception as e:
+        return [], f"Failed to query models: {e}"
 
 
 # ============================================================================
@@ -569,7 +263,7 @@ def _load_prompts():
     """
     if PROMPTS_FILE.exists():
         try:
-            with open(PROMPTS_FILE, 'r', encoding='utf-8') as f:
+            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
@@ -588,7 +282,7 @@ def _save_prompts(prompts):
         Sorted prompts dictionary
     """
     sorted_prompts = dict(sorted(prompts.items(), key=lambda x: x[0].lower()))
-    with open(PROMPTS_FILE, 'w', encoding='utf-8') as f:
+    with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted_prompts, f, indent=2, ensure_ascii=False)
     return sorted_prompts
 
@@ -611,7 +305,7 @@ class PromptManagerTool(Tool):
         module_name="prompt_manager",
         description="Save, browse, and generate text prompts using an LLM",
         enabled=True,
-        category="utility"
+        category="utility",
     )
 
     @classmethod
@@ -619,15 +313,19 @@ class PromptManagerTool(Tool):
         """Create the Prompt Manager UI."""
         from gradio_filelister import FileLister
 
-        user_config = shared_state.get('_user_config', {})
-        model_choices = _get_all_model_choices(user_config)
+        user_config = shared_state.get("_user_config", {})
+        use_local_ollama = bool(user_config.get("llm_use_local_ollama", False))
+        saved_endpoint = _normalize_v1_base_url(
+            user_config.get("llm_endpoint_url", DEFAULT_OPENAI_ENDPOINT),
+            fallback=DEFAULT_OPENAI_ENDPOINT,
+        )
+        ollama_endpoint = _normalize_v1_base_url(
+            user_config.get("llm_ollama_url", DEFAULT_OLLAMA_ENDPOINT),
+            fallback=DEFAULT_OLLAMA_ENDPOINT,
+        )
+        displayed_endpoint = ollama_endpoint if use_local_ollama else saved_endpoint
 
-        # Restore saved LLM model selection
-        saved_llm_model = user_config.get("llm_model", "")
-        if saved_llm_model and saved_llm_model in model_choices:
-            default_llm_model = saved_llm_model
-        else:
-            default_llm_model = model_choices[0] if model_choices else None
+        saved_llm_model = (user_config.get("llm_model") or "").strip() or "gpt-4o-mini"
 
         components = {}
 
@@ -637,107 +335,129 @@ class PromptManagerTool(Tool):
                 with gr.Column(scale=2):
                     gr.Markdown("### Prompt Result")
 
-                    components['prompt_text'] = gr.Textbox(
+                    components["prompt_text"] = gr.Textbox(
                         label="Prompt",
                         lines=8,
                         placeholder="Write your prompt here, or select a saved one from the list...",
-                        interactive=True
+                        interactive=True,
                     )
 
                     with gr.Row():
-                        components['save_btn'] = gr.Button(
+                        components["save_btn"] = gr.Button(
                             "Save Prompt",
                             variant="primary",
-                            scale=1
+                            scale=1,
                         )
-                        components['delete_btn'] = gr.Button(
+                        components["delete_btn"] = gr.Button(
                             "Delete",
                             variant="stop",
-                            scale=1
+                            scale=1,
                         )
-                        components['clear_btn'] = gr.Button(
-                            "Clear",
-                            scale=1
-                        )
+                        components["clear_btn"] = gr.Button("Clear", scale=1)
 
-                    components['pm_status'] = gr.Textbox(
+                    components["pm_status"] = gr.Textbox(
                         label="Status",
                         interactive=False,
                         lines=1,
                     )
 
                     gr.Markdown("### Saved Prompts")
-                    components['prompt_lister'] = FileLister(
+                    components["prompt_lister"] = FileLister(
                         value=_get_prompt_names(),
                         height=250,
                         show_footer=False,
-                        interactive=True
+                        interactive=True,
                     )
 
                 # Right column: LLM prompt generation
                 with gr.Column(scale=2):
                     gr.Markdown("### LLM Prompt Generator")
 
-                    components['llm_instruction'] = gr.Textbox(
+                    components["llm_instruction"] = gr.Textbox(
                         label="Instructions for LLM",
                         lines=4,
-                        placeholder="Describe what kind of prompt you want the LLM to generate...\ne.g., 'A dramatic monologue about a pirate finding treasure'",
-                        interactive=True
+                        placeholder=(
+                            "Describe what kind of prompt you want the LLM to generate...\n"
+                            "e.g., 'A dramatic monologue about a pirate finding treasure'"
+                        ),
+                        interactive=True,
                     )
 
-                    components['system_prompt_preset'] = gr.Dropdown(
+                    components["system_prompt_preset"] = gr.Dropdown(
                         label="System Prompt Preset",
                         choices=SYSTEM_PROMPT_CHOICES,
                         value=SYSTEM_PROMPT_CHOICES[0],
-                        interactive=True
+                        interactive=True,
                     )
 
-                    components['system_prompt'] = gr.Textbox(
+                    components["system_prompt"] = gr.Textbox(
                         label="System Prompt",
                         lines=4,
                         value=SYSTEM_PROMPTS[SYSTEM_PROMPT_CHOICES[0]],
-                        interactive=True
+                        interactive=True,
+                    )
+
+                    components["llm_use_local_ollama"] = gr.Checkbox(
+                        label="Use local Ollama",
+                        value=use_local_ollama,
+                        info="When enabled, Prompt Manager uses local Ollama and ignores API key auth.",
+                        interactive=True,
+                    )
+
+                    components["llm_endpoint_url"] = gr.Textbox(
+                        label="Endpoint URL",
+                        value=displayed_endpoint,
+                        info="OpenAI-compatible base URL (auto-set to Ollama URL when enabled).",
+                        interactive=not use_local_ollama,
                     )
 
                     with gr.Row():
-                        components['llm_model'] = gr.Dropdown(
+                        components["llm_model"] = gr.Textbox(
                             label="LLM Model",
-                            choices=model_choices,
-                            value=default_llm_model,
-                            interactive=True
+                            value=saved_llm_model,
+                            placeholder="e.g. gpt-4o-mini or llama3.1",
+                            interactive=True,
+                            scale=2,
+                        )
+                        components["refresh_models_btn"] = gr.Button(
+                            "Refresh Models",
+                            scale=1,
                         )
 
-                    with gr.Row():
-                        components['generate_btn'] = gr.Button(
-                            "Generate Prompt",
-                            variant="primary"
-                        )
-                        components['stop_server_btn'] = gr.Button(
-                            "Stop LLM Server",
-                            variant="stop"
-                        )
+                    components["llm_model_suggestions"] = gr.Dropdown(
+                        label="Model Suggestions",
+                        choices=[],
+                        value=None,
+                        allow_custom_value=False,
+                        interactive=True,
+                    )
 
-                    components['llm_status'] = gr.Textbox(
+                    components["generate_btn"] = gr.Button(
+                        "Generate Prompt",
+                        variant="primary",
+                    )
+
+                    components["llm_status"] = gr.Textbox(
                         label="LLM Status",
                         interactive=False,
-                        lines=1,
+                        lines=2,
                     )
 
-            # Hidden state
-            components['pm_existing_files_json'] = gr.Textbox(visible=False)
-            components['pm_suggested_name'] = gr.Textbox(visible=False)
+            # Hidden state for prompt save modal
+            components["pm_existing_files_json"] = gr.Textbox(visible=False)
+            components["pm_suggested_name"] = gr.Textbox(visible=False)
 
         return components
 
     @classmethod
     def setup_events(cls, components, shared_state):
         """Wire up Prompt Manager events."""
-        user_config = shared_state.get('_user_config', {})
-        save_preference = shared_state.get('save_preference')
-        show_input_modal_js = shared_state.get('show_input_modal_js')
-        show_confirmation_modal_js = shared_state.get('show_confirmation_modal_js')
-        input_trigger = shared_state.get('input_trigger')
-        confirm_trigger = shared_state.get('confirm_trigger')
+        user_config = shared_state.get("_user_config", {})
+        save_preference = shared_state.get("save_preference")
+        show_input_modal_js = shared_state.get("show_input_modal_js")
+        show_confirmation_modal_js = shared_state.get("show_confirmation_modal_js")
+        input_trigger = shared_state.get("input_trigger")
+        confirm_trigger = shared_state.get("confirm_trigger")
 
         # --- Select prompt from lister ---
         def load_selected_prompt(lister_value):
@@ -753,16 +473,16 @@ class PromptManagerTool(Tool):
             text = prompts.get(prompt_name, "")
             return gr.update(value=text)
 
-        components['prompt_lister'].change(
+        components["prompt_lister"].change(
             load_selected_prompt,
-            inputs=[components['prompt_lister']],
-            outputs=[components['prompt_text']]
+            inputs=[components["prompt_lister"]],
+            outputs=[components["prompt_text"]],
         )
 
         # --- Clear button ---
-        components['clear_btn'].click(
+        components["clear_btn"].click(
             fn=lambda: (gr.update(value=""), ""),
-            outputs=[components['prompt_text'], components['pm_status']]
+            outputs=[components["prompt_text"], components["pm_status"]],
         )
 
         # --- Save button: open input modal ---
@@ -770,7 +490,7 @@ class PromptManagerTool(Tool):
             title="Save Prompt",
             message="Enter a name for this prompt:",
             placeholder="e.g., Dramatic Pirate, Thunder Storm, Calm Narrator",
-            context="save_prompt_"
+            context="save_prompt_",
         )
 
         def get_existing_prompt_names():
@@ -799,14 +519,14 @@ class PromptManagerTool(Tool):
         """
 
         # Step 1: Get existing names, then step 2: open modal
-        components['save_btn'].click(
+        components["save_btn"].click(
             fn=lambda lister_val: (get_existing_prompt_names(), get_selected_name(lister_val)),
-            inputs=[components['prompt_lister']],
-            outputs=[components['pm_existing_files_json'], components['pm_suggested_name']],
+            inputs=[components["prompt_lister"]],
+            outputs=[components["pm_existing_files_json"], components["pm_suggested_name"]],
         ).then(
             fn=None,
-            inputs=[components['pm_existing_files_json'], components['pm_suggested_name']],
-            js=save_js
+            inputs=[components["pm_existing_files_json"], components["pm_suggested_name"]],
+            js=save_js,
         )
 
         # --- Input modal handler: save prompt ---
@@ -823,7 +543,7 @@ class PromptManagerTool(Tool):
                 return no_update
 
             # Extract name: "save_prompt_<name>_<uuid>"
-            raw_name = input_value[len("save_prompt_"):]
+            raw_name = input_value[len("save_prompt_") :]
             name_parts = raw_name.rsplit("_", 1)
             chosen_name = name_parts[0] if len(name_parts) > 1 else raw_name
 
@@ -845,12 +565,12 @@ class PromptManagerTool(Tool):
 
         input_trigger.change(
             handle_save_prompt,
-            inputs=[input_trigger, components['prompt_text']],
-            outputs=[components['pm_status'], components['prompt_lister']]
+            inputs=[input_trigger, components["prompt_text"]],
+            outputs=[components["pm_status"], components["prompt_lister"]],
         )
 
         # --- Delete button: confirm and delete ---
-        components['delete_btn'].click(
+        components["delete_btn"].click(
             fn=None,
             inputs=None,
             outputs=None,
@@ -858,8 +578,8 @@ class PromptManagerTool(Tool):
                 title="Delete Prompt?",
                 message="This will permanently delete the selected prompt.",
                 confirm_button_text="Delete",
-                context="delete_prompt_"
-            )
+                context="delete_prompt_",
+            ),
         )
 
         def handle_delete_prompt(confirm_value, lister_value):
@@ -887,56 +607,119 @@ class PromptManagerTool(Tool):
                 _save_prompts(prompts)
 
                 new_names = _get_prompt_names()
-                return f"Deleted: {prompt_name}", gr.update(value=new_names), gr.update(value="")
+                return (
+                    f"Deleted: {prompt_name}",
+                    gr.update(value=new_names),
+                    gr.update(value=""),
+                )
             except Exception as e:
                 return f"Error deleting: {e}", gr.update(), gr.update()
 
         confirm_trigger.change(
             handle_delete_prompt,
-            inputs=[confirm_trigger, components['prompt_lister']],
-            outputs=[components['pm_status'], components['prompt_lister'], components['prompt_text']]
+            inputs=[confirm_trigger, components["prompt_lister"]],
+            outputs=[components["pm_status"], components["prompt_lister"], components["prompt_text"]],
         )
 
         # --- System prompt preset selector ---
         def on_preset_change(preset_name):
             if preset_name in SYSTEM_PROMPTS:
                 return gr.update(value=SYSTEM_PROMPTS[preset_name])
-            return gr.update()  # "Custom" — leave text as-is
+            return gr.update()  # Custom - leave text as-is
 
-        components['system_prompt_preset'].change(
+        components["system_prompt_preset"].change(
             on_preset_change,
-            inputs=[components['system_prompt_preset']],
-            outputs=[components['system_prompt']]
+            inputs=[components["system_prompt_preset"]],
+            outputs=[components["system_prompt"]],
         )
 
-        # --- Refresh model list when dropdown is clicked ---
-        def refresh_llm_models():
-            choices = _get_all_model_choices(user_config)
-            return gr.update(choices=choices)
+        def refresh_models(use_local_ollama, endpoint_url, current_model):
+            """Refresh model suggestions from active provider."""
+            models, status = _discover_available_models(user_config, bool(use_local_ollama), endpoint_url)
+            if not models:
+                return gr.update(choices=[], value=None), status, gr.update()
 
-        # --- Generate prompt with LLM ---
-        def generate_with_llm(instruction, system_prompt, model_name, progress=gr.Progress()):
-            """Send instruction to LLM and return generated prompt."""
+            selected = current_model.strip() if current_model and current_model.strip() else models[0]
+            selected_dropdown = selected if selected in models else models[0]
+            model_update = gr.update()
+            if not current_model or not current_model.strip():
+                model_update = gr.update(value=models[0])
+                save_preference("llm_model", models[0])
+
+            return (
+                gr.update(choices=models, value=selected_dropdown),
+                status,
+                model_update,
+            )
+
+        def on_use_local_ollama_change(use_local_ollama, endpoint_url, current_model):
+            """Toggle local Ollama mode and refresh endpoint/model state."""
+            use_local = bool(use_local_ollama)
+            save_preference("llm_use_local_ollama", use_local)
+
+            if use_local:
+                endpoint_value = _normalize_v1_base_url(
+                    user_config.get("llm_ollama_url", DEFAULT_OLLAMA_ENDPOINT),
+                    fallback=DEFAULT_OLLAMA_ENDPOINT,
+                )
+            else:
+                endpoint_value = _normalize_v1_base_url(
+                    user_config.get("llm_endpoint_url", endpoint_url or DEFAULT_OPENAI_ENDPOINT),
+                    fallback=DEFAULT_OPENAI_ENDPOINT,
+                )
+
+            suggestions_update, status, model_update = refresh_models(use_local, endpoint_value, current_model)
+            endpoint_update = gr.update(value=endpoint_value, interactive=not use_local)
+            return endpoint_update, suggestions_update, status, model_update
+
+        def on_endpoint_change(endpoint_url):
+            """Normalize and persist endpoint URL."""
+            normalized = _normalize_v1_base_url(endpoint_url, fallback=DEFAULT_OPENAI_ENDPOINT)
+            save_preference("llm_endpoint_url", normalized)
+            return gr.update(value=normalized)
+
+        def on_model_change(model_name):
+            model = (model_name or "").strip()
+            if model:
+                save_preference("llm_model", model)
+
+        def on_model_suggestion_change(suggested_model):
+            """Apply a suggested model to the authoritative model textbox."""
+            if not suggested_model:
+                return gr.update(), gr.update()
+            save_preference("llm_model", suggested_model)
+            return gr.update(value=suggested_model), f"Selected model: {suggested_model}"
+
+        # --- Generate prompt with OpenAI-compatible endpoint ---
+        def generate_with_llm(instruction, system_prompt, model_name, use_local_ollama, endpoint_url, progress=gr.Progress()):
+            """Send instruction to LLM endpoint and return generated prompt."""
             if not instruction or not instruction.strip():
                 return gr.update(), "Please enter instructions for the LLM"
 
-            if not model_name:
-                return gr.update(), "Please select a model"
+            model = (model_name or "").strip()
+            if not model:
+                return gr.update(), "Please enter a model name"
+
+            use_local = bool(use_local_ollama)
+            base_url = _get_effective_base_url(use_local, endpoint_url, user_config)
+
+            if not use_local:
+                save_preference("llm_endpoint_url", base_url)
+            save_preference("llm_model", model)
 
             try:
-                progress(0.1, desc="Starting LLM server...")
-                success, error = _start_server(model_name, user_config, progress)
-                if not success:
-                    return gr.update(), f"Server error: {error}"
+                progress(0.2, desc="Sending request...")
 
-                progress(0.6, desc="Generating prompt...")
-
-                # Build request
-                effective_system = system_prompt.strip() if system_prompt and system_prompt.strip() else SYSTEM_PROMPTS[SYSTEM_PROMPT_CHOICES[0]]
+                effective_system = (
+                    system_prompt.strip()
+                    if system_prompt and system_prompt.strip()
+                    else SYSTEM_PROMPTS[SYSTEM_PROMPT_CHOICES[0]]
+                )
                 payload = {
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": effective_system},
-                        {"role": "user", "content": instruction.strip()}
+                        {"role": "user", "content": instruction.strip()},
                     ],
                     "stream": False,
                     "temperature": 0.8,
@@ -944,28 +727,17 @@ class PromptManagerTool(Tool):
                 }
 
                 response = requests.post(
-                    f"http://localhost:{SERVER_PORT}/v1/chat/completions",
+                    f"{base_url}/chat/completions",
                     json=payload,
-                    timeout=120
+                    headers=_build_headers(user_config, use_local),
+                    timeout=120,
                 )
 
-                if response.status_code == 500:
-                    # Server error, try restarting once
-                    _stop_server()
-                    success, error = _start_server(model_name, user_config, progress)
-                    if not success:
-                        return gr.update(), f"Server restart failed: {error}"
-                    response = requests.post(
-                        f"http://localhost:{SERVER_PORT}/v1/chat/completions",
-                        json=payload,
-                        timeout=120
-                    )
+                if response.status_code != 200:
+                    return gr.update(), _format_http_error(response, base_url)
 
-                response.raise_for_status()
                 data = response.json()
-
-                # Extract response text
-                choices = data.get("choices", [])
+                choices = data.get("choices", []) if isinstance(data, dict) else []
                 if not choices:
                     return gr.update(), "LLM returned no response"
 
@@ -973,49 +745,88 @@ class PromptManagerTool(Tool):
                 if not generated_text:
                     return gr.update(), "LLM returned empty response"
 
-                # Strip thinking tags if present
-                if "<think>" in generated_text:
-                    import re
-                    generated_text = re.sub(r'<think>.*?</think>', '', generated_text, flags=re.DOTALL).strip()
+                # Remove hidden thinking output where providers include it inline
+                generated_text = re.sub(r"<think>.*?</think>", "", generated_text, flags=re.DOTALL).strip()
 
                 progress(1.0, desc="Done")
                 return gr.update(value=generated_text), "Prompt generated successfully"
 
             except requests.exceptions.ConnectionError:
-                return gr.update(), "Could not connect to LLM server. Is llama-server installed?"
+                if use_local:
+                    ollama_url = _normalize_v1_base_url(
+                        user_config.get("llm_ollama_url", DEFAULT_OLLAMA_ENDPOINT),
+                        fallback=DEFAULT_OLLAMA_ENDPOINT,
+                    )
+                    return (
+                        gr.update(),
+                        f"Could not connect to local Ollama at {ollama_url}. Start `ollama serve` and retry.",
+                    )
+                return gr.update(), f"Could not connect to endpoint: {base_url}"
             except requests.exceptions.Timeout:
                 return gr.update(), "LLM request timed out (120s)"
             except Exception as e:
                 return gr.update(), f"Error: {e}"
 
-        components['generate_btn'].click(
-            generate_with_llm,
+        components["llm_use_local_ollama"].change(
+            on_use_local_ollama_change,
             inputs=[
-                components['llm_instruction'],
-                components['system_prompt'],
-                components['llm_model'],
+                components["llm_use_local_ollama"],
+                components["llm_endpoint_url"],
+                components["llm_model"],
             ],
             outputs=[
-                components['prompt_text'],
-                components['llm_status'],
-            ]
+                components["llm_endpoint_url"],
+                components["llm_model_suggestions"],
+                components["llm_status"],
+                components["llm_model"],
+            ],
         )
 
-        # --- Stop server button ---
-        def stop_llm_server():
-            _stop_server()
-            return "LLM server stopped"
-
-        components['stop_server_btn'].click(
-            stop_llm_server,
-            outputs=[components['llm_status']]
+        components["llm_endpoint_url"].change(
+            on_endpoint_change,
+            inputs=[components["llm_endpoint_url"]],
+            outputs=[components["llm_endpoint_url"]],
         )
 
-        # Save LLM model selection to config
-        components['llm_model'].change(
-            lambda x: save_preference("llm_model", x),
-            inputs=[components['llm_model']],
-            outputs=[]
+        components["refresh_models_btn"].click(
+            refresh_models,
+            inputs=[
+                components["llm_use_local_ollama"],
+                components["llm_endpoint_url"],
+                components["llm_model"],
+            ],
+            outputs=[
+                components["llm_model_suggestions"],
+                components["llm_status"],
+                components["llm_model"],
+            ],
+        )
+
+        components["llm_model_suggestions"].change(
+            on_model_suggestion_change,
+            inputs=[components["llm_model_suggestions"]],
+            outputs=[components["llm_model"], components["llm_status"]],
+        )
+
+        components["llm_model"].change(
+            on_model_change,
+            inputs=[components["llm_model"]],
+            outputs=[],
+        )
+
+        components["generate_btn"].click(
+            generate_with_llm,
+            inputs=[
+                components["llm_instruction"],
+                components["system_prompt"],
+                components["llm_model"],
+                components["llm_use_local_ollama"],
+                components["llm_endpoint_url"],
+            ],
+            outputs=[
+                components["prompt_text"],
+                components["llm_status"],
+            ],
         )
 
 
@@ -1026,4 +837,5 @@ get_tool_class = lambda: PromptManagerTool
 # Standalone testing
 if __name__ == "__main__":
     from modules.core_components.tools import run_tool_standalone
+
     run_tool_standalone(PromptManagerTool, port=7875, title="Prompt Manager - Standalone")

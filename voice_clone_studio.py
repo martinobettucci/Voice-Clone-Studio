@@ -124,6 +124,10 @@ MODELS_DIR = Path(__file__).parent / _user_config.get("models_folder", "models")
 for dir_path in [SAMPLES_DIR, OUTPUT_DIR, DATASETS_DIR, TEMP_DIR, MODELS_DIR]:
     dir_path.mkdir(exist_ok=True)
 
+# Ensure HF cache lives inside configured models folder so online usage
+# naturally accumulates offline assets in the same location.
+os.environ["HF_HOME"] = str(MODELS_DIR)
+
 # Clean temp folder at startup
 for f in TEMP_DIR.iterdir():
     try:
@@ -255,12 +259,6 @@ def create_ui():
             _tts_manager.unload_all()
             _asr_manager.unload_all()
             _foley_manager.unload_all()
-            # Stop llama.cpp server if running
-            try:
-                from modules.core_components.tools.prompt_manager import _stop_server
-                _stop_server()
-            except Exception:
-                pass
             gc.collect()
             from modules.core_components.ai_models.model_utils import empty_device_cache
             empty_device_cache()

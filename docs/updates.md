@@ -29,6 +29,19 @@
 - **Flash Attention Install** - Added Flash Attention 2 install option to setup-windows.bat
 - **Prep Audio Cache Fix** - Delete and clear cache now also remove LuxTTS `.pt` cache files
 
+## February 12, 2026
+#### Version 1.5.3 - Prompt Manager Endpoint Migration
+
+**Prompt Manager**
+- **OpenAI-Compatible Endpoint Support** - Prompt generation now uses direct OpenAI-compatible API calls (`/v1/chat/completions`)
+- **Local Ollama Toggle** - Added an easy checkbox to switch Prompt Manager into local Ollama mode
+- **Model Discovery Refresh** - Prompt Manager can query and suggest available models from endpoint/Ollama
+- **Settings Integration** - API key, default endpoint URL, and Ollama URL are now managed in Settings
+
+**Migration Notes**
+- Deprecated llama.cpp runtime integration for Prompt Manager
+- Existing GGUF-style `llm_model` values are migrated to `gpt-4o-mini` automatically
+
 ## February 10, 2026
 #### Version 1.5.2 - Network Mode & Tweaks
 - **Sentence Per Chunk**  - To prevent VibeVoice from going off the rail, we add the option of resetting after a certain amount of Sentences.

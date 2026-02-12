@@ -387,6 +387,11 @@ DEFAULT_CONFIG = {
     "temp_folder": "temp",
     "models_folder": "models",
     "trained_models_folder": "models",
+    "llm_endpoint_url": "https://api.openai.com/v1",
+    "llm_api_key": "",
+    "llm_use_local_ollama": False,
+    "llm_ollama_url": "http://127.0.0.1:11434/v1",
+    "llm_model": "gpt-4o-mini",
     "emotions": None  # Initialized separately
 }
 

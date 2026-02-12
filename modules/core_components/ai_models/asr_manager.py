@@ -12,7 +12,9 @@ import gc
 
 from .model_utils import (
     get_device, get_dtype, get_attention_implementation,
-    check_model_available_locally, empty_device_cache, log_gpu_memory,
+    get_configured_models_dir,
+    resolve_model_source,
+    empty_device_cache, log_gpu_memory,
     run_pre_load_hooks
 )
 
@@ -76,18 +78,12 @@ class ASRManager:
         """
         offline_mode = self.user_config.get("offline_mode", False)
 
-        # Check local availability
-        local_path = check_model_available_locally(model_name)
-        if local_path:
-            print(f"Found local model: {local_path}")
-            model_to_load = str(local_path)
-        elif offline_mode:
-            raise RuntimeError(
-                f"❌ Offline mode enabled but model not available locally: {model_name}\n"
-                f"To use offline mode, download the model first or disable offline mode in Settings."
-            )
-        else:
-            model_to_load = model_name
+        model_to_load = resolve_model_source(
+            model_name,
+            offline_mode=offline_mode,
+            settings_download_name=model_name.split("/")[-1],
+            auto_download_when_online=True,
+        )
 
         mechanisms = get_attention_implementation(
             self.user_config.get("attention_mechanism", "auto")
@@ -148,13 +144,38 @@ class ASRManager:
         if self._whisper_model is None:
             print(f"Loading Whisper ASR model ({whisper_size})...")
             import whisper
+            offline_mode = self.user_config.get("offline_mode", False)
 
-            # Check for local cache
-            whisper_cache = Path("./models/whisper")
-            if whisper_cache.exists():
-                self._whisper_model = whisper.load_model(whisper_size, download_root="./models/whisper")
+            whisper_cache = get_configured_models_dir() / "whisper"
+            whisper_cache.mkdir(parents=True, exist_ok=True)
+
+            model_url = whisper._MODELS.get(whisper_size)
+            model_filename = Path(model_url).name if model_url else None
+            model_file_path = whisper_cache / model_filename if model_filename else None
+
+            if offline_mode and (model_file_path is None or not model_file_path.exists()):
+                display_name = "Whisper-Medium" if whisper_size == "medium" else "Whisper-Large"
+                raise RuntimeError(
+                    "❌ Offline mode enabled and Whisper model file is missing locally: "
+                    f"{model_file_path if model_file_path else whisper_size}\n"
+                    "Download it in Settings -> Model Downloading "
+                    f"('{display_name}') or disable Offline Mode."
+                )
+
+            if offline_mode:
+                # Load directly from local checkpoint path to avoid any network fallback.
+                self._whisper_model = whisper.load_model(
+                    str(model_file_path),
+                    download_root=str(whisper_cache)
+                )
+                alignment_heads = whisper._ALIGNMENT_HEADS.get(whisper_size)
+                if alignment_heads is not None:
+                    self._whisper_model.set_alignment_heads(alignment_heads)
             else:
-                self._whisper_model = whisper.load_model(whisper_size)
+                self._whisper_model = whisper.load_model(
+                    whisper_size,
+                    download_root=str(whisper_cache)
+                )
 
             self._whisper_size = whisper_size
             print("Whisper ASR model loaded!")
@@ -185,19 +206,13 @@ class ASRManager:
             device = get_device()
             dtype = get_dtype(device)
 
-            # Check for local model
             offline_mode = self.user_config.get("offline_mode", False)
-            local_path = check_model_available_locally(model_name)
-            if local_path:
-                print(f"Found local model: {local_path}")
-                model_to_load = str(local_path)
-            elif offline_mode:
-                raise RuntimeError(
-                    f"Offline mode enabled but model not available locally: {model_name}\n"
-                    f"To use offline mode, download the model first or disable offline mode in Settings."
-                )
-            else:
-                model_to_load = model_name
+            model_to_load = resolve_model_source(
+                model_name,
+                offline_mode=offline_mode,
+                settings_download_name=f"Qwen3-ASR-{model_size}",
+                auto_download_when_online=True,
+            )
 
             # Try loading with attention fallback
             mechanisms = get_attention_implementation(
@@ -277,19 +292,13 @@ class ASRManager:
             device = get_device()
             dtype = get_dtype(device)
 
-            # Check for local model
             offline_mode = self.user_config.get("offline_mode", False)
-            local_path = check_model_available_locally(model_name)
-            if local_path:
-                print(f"Found local model: {local_path}")
-                model_to_load = str(local_path)
-            elif offline_mode:
-                raise RuntimeError(
-                    f"Offline mode enabled but model not available locally: {model_name}\n"
-                    f"To use offline mode, download the model first or disable offline mode in Settings."
-                )
-            else:
-                model_to_load = model_name
+            model_to_load = resolve_model_source(
+                model_name,
+                offline_mode=offline_mode,
+                settings_download_name="Qwen3-ForcedAligner-0.6B",
+                auto_download_when_online=True,
+            )
 
             self._qwen3_aligner_model = Qwen3ForcedAligner.from_pretrained(
                 model_to_load,
@@ -323,9 +332,25 @@ class ASRManager:
                 import logging
                 import json
 
-                model_path = "microsoft/VibeVoice-ASR"
+                model_repo_id = "microsoft/VibeVoice-ASR"
                 device = get_device()
                 dtype = get_dtype(device)
+                offline_mode = self.user_config.get("offline_mode", False)
+
+                model_source = resolve_model_source(
+                    model_repo_id,
+                    offline_mode=offline_mode,
+                    settings_download_name="VibeVoice-ASR",
+                    auto_download_when_online=True,
+                )
+
+                tokenizer_repo_id = "Qwen/Qwen2.5-1.5B"
+                tokenizer_source = resolve_model_source(
+                    tokenizer_repo_id,
+                    offline_mode=offline_mode,
+                    settings_download_name="Qwen2.5-1.5B (VibeVoice Tokenizer)",
+                    auto_download_when_online=True,
+                )
 
                 # Suppress warnings
                 prev_level = logging.getLogger("transformers.tokenization_utils_base").level
@@ -333,7 +358,11 @@ class ASRManager:
 
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
-                    processor = VibeVoiceASRProcessor.from_pretrained(model_path)
+                    processor = VibeVoiceASRProcessor.from_pretrained(
+                        model_source,
+                        local_files_only=offline_mode,
+                        language_model_pretrained_name=tokenizer_source,
+                    )
 
                 logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
 
@@ -346,12 +375,13 @@ class ASRManager:
                 for attn in mechanisms:
                     try:
                         model = VibeVoiceASRForConditionalGeneration.from_pretrained(
-                            model_path,
+                            model_source,
                             dtype=dtype,
                             device_map=device if device == "auto" else None,
                             attn_implementation=attn,
                             trust_remote_code=True,
-                            low_cpu_mem_usage=self.user_config.get("low_cpu_mem_usage", False)
+                            low_cpu_mem_usage=self.user_config.get("low_cpu_mem_usage", False),
+                            local_files_only=offline_mode
                         )
                         print(f"✓ VibeVoice ASR loaded with {attn} attention")
                         break
@@ -488,4 +518,6 @@ def get_asr_manager(user_config: Dict = None) -> ASRManager:
     global _asr_manager
     if _asr_manager is None:
         _asr_manager = ASRManager(user_config)
+    elif user_config is not None:
+        _asr_manager.user_config = user_config
     return _asr_manager

@@ -39,6 +39,8 @@ class FeaturesUtils(nn.Module):
         tod_vae_ckpt: Optional[str] = None,
         bigvgan_vocoder_ckpt: Optional[str] = None,
         synchformer_ckpt: Optional[str] = None,
+        clip_pretrained_source: Optional[str] = None,
+        bigvgan_pretrained_source: Optional[str] = None,
         enable_conditions: bool = True,
         mode=Literal['16k', '44k'],
         need_vae_encoder: bool = True,
@@ -46,8 +48,13 @@ class FeaturesUtils(nn.Module):
         super().__init__()
 
         if enable_conditions:
-            self.clip_model = create_model_from_pretrained('hf-hub:apple/DFN5B-CLIP-ViT-H-14-384',
-                                                           return_transform=False)
+            clip_source = clip_pretrained_source or 'hf-hub:apple/DFN5B-CLIP-ViT-H-14-384'
+            if os.path.isdir(str(clip_source)) and not str(clip_source).startswith(("hf-hub:", "local-dir:")):
+                clip_source = f"local-dir:{clip_source}"
+            self.clip_model = create_model_from_pretrained(
+                str(clip_source),
+                return_transform=False
+            )
             self.clip_preprocess = Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
                                              std=[0.26862954, 0.26130258, 0.27577711])
             self.clip_model = patch_clip(self.clip_model)
@@ -66,6 +73,7 @@ class FeaturesUtils(nn.Module):
             self.mel_converter = get_mel_converter(mode)
             self.tod = AutoEncoderModule(vae_ckpt_path=tod_vae_ckpt,
                                          vocoder_ckpt_path=bigvgan_vocoder_ckpt,
+                                         bigvgan_pretrained_source=bigvgan_pretrained_source,
                                          mode=mode,
                                          need_vae_encoder=need_vae_encoder)
         else:

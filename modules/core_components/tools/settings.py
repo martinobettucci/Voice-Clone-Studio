@@ -115,28 +115,52 @@ class SettingsTool(Tool):
                                     info="When enabled, only uses models found in models folder"
                                 )
 
+                                model_download_choices = [
+                                    "--- Qwen3-TTS Base ---",
+                                    "Qwen3-TTS-12Hz-0.6B-Base",
+                                    "Qwen3-TTS-12Hz-1.7B-Base",
+                                    "--- Qwen3-TTS CustomVoice ---",
+                                    "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                                    "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                                    "--- Qwen3-TTS VoiceDesign ---",
+                                    "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+                                    "--- VibeVoice TTS ---",
+                                    "VibeVoice-1.5B",
+                                    "VibeVoice-Large (4-bit)",
+                                    "VibeVoice-Large",
+                                    "--- VibeVoice ASR ---",
+                                    "VibeVoice-ASR",
+                                    "--- Qwen3 ASR ---",
+                                    "Qwen3-ASR-0.6B",
+                                    "Qwen3-ASR-1.7B",
+                                    "Qwen3-ForcedAligner-0.6B",
+                                    "--- Tokenizer Dependencies ---",
+                                    "Qwen3-TTS-Tokenizer-12Hz",
+                                    "Qwen2.5-1.5B (VibeVoice Tokenizer)",
+                                    "--- Whisper ASR ---",
+                                    "Whisper-Medium",
+                                    "Whisper-Large",
+                                    "--- LuxTTS ---",
+                                    "LuxTTS",
+                                    "--- Sound Effects (MMAudio) ---",
+                                    "MMAudio - Medium (44kHz)",
+                                    "MMAudio - Large v2 (44kHz)",
+                                    "--- Sound Effects Dependencies ---",
+                                    "MMAudio-CLIP-DFN5B",
+                                    "MMAudio-BigVGAN-v2-44k",
+                                ]
+
                                 components['model_select'] = gr.Dropdown(
                                     label="Select Model to Download to Models Folder",
-                                    info="Needed to work in offline mode.\nFor Whisper models, copy local files to models folder",
-                                    choices=[
-                                        "--- Qwen3-TTS Base ---",
-                                        "Qwen3-TTS-12Hz-0.6B-Base",
-                                        "Qwen3-TTS-12Hz-1.7B-Base",
-                                        "--- Qwen3-TTS CustomVoice ---",
-                                        "Qwen3-TTS-12Hz-0.6B-CustomVoice",
-                                        "Qwen3-TTS-12Hz-1.7B-CustomVoice",
-                                        "--- Qwen3-TTS VoiceDesign ---",
-                                        "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-                                        "--- VibeVoice TTS ---",
-                                        "VibeVoice-1.5B",
-                                        "VibeVoice-Large (4-bit)",
-                                        "VibeVoice-Large",
-                                        "--- VibeVoice ASR ---",
-                                        "VibeVoice-ASR",
-                                        "--- LuxTTS ---",
-                                        "LuxTTS",
-                                    ],
+                                    info="Needed for strict offline mode. Download all required dependencies here.",
+                                    choices=model_download_choices,
                                     value="Qwen3-TTS-12Hz-0.6B-Base"
+                                )
+                                components['ALL_MODEL_CHOICES'] = model_download_choices
+                                components['download_all_models'] = gr.Checkbox(
+                                    label="Download them all",
+                                    value=False,
+                                    info="When enabled, the selected model is ignored and all listed models are downloaded."
                                 )
                                 components['download_btn'] = gr.Button("Download Model", scale=1)
 
@@ -151,7 +175,18 @@ class SettingsTool(Tool):
                                     "VibeVoice-Large (4-bit)": "FranckyB/VibeVoice-Large-4bit",
                                     "VibeVoice-Large": "FranckyB/VibeVoice-Large",
                                     "VibeVoice-ASR": "microsoft/VibeVoice-ASR",
+                                    "Qwen3-ASR-0.6B": "Qwen/Qwen3-ASR-0.6B",
+                                    "Qwen3-ASR-1.7B": "Qwen/Qwen3-ASR-1.7B",
+                                    "Qwen3-ForcedAligner-0.6B": "Qwen/Qwen3-ForcedAligner-0.6B",
+                                    "Qwen3-TTS-Tokenizer-12Hz": "Qwen/Qwen3-TTS-Tokenizer-12Hz",
+                                    "Qwen2.5-1.5B (VibeVoice Tokenizer)": "Qwen/Qwen2.5-1.5B",
+                                    "Whisper-Medium": "whisper://medium",
+                                    "Whisper-Large": "whisper://large",
                                     "LuxTTS": "YatharthS/LuxTTS",
+                                    "MMAudio - Medium (44kHz)": "mmaudio://Medium (44kHz)",
+                                    "MMAudio - Large v2 (44kHz)": "mmaudio://Large v2 (44kHz)",
+                                    "MMAudio-CLIP-DFN5B": "apple/DFN5B-CLIP-ViT-H-14-384",
+                                    "MMAudio-BigVGAN-v2-44k": "nvidia/bigvgan_v2_44khz_128band_512x",
                                 }
 
                         with gr.Row():
@@ -204,23 +239,29 @@ class SettingsTool(Tool):
                                     )
 
                             with gr.Column():
-                                gr.Markdown("### llama.cpp (Prompt Manager)")
+                                gr.Markdown("### LLM Endpoint (Prompt Manager)")
 
-                                components['settings_llama_cpp_path'] = gr.Textbox(
-                                    label="llama.cpp Location",
-                                    value=_user_config.get("llama_cpp_path", ""),
-                                    info="Path to the folder containing llama-server. Leave empty to use system PATH.",
-                                    placeholder="e.g. C:\\llama.cpp\\build\\bin"
+                                components['settings_llm_api_key'] = gr.Textbox(
+                                    label="OpenAI-Compatible API Key",
+                                    value=_user_config.get("llm_api_key", ""),
+                                    type="password",
+                                    info="Used for non-local endpoints. Stored in config.json as plain text.",
+                                    placeholder="e.g. sk-..."
                                 )
-                                components['reset_llama_cpp_path_btn'] = gr.Button("Reset", size="sm")
 
-                                components['settings_llama_models_path'] = gr.Textbox(
-                                    label="Additional LLM Models Folder",
-                                    value=_user_config.get("llama_models_path", ""),
-                                    info="Extra folder to scan for .gguf models (in addition to models/llama/). Downloads go here if set.",
-                                    placeholder="e.g. D:\\models\\gguf"
+                                components['settings_llm_endpoint_url'] = gr.Textbox(
+                                    label="Default Endpoint URL",
+                                    value=_user_config.get("llm_endpoint_url", "https://api.openai.com/v1"),
+                                    info="Base URL for OpenAI-compatible chat completion endpoints.",
+                                    placeholder="e.g. https://api.openai.com/v1"
                                 )
-                                components['reset_llama_models_path_btn'] = gr.Button("Reset", size="sm")
+
+                                components['settings_llm_ollama_url'] = gr.Textbox(
+                                    label="Local Ollama URL",
+                                    value=_user_config.get("llm_ollama_url", "http://127.0.0.1:11434/v1"),
+                                    info="Used when 'Use local Ollama' is enabled in Prompt Manager.",
+                                    placeholder="e.g. http://127.0.0.1:11434/v1"
+                                )
 
                         gr.Markdown("Configure where files are stored. Changes apply after clicking **Apply Changes**.")
                         # Default folder paths
@@ -460,29 +501,111 @@ class SettingsTool(Tool):
             outputs=[components['settings_trained_models_folder']]
         )
 
-        components['reset_llama_cpp_path_btn'].click(
-            lambda: "",
-            outputs=[components['settings_llama_cpp_path']]
-        )
-
-        components['reset_llama_models_path_btn'].click(
-            lambda: "",
-            outputs=[components['settings_llama_models_path']]
-        )
-
-        def download_model_clicked(model_display_name):
+        def _download_one_model(model_display_name):
             if not model_display_name or model_display_name.startswith("---"):
-                return "❌ Please select an actual model (not a category header)"
-            # Convert display name to full model ID
+                return False, "❌ Please select an actual model (not a category header)"
             model_id = components['MODEL_ID_MAP'].get(model_display_name, model_display_name)
 
-            success, message, path = download_model_from_huggingface(model_id, progress=None)
+            if model_id.startswith("whisper://"):
+                whisper_size = model_id.split("whisper://", 1)[1].strip().lower()
+                if whisper_size not in {"medium", "large"}:
+                    return False, f"❌ Unsupported Whisper size: {whisper_size}"
+                try:
+                    import whisper
+                except ImportError:
+                    return False, "❌ Whisper is not installed. Install with: pip install openai-whisper"
 
+                from modules.core_components.ai_models.model_utils import get_configured_models_dir
+
+                whisper_dir = get_configured_models_dir() / "whisper"
+                whisper_dir.mkdir(parents=True, exist_ok=True)
+                model_url = whisper._MODELS.get(whisper_size)
+                if not model_url:
+                    return False, f"❌ Whisper model registry missing entry for: {whisper_size}"
+
+                expected_file = whisper_dir / Path(model_url).name
+                if expected_file.exists():
+                    return True, f"✓ Whisper {whisper_size} already downloaded at {expected_file}"
+
+                try:
+                    whisper._download(model_url, str(whisper_dir), False)
+                except Exception as e:
+                    return False, (
+                        f"❌ Failed to download Whisper {whisper_size}: {e}\n"
+                        "Check internet access, then retry."
+                    )
+
+                if expected_file.exists():
+                    return True, f"✓ Whisper {whisper_size} downloaded to {expected_file}"
+                return False, (
+                    "❌ Whisper download finished but expected file was not found:\n"
+                    f"{expected_file}"
+                )
+
+            if model_id.startswith("mmaudio://"):
+                mmaudio_display = model_id.split("mmaudio://", 1)[1]
+                from modules.core_components.ai_models.foley_manager import get_foley_manager
+                from modules.core_components.ai_models.model_utils import get_configured_models_dir
+
+                models_dir = get_configured_models_dir()
+                foley_manager = get_foley_manager(user_config=_user_config, models_dir=models_dir)
+                try:
+                    files = foley_manager.download_model_files(display_name=mmaudio_display)
+                    return True, (
+                        "✓ MMAudio files downloaded successfully\n"
+                        f"Model: {files['model_weight']}\n"
+                        f"VAE: {files['vae']}\n"
+                        f"Synchformer: {files['synchformer']}"
+                    )
+                except Exception as e:
+                    return False, f"❌ {str(e)}"
+
+            success, message, path = download_model_from_huggingface(model_id, progress=None)
             status = f"✓ {message}" if success else f"❌ {message}"
+            return success, status
+
+        def download_model_clicked(model_display_name, download_all_models):
+            if download_all_models:
+                model_names = []
+                for item in components['ALL_MODEL_CHOICES']:
+                    if isinstance(item, (tuple, list)) and item:
+                        name = str(item[0])
+                    else:
+                        name = str(item)
+                    if name and not name.startswith("---"):
+                        model_names.append(name)
+
+                lines = []
+                ok_count = 0
+                fail_count = 0
+                for name in model_names:
+                    success, message = _download_one_model(name)
+                    if success:
+                        ok_count += 1
+                    else:
+                        fail_count += 1
+                    lines.append(f"{name}: {message}")
+
+                summary = (
+                    f"Bulk download finished: {ok_count} succeeded, {fail_count} failed.\n\n"
+                    + "\n\n".join(lines)
+                )
+                return summary
+
+            success, status = _download_one_model(model_display_name)
             return status
 
+        def toggle_download_all(download_all_models):
+            return gr.update(interactive=not download_all_models)
+
+        components['download_all_models'].change(
+            fn=toggle_download_all,
+            inputs=[components['download_all_models']],
+            outputs=[components['model_select']]
+        )
+
         # Apply folder changes
-        def apply_folder_changes(samples, output, datasets, models, trained_models, llama_cpp_path, llama_models_path):
+        def apply_folder_changes(samples, output, datasets, models, trained_models, llm_api_key, llm_endpoint_url, llm_ollama_url):
             try:
                 # Get project root directory
                 base_dir = Path(__file__).parent.parent.parent.parent
@@ -511,8 +634,9 @@ class SettingsTool(Tool):
                 _user_config["datasets_folder"] = datasets
                 _user_config["models_folder"] = models
                 _user_config["trained_models_folder"] = trained_models
-                _user_config["llama_cpp_path"] = llama_cpp_path.strip()
-                _user_config["llama_models_path"] = llama_models_path.strip()
+                _user_config["llm_api_key"] = llm_api_key.strip()
+                _user_config["llm_endpoint_url"] = llm_endpoint_url.strip()
+                _user_config["llm_ollama_url"] = llm_ollama_url.strip()
                 save_config(_user_config)
 
                 status_lines = [
@@ -523,10 +647,15 @@ class SettingsTool(Tool):
                     f"Downloaded Models: {new_models}",
                     f"Trained Models: {new_trained_models}",
                 ]
-                if llama_cpp_path.strip():
-                    status_lines.append(f"llama.cpp: {llama_cpp_path.strip()}")
-                if llama_models_path.strip():
-                    status_lines.append(f"LLM Models: {llama_models_path.strip()}")
+                status_lines.append(
+                    f"LLM Endpoint: {(_user_config.get('llm_endpoint_url') or 'https://api.openai.com/v1')}"
+                )
+                status_lines.append(
+                    f"Ollama URL: {(_user_config.get('llm_ollama_url') or 'http://127.0.0.1:11434/v1')}"
+                )
+                status_lines.append(
+                    f"LLM API Key: {'[set]' if _user_config.get('llm_api_key') else '[not set]'}"
+                )
                 status_lines.append("\nNote: Restart the app to fully apply changes to all components.")
                 return "\n".join(status_lines)
 
@@ -535,7 +664,7 @@ class SettingsTool(Tool):
 
         components['download_btn'].click(
             fn=download_model_clicked,
-            inputs=[components['model_select']],
+            inputs=[components['model_select'], components['download_all_models']],
             outputs=[components['settings_status']]
         )
 
@@ -545,7 +674,8 @@ class SettingsTool(Tool):
                 components['settings_samples_folder'], components['settings_output_folder'],
                 components['settings_datasets_folder'], components['settings_models_folder'],
                 components['settings_trained_models_folder'],
-                components['settings_llama_cpp_path'], components['settings_llama_models_path']
+                components['settings_llm_api_key'], components['settings_llm_endpoint_url'],
+                components['settings_llm_ollama_url']
             ],
             outputs=[components['settings_status']]
         )

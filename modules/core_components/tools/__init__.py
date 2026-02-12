@@ -304,7 +304,12 @@ def load_config():
         "conv_pause_period": 0.3,
         "conv_pause_comma": 0.2,
         "conv_pause_question": 0.4,
-        "conv_pause_hyphen": 0.15
+        "conv_pause_hyphen": 0.15,
+        "llm_endpoint_url": "https://api.openai.com/v1",
+        "llm_api_key": "",
+        "llm_use_local_ollama": False,
+        "llm_ollama_url": "http://127.0.0.1:11434/v1",
+        "llm_model": "gpt-4o-mini",
     }
 
     try:
@@ -321,6 +326,28 @@ def load_config():
             print(f"Created new config file: {CONFIG_FILE}")
     except Exception as e:
         print(f"Warning: Could not load config: {e}")
+
+    # Migration guards for Prompt Manager endpoint config.
+    config_changed = False
+    llm_model = str(default_config.get("llm_model", "")).strip()
+    if not llm_model or llm_model.lower().endswith(".gguf"):
+        default_config["llm_model"] = "gpt-4o-mini"
+        config_changed = True
+
+    if not str(default_config.get("llm_endpoint_url", "")).strip():
+        default_config["llm_endpoint_url"] = "https://api.openai.com/v1"
+        config_changed = True
+
+    if not str(default_config.get("llm_ollama_url", "")).strip():
+        default_config["llm_ollama_url"] = "http://127.0.0.1:11434/v1"
+        config_changed = True
+
+    if config_changed:
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(default_config, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save migrated config: {e}")
 
     # Initialize emotions if not present (first launch or corrupted config)
     if not default_config.get("emotions"):
@@ -896,6 +923,7 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
             extra = {'get_sample_choices': lambda: ['sample1', 'sample2']}
             run_tool_standalone(VoiceCloneTool, port=7862, extra_shared_state=extra)
     """
+    import os
     import gradio as gr
     from pathlib import Path
     from modules.core_components import (
@@ -933,7 +961,13 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
     SAMPLES_DIR = project_root / user_config.get("samples_folder", "samples")
     DATASETS_DIR = project_root / user_config.get("datasets_folder", "datasets")
     TEMP_DIR = project_root / user_config.get("temp_folder", "temp")
+    MODELS_DIR = project_root / user_config.get("models_folder", "models")
     OUTPUT_DIR.mkdir(exist_ok=True)
+
+    # Keep HF cache aligned with configured models folder so online usage
+    # accumulates files in the same place used for offline prep.
+    MODELS_DIR.mkdir(exist_ok=True)
+    os.environ["HF_HOME"] = str(MODELS_DIR)
 
     # Load theme
     theme_path = Path(__file__).parent.parent / "ui_components" / "theme.json"
@@ -1002,5 +1036,5 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
         server_port=port,
         server_name="127.0.0.1",
         inbrowser=False,
-        allowed_paths=[str(SAMPLES_DIR), str(OUTPUT_DIR), str(DATASETS_DIR)]
+        allowed_paths=[str(SAMPLES_DIR), str(OUTPUT_DIR), str(DATASETS_DIR), str(TEMP_DIR)]
     )

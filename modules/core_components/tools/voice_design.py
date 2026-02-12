@@ -15,7 +15,6 @@ import shutil
 import json
 import torch
 import random
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from modules.core_components.ai_models.model_utils import set_seed
@@ -116,6 +115,7 @@ class VoiceDesignTool(Tool):
         input_trigger = shared_state.get('input_trigger')
         SAMPLES_DIR = shared_state.get('SAMPLES_DIR')
         OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
+        TEMP_DIR = shared_state.get('TEMP_DIR') or OUTPUT_DIR
         play_completion_beep = shared_state.get('play_completion_beep')
 
         # Get TTS manager (singleton)
@@ -166,12 +166,12 @@ class VoiceDesignTool(Tool):
 
                 if save_to_output:
                     out_file = OUTPUT_DIR / f"voice_design_{timestamp}.wav"
+                    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 else:
-                    # Use output directory with temp_ prefix for temp files
-                    out_file = OUTPUT_DIR / f"temp_voice_design_{timestamp}.wav"
+                    # Temporary previews must stay out of output history.
+                    out_file = TEMP_DIR / f"temp_voice_design_{timestamp}.wav"
+                    TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-                # Ensure directory exists
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 sf.write(str(out_file), audio_data, sr)
 
                 progress(1.0, desc="Done!")

@@ -4,6 +4,7 @@ Model utilities for AI model management.
 Shared utilities for model loading, device management, and VRAM optimization.
 """
 
+import json
 import torch
 from pathlib import Path
 
@@ -58,6 +59,32 @@ def get_attention_implementation(user_preference="auto"):
         return ["flash_attention_2", "sdpa", "eager"]
 
 
+def get_project_root():
+    """Get project root directory."""
+    return Path(__file__).parent.parent.parent.parent
+
+
+def get_configured_models_dir():
+    """Get configured models directory from config.json (fallback: <project>/models)."""
+    project_root = get_project_root()
+    config_path = project_root / "config.json"
+    default_models_dir = project_root / "models"
+
+    try:
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            configured = config.get("models_folder", "models")
+            models_dir = Path(configured)
+            if not models_dir.is_absolute():
+                models_dir = project_root / models_dir
+            return models_dir
+    except Exception:
+        pass
+
+    return default_models_dir
+
+
 def check_model_available_locally(model_name):
     """
     Check if model is available in local models directory.
@@ -68,7 +95,7 @@ def check_model_available_locally(model_name):
     Returns:
         Path to local model or None if not found
     """
-    models_dir = Path(__file__).parent.parent.parent / "models"
+    models_dir = get_configured_models_dir()
 
     # Try exact model name
     model_path = models_dir / model_name.split("/")[-1]
@@ -76,10 +103,55 @@ def check_model_available_locally(model_name):
         list(model_path.glob("*.safetensors"))
         or list(model_path.glob("*.onnx"))
         or list(model_path.glob("*.pt"))
+        or list(model_path.glob("*.bin"))
     ):
         return model_path
 
     return None
+
+
+def resolve_model_source(
+    model_name,
+    offline_mode=False,
+    settings_download_name=None,
+    auto_download_when_online=True,
+):
+    """
+    Resolve a model source for runtime loading.
+
+    Priority:
+    1) Local cloned model in configured models folder
+    2) In offline mode: fail with actionable error
+    3) In online mode: attempt local clone download to configured models folder
+    4) If local clone download fails, fall back to Hub repo id
+
+    Returns:
+        str: local path or repo id
+    """
+    local_path = check_model_available_locally(model_name)
+    if local_path:
+        return str(local_path)
+
+    if offline_mode:
+        hint = settings_download_name or model_name.split("/")[-1]
+        raise RuntimeError(
+            "❌ Offline mode enabled and model is missing locally: "
+            f"{model_name}\n"
+            "Download it in Settings -> Model Downloading "
+            f"('{hint}') or disable Offline Mode."
+        )
+
+    if auto_download_when_online:
+        success, message, path = download_model_from_huggingface(model_name)
+        if success and path:
+            print(f"Downloaded model for local offline reuse: {model_name} -> {path}")
+            return path
+        print(
+            "Could not pre-download model to local models folder; "
+            f"falling back to online hub loading: {model_name}\nReason: {message}"
+        )
+
+    return model_name
 
 
 def download_model_from_huggingface(model_id, models_dir=None, local_folder_name=None, progress=None):
@@ -111,7 +183,7 @@ def download_model_from_huggingface(model_id, models_dir=None, local_folder_name
             local_folder_name = model_id.split("/")[-1]
 
         if models_dir is None:
-            models_dir = Path(__file__).parent.parent.parent.parent / "models"
+            models_dir = get_configured_models_dir()
         else:
             models_dir = Path(models_dir)
 
@@ -119,7 +191,12 @@ def download_model_from_huggingface(model_id, models_dir=None, local_folder_name
         local_path = models_dir / local_folder_name
 
         # Check if already downloaded (look for model files)
-        if list(local_path.glob("*.safetensors")) or list(local_path.glob("*.onnx")) or list(local_path.glob("*.pt")):
+        if (
+            list(local_path.glob("*.safetensors"))
+            or list(local_path.glob("*.onnx"))
+            or list(local_path.glob("*.pt"))
+            or list(local_path.glob("*.bin"))
+        ):
             return True, f"Model already exists at {local_path}", str(local_path)
 
         # Check if git-lfs is installed
@@ -169,7 +246,12 @@ def download_model_from_huggingface(model_id, models_dir=None, local_folder_name
                 return False, "Download failed. Check console for details.", None
 
             # Verify model files exist
-            if not (list(local_path.glob("*.safetensors")) or list(local_path.glob("*.onnx")) or list(local_path.glob("*.pt"))):
+            if not (
+                list(local_path.glob("*.safetensors"))
+                or list(local_path.glob("*.onnx"))
+                or list(local_path.glob("*.pt"))
+                or list(local_path.glob("*.bin"))
+            ):
                 return False, "Model files not found - download may be incomplete.", None
 
             print(f"\nSuccessfully downloaded to {local_path}\n", flush=True)
@@ -490,12 +572,29 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
         status_log.append("   Please ensure Qwen3-TTS repository is cloned.")
         return "\n".join(status_log)
 
+    tokenizer_model_id = "Qwen/Qwen3-TTS-Tokenizer-12Hz"
+    offline_mode = user_config.get("offline_mode", False)
+    try:
+        tokenizer_model_path = resolve_model_source(
+            tokenizer_model_id,
+            offline_mode=offline_mode,
+            settings_download_name="Qwen3-TTS-Tokenizer-12Hz",
+            auto_download_when_online=True,
+        )
+        if tokenizer_model_path != tokenizer_model_id:
+            status_log.append(f"[OK] Using local tokenizer model at: {tokenizer_model_path}")
+        else:
+            status_log.append(f"[OK] Using tokenizer model from hub: {tokenizer_model_id}")
+    except Exception as e:
+        status_log.append(f"[X] {str(e)}")
+        return "\n".join(status_log)
+
     prepare_cmd = [
         sys.executable,
         "-u",
         str(prepare_script.absolute()),
         "--device", get_device(),
-        "--tokenizer_model_path", "Qwen/Qwen3-TTS-Tokenizer-12Hz",
+        "--tokenizer_model_path", tokenizer_model_path,
         "--input_jsonl", str(train_raw_path),
         "--output_jsonl", str(train_with_codes_path)
     ]
@@ -553,17 +652,31 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
 
     status_log.append(f"Locating base model: {base_model_id}")
     try:
-        from huggingface_hub import snapshot_download
-        offline_mode = user_config.get("offline_mode", False)
-        base_model_path = snapshot_download(
-            repo_id=base_model_id,
-            allow_patterns=["*.json", "*.safetensors", "*.txt", "*.npz"],
-            local_files_only=offline_mode
+        resolved_base_source = resolve_model_source(
+            base_model_id,
+            offline_mode=offline_mode,
+            settings_download_name="Qwen3-TTS-12Hz-1.7B-Base",
+            auto_download_when_online=True,
         )
-        status_log.append(f"[OK] Using cached model at: {base_model_path}")
     except Exception as e:
-        status_log.append(f"[X] Failed to locate/download base model: {str(e)}")
+        status_log.append(f"[X] {str(e)}")
         return "\n".join(status_log)
+
+    if resolved_base_source != base_model_id:
+        base_model_path = resolved_base_source
+        status_log.append(f"[OK] Using local base model at: {base_model_path}")
+    else:
+        try:
+            from huggingface_hub import snapshot_download
+            base_model_path = snapshot_download(
+                repo_id=base_model_id,
+                allow_patterns=["*.json", "*.safetensors", "*.txt", "*.npz"],
+                local_files_only=False
+            )
+            status_log.append(f"[OK] Using cached model at: {base_model_path}")
+        except Exception as e:
+            status_log.append(f"[X] Failed to locate/download base model: {str(e)}")
+            return "\n".join(status_log)
 
     attn_impl = user_config.get("attention_mechanism", "auto")
 

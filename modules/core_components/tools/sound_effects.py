@@ -43,7 +43,10 @@ class SoundEffectsTool(Tool):
         OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
 
         # Get foley manager to populate model choices
-        foley_manager = get_foley_manager()
+        foley_manager = get_foley_manager(
+            user_config=_user_config,
+            models_dir=OUTPUT_DIR.parent / _user_config.get("models_folder", "models")
+        )
         model_choices = foley_manager.get_available_models() if foley_manager else [
             "Medium (44kHz)", "Large v2 (44kHz)"
         ]
@@ -198,8 +201,12 @@ class SoundEffectsTool(Tool):
         save_preference = shared_state.get('save_preference')
         show_input_modal_js = shared_state['show_input_modal_js']
         input_trigger = shared_state['input_trigger']
+        _user_config = shared_state.get('_user_config', {})
 
-        foley_manager = get_foley_manager()
+        foley_manager = get_foley_manager(
+            user_config=_user_config,
+            models_dir=OUTPUT_DIR.parent / _user_config.get("models_folder", "models")
+        )
 
         # Mode toggle — show/hide video group, show/hide duration
         def toggle_mode(mode):

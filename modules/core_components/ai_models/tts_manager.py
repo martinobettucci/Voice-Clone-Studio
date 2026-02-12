@@ -14,7 +14,8 @@ import gc
 
 from .model_utils import (
     get_device, get_dtype, get_attention_implementation,
-    check_model_available_locally, empty_device_cache, log_gpu_memory, set_seed,
+    check_model_available_locally, resolve_model_source,
+    empty_device_cache, log_gpu_memory, set_seed,
     run_pre_load_hooks
 )
 
@@ -86,18 +87,12 @@ class TTSManager:
         """
         offline_mode = self.user_config.get("offline_mode", False)
 
-        # Check local availability
-        local_path = check_model_available_locally(model_name)
-        if local_path:
-            print(f"Found local model: {local_path}")
-            model_to_load = str(local_path)
-        elif offline_mode:
-            raise RuntimeError(
-                f"❌ Offline mode enabled but model not available locally: {model_name}\n"
-                f"To use offline mode, download the model first or disable offline mode in Settings."
-            )
-        else:
-            model_to_load = model_name
+        model_to_load = resolve_model_source(
+            model_name,
+            offline_mode=offline_mode,
+            settings_download_name=model_name.split("/")[-1],
+            auto_download_when_online=True,
+        )
 
         mechanisms = get_attention_implementation(
             self.user_config.get("attention_mechanism", "auto")
@@ -267,16 +262,23 @@ class TTSManager:
                     warnings.filterwarnings("ignore", message=".*k2.*")
                     warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.cuda.amp.autocast.*")
                     from zipvoice.luxvoice import LuxTTS
+                    offline_mode = self.user_config.get("offline_mode", False)
+                    luxtts_source = resolve_model_source(
+                        "YatharthS/LuxTTS",
+                        offline_mode=offline_mode,
+                        settings_download_name="LuxTTS",
+                        auto_download_when_online=True,
+                    )
 
                     device = get_device()
                     if device.startswith("cuda"):
-                        self._luxtts_model = LuxTTS("YatharthS/LuxTTS", device="cuda")
+                        self._luxtts_model = LuxTTS(luxtts_source, device="cuda")
                     elif device == "mps":
-                        self._luxtts_model = LuxTTS("YatharthS/LuxTTS", device="mps")
+                        self._luxtts_model = LuxTTS(luxtts_source, device="mps")
                     else:
                         threads = int(self.user_config.get("luxtts_cpu_threads", 2))
                         self._luxtts_model = LuxTTS(
-                            "YatharthS/LuxTTS", device="cpu", threads=max(1, threads)
+                            luxtts_source, device="cpu", threads=max(1, threads)
                         )
 
                 k2_logger.setLevel(prev_level)
@@ -784,9 +786,33 @@ class TTSManager:
 
         # Map model_size to valid HuggingFace repo path
         if model_size == "Large (4-bit)":
-            model_path = "FranckyB/VibeVoice-Large-4bit"
+            model_repo_id = "FranckyB/VibeVoice-Large-4bit"
         else:
-            model_path = f"FranckyB/VibeVoice-{model_size}"
+            model_repo_id = f"FranckyB/VibeVoice-{model_size}"
+
+        if user_config is None:
+            user_config = self.user_config or {}
+        offline_mode = user_config.get("offline_mode", False)
+        if model_size == "Large (4-bit)":
+            download_label = "VibeVoice-Large (4-bit)"
+        elif model_size == "Large":
+            download_label = "VibeVoice-Large"
+        else:
+            download_label = "VibeVoice-1.5B"
+        processor_source = resolve_model_source(
+            model_repo_id,
+            offline_mode=offline_mode,
+            settings_download_name=download_label,
+            auto_download_when_online=True,
+        )
+
+        tokenizer_repo_id = "Qwen/Qwen2.5-1.5B"
+        tokenizer_source = resolve_model_source(
+            tokenizer_repo_id,
+            offline_mode=offline_mode,
+            settings_download_name="Qwen2.5-1.5B (VibeVoice Tokenizer)",
+            auto_download_when_online=True,
+        )
 
         # Suppress tokenizer mismatch warning
         prev_level = logging.getLogger("transformers.tokenization_utils_base").level
@@ -794,10 +820,11 @@ class TTSManager:
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
-            if user_config is None:
-                user_config = {}
-            offline_mode = user_config.get("offline_mode", False)
-            processor = VibeVoiceProcessor.from_pretrained(model_path, local_files_only=offline_mode)
+            processor = VibeVoiceProcessor.from_pretrained(
+                processor_source,
+                local_files_only=offline_mode,
+                language_model_pretrained_name=tokenizer_source
+            )
 
         logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
 
@@ -1441,4 +1468,9 @@ def get_tts_manager(user_config: Dict = None, samples_dir: Path = None) -> TTSMa
     global _tts_manager
     if _tts_manager is None:
         _tts_manager = TTSManager(user_config, samples_dir)
+    else:
+        if user_config is not None:
+            _tts_manager.user_config = user_config
+        if samples_dir is not None:
+            _tts_manager.samples_dir = samples_dir
     return _tts_manager
