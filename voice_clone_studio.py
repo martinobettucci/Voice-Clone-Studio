@@ -59,7 +59,10 @@ from modules.core_components.ai_models import (
     get_asr_manager,
     get_foley_manager
 )
-from modules.core_components.ai_models.model_utils import get_trained_models
+from modules.core_components.ai_models.model_utils import (
+    get_trained_models,
+    configure_runtime_reproducibility,
+)
 
 # Modular tools
 from modules.core_components.tools import (
@@ -83,6 +86,9 @@ sys.path.insert(0, str(Path(__file__).parent / "modules"))
 
 # Load config (CONFIG_FILE imported from tools)
 _user_config = load_config()
+
+# Apply deterministic runtime behavior early (before model loading)
+configure_runtime_reproducibility(_user_config.get("deterministic_mode", False))
 
 # Check which engines are available before building UI
 if _user_config.get("skip_engine_check", False):

@@ -287,6 +287,7 @@ def load_config():
         "whisper_language": "Auto-detect",
         "low_cpu_mem_usage": False,
         "attention_mechanism": "auto",
+        "deterministic_mode": False,
         "offline_mode": False,
         "browser_notifications": True,
         "samples_folder": "samples",

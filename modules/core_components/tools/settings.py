@@ -96,6 +96,12 @@ class SettingsTool(Tool):
                                     info="Auto = fastest available."
                                 )
 
+                                components['settings_deterministic_mode'] = gr.Checkbox(
+                                    label="Deterministic Mode (Best Reproducibility)",
+                                    value=_user_config.get("deterministic_mode", False),
+                                    info="Uses deterministic backend/seed behavior. May be slower."
+                                )
+
                                 components['settings_skip_engine_check'] = gr.Checkbox(
                                     label="Skip Engine Check at Startup",
                                     value=_user_config.get("skip_engine_check", False),
@@ -378,6 +384,17 @@ class SettingsTool(Tool):
         components['settings_attention_mechanism'].change(
             lambda x: save_preference("attention_mechanism", x),
             inputs=[components['settings_attention_mechanism']],
+            outputs=[]
+        )
+
+        def apply_deterministic_mode(enabled):
+            from modules.core_components.ai_models.model_utils import configure_runtime_reproducibility
+            configure_runtime_reproducibility(bool(enabled))
+            save_preference("deterministic_mode", bool(enabled))
+
+        components['settings_deterministic_mode'].change(
+            apply_deterministic_mode,
+            inputs=[components['settings_deterministic_mode']],
             outputs=[]
         )
 

@@ -5,7 +5,10 @@ Shared utilities for model loading, device management, and VRAM optimization.
 """
 
 import json
+import os
+import random
 import torch
+import numpy as np
 from pathlib import Path
 
 
@@ -312,8 +315,66 @@ def run_pre_load_hooks():
             pass
 
 
-def set_seed(seed):
-    """Set random seed across all available devices for reproducibility."""
+_ORIG_CUDNN_BENCHMARK = torch.backends.cudnn.benchmark
+_ORIG_CUDNN_DETERMINISTIC = torch.backends.cudnn.deterministic
+_ORIG_CUDNN_ALLOW_TF32 = torch.backends.cudnn.allow_tf32 if hasattr(torch.backends.cudnn, "allow_tf32") else None
+_ORIG_CUDA_MATMUL_ALLOW_TF32 = (
+    torch.backends.cuda.matmul.allow_tf32
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul")
+    else None
+)
+_ORIG_DETERMINISTIC_ALGOS = torch.are_deterministic_algorithms_enabled()
+
+
+def _env_flag(name, default=False):
+    """Parse a boolean environment variable."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def configure_runtime_reproducibility(deterministic_mode=False):
+    """Configure backend flags for deterministic vs fast execution.
+
+    Notes:
+    - This improves repeatability but cannot guarantee bit-identical output
+      for all kernels/models/devices.
+    - CUBLAS_WORKSPACE_CONFIG is most effective when set before CUDA context creation.
+    """
+    deterministic_mode = bool(deterministic_mode)
+
+    if deterministic_mode:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        if hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    else:
+        torch.backends.cudnn.benchmark = _ORIG_CUDNN_BENCHMARK
+        torch.backends.cudnn.deterministic = _ORIG_CUDNN_DETERMINISTIC
+        if _ORIG_CUDNN_ALLOW_TF32 is not None:
+            torch.backends.cudnn.allow_tf32 = _ORIG_CUDNN_ALLOW_TF32
+        if _ORIG_CUDA_MATMUL_ALLOW_TF32 is not None:
+            torch.backends.cuda.matmul.allow_tf32 = _ORIG_CUDA_MATMUL_ALLOW_TF32
+        torch.use_deterministic_algorithms(_ORIG_DETERMINISTIC_ALGOS, warn_only=True)
+
+    os.environ["VCS_DETERMINISTIC_MODE"] = "1" if deterministic_mode else "0"
+
+
+def set_seed(seed, deterministic_mode=None):
+    """Set random seed across Python/NumPy/PyTorch and configure determinism."""
+    if deterministic_mode is None:
+        deterministic_mode = _env_flag("VCS_DETERMINISTIC_MODE", default=False)
+
+    configure_runtime_reproducibility(deterministic_mode)
+
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
