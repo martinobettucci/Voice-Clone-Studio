@@ -1,5 +1,6 @@
 from typing import Literal, Optional
 
+import os
 import open_clip
 import torch
 import torch.nn as nn
