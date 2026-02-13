@@ -223,6 +223,9 @@ SHARED_CSS = """
 #input-trigger {
     display: none !important;
 }
+#prompt-apply-trigger {
+    display: none !important;
+}
 #finetune-files-group > div {
     display: grid !important;
 }
@@ -658,7 +661,17 @@ def get_or_create_voice_prompt_standalone(model, sample_name, wav_path, ref_text
     return prompt_items, False  # False = newly created
 
 
-def build_shared_state(user_config, active_emotions, directories, constants, managers=None, confirm_trigger=None, input_trigger=None):
+def build_shared_state(
+    user_config,
+    active_emotions,
+    directories,
+    constants,
+    managers=None,
+    confirm_trigger=None,
+    input_trigger=None,
+    prompt_apply_trigger=None,
+    main_tabs_component=None,
+):
     """
     Build shared_state dictionary for main app or standalone testing.
 
@@ -712,6 +725,7 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         clean_audio as clean_audio_util,
         check_audio_format as check_audio_format_util
     )
+    import modules.core_components.prompt_hub as prompt_hub
 
     # Check optional dependencies
     try:
@@ -838,8 +852,22 @@ def build_shared_state(user_config, active_emotions, directories, constants, man
         # Modal triggers and helpers
         'confirm_trigger': confirm_trigger,
         'input_trigger': input_trigger,
+        'prompt_apply_trigger': prompt_apply_trigger,
+        'main_tabs_component': main_tabs_component,
         'show_confirmation_modal_js': show_confirmation_modal_js,
         'show_input_modal_js': show_input_modal_js,
+        'prompt_hub': prompt_hub,
+        'prompt_system_prompt_choices': prompt_hub.SYSTEM_PROMPT_CHOICES,
+        'prompt_system_prompts': prompt_hub.SYSTEM_PROMPTS,
+        'prompt_targets': prompt_hub.PROMPT_TARGETS,
+        'prompt_get_names': prompt_hub.get_prompt_names,
+        'prompt_get_text': prompt_hub.get_prompt_text,
+        'prompt_generate_for_target': prompt_hub.generate_for_target,
+        'prompt_get_target_default_preset': prompt_hub.get_target_default_preset,
+        'prompt_get_target_tab_id': prompt_hub.get_target_tab_id,
+        'prompt_get_enabled_target_choices': prompt_hub.get_enabled_target_choices,
+        'prompt_build_apply_payload': prompt_hub.build_apply_payload,
+        'prompt_parse_apply_payload': prompt_hub.parse_apply_payload,
 
         # Helper functions
         'get_trained_models': lambda: get_trained_models_util(directories.get('OUTPUT_DIR').parent / user_config.get("models_folder", "models")),

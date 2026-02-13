@@ -23,6 +23,11 @@ from modules.core_components.ai_models.model_utils import set_seed
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
+from modules.core_components.ui_components.prompt_assistant import (
+    create_prompt_assistant,
+    wire_prompt_assistant_events,
+    wire_prompt_apply_listener,
+)
 from gradio_filelister import FileLister
 
 class VoiceCloneTool(Tool):
@@ -78,7 +83,7 @@ class VoiceCloneTool(Tool):
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
 
-        with gr.TabItem("Voice Clone") as voice_clone_tab:
+        with gr.TabItem("Voice Clone", id="tab_voice_clone") as voice_clone_tab:
             components['voice_clone_tab'] = voice_clone_tab
             gr.Markdown("Clone Voices from Samples. <small>(Use Prep Audio Samples to add samples)</small>")
             with gr.Row():
@@ -127,6 +132,11 @@ class VoiceCloneTool(Tool):
                         label="Text to Generate",
                         placeholder="Enter the text you want to speak in the cloned voice...",
                         lines=6
+                    )
+                    components['prompt_assistant'] = create_prompt_assistant(
+                        shared_state=shared_state,
+                        target_ids=["voice_clone.text"],
+                        default_target_id="voice_clone.text",
                     )
 
                     with gr.Row():
@@ -266,6 +276,7 @@ class VoiceCloneTool(Tool):
         save_preference = shared_state['save_preference']
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
+        prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         OUTPUT_DIR = shared_state['OUTPUT_DIR']
         play_completion_beep = shared_state.get('play_completion_beep')
 
@@ -515,6 +526,21 @@ class VoiceCloneTool(Tool):
             inputs=[components['sample_lister']],
             outputs=[components['sample_audio'], components['sample_text'], components['sample_info']]
         )
+
+        if components.get('prompt_assistant'):
+            wire_prompt_assistant_events(
+                assistant=components['prompt_assistant'],
+                target_components={"voice_clone.text": components['text_input']},
+                status_component=components['clone_status'],
+                shared_state=shared_state,
+            )
+
+        if prompt_apply_trigger is not None:
+            wire_prompt_apply_listener(
+                prompt_apply_trigger=prompt_apply_trigger,
+                target_components={"voice_clone.text": components['text_input']},
+                status_component=components['clone_status'],
+            )
 
         # Double-click = play sample audio
         components['sample_lister'].double_click(

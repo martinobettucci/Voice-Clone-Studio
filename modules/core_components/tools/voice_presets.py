@@ -22,6 +22,11 @@ from gradio_filelister import FileLister
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
 from modules.core_components.emotion_manager import process_save_emotion_result, process_delete_emotion_result
+from modules.core_components.ui_components.prompt_assistant import (
+    create_prompt_assistant,
+    wire_prompt_assistant_events,
+    wire_prompt_apply_listener,
+)
 
 
 class VoicePresetsTool(Tool):
@@ -61,7 +66,7 @@ class VoicePresetsTool(Tool):
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
 
-        with gr.TabItem("Voice Presets") as voice_presets_tab:
+        with gr.TabItem("Voice Presets", id="tab_voice_presets") as voice_presets_tab:
             components['voice_presets_tab'] = voice_presets_tab
             gr.Markdown("Use your Qwen3-TTS trained models or Qwen3's Speakers with style control")
 
@@ -217,6 +222,11 @@ class VoicePresetsTool(Tool):
                         info="Control emotion, tone, speed, etc.",
                         visible=is_premium
                     )
+                    components['prompt_assistant'] = create_prompt_assistant(
+                        shared_state=shared_state,
+                        target_ids=["voice_presets.text", "voice_presets.style"],
+                        default_target_id="voice_presets.text",
+                    )
 
                     with gr.Row():
                         components['custom_language'] = gr.Dropdown(
@@ -290,6 +300,7 @@ class VoicePresetsTool(Tool):
         save_preference = shared_state['save_preference']
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
+        prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         OUTPUT_DIR = shared_state['OUTPUT_DIR']
         play_completion_beep = shared_state.get('play_completion_beep')
         user_config = shared_state.get('_user_config', {})
@@ -551,6 +562,27 @@ class VoicePresetsTool(Tool):
                 toggle_voice_type,
                 inputs=[components['voice_type_radio']],
                 outputs=outputs
+            )
+
+        if components.get('prompt_assistant'):
+            wire_prompt_assistant_events(
+                assistant=components['prompt_assistant'],
+                target_components={
+                    "voice_presets.text": components['custom_text_input'],
+                    "voice_presets.style": components['custom_instruct_input'],
+                },
+                status_component=components['preset_status'],
+                shared_state=shared_state,
+            )
+
+        if prompt_apply_trigger is not None:
+            wire_prompt_apply_listener(
+                prompt_apply_trigger=prompt_apply_trigger,
+                target_components={
+                    "voice_presets.text": components['custom_text_input'],
+                    "voice_presets.style": components['custom_instruct_input'],
+                },
+                status_component=components['preset_status'],
             )
 
         # Auto-refresh trained models when tab is selected

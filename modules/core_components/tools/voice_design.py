@@ -21,6 +21,11 @@ from modules.core_components.ai_models.model_utils import set_seed
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
+from modules.core_components.ui_components.prompt_assistant import (
+    create_prompt_assistant,
+    wire_prompt_assistant_events,
+    wire_prompt_apply_listener,
+)
 
 
 class VoiceDesignTool(Tool):
@@ -44,7 +49,7 @@ class VoiceDesignTool(Tool):
         _user_config = shared_state.get('_user_config', {})
         create_qwen_advanced_params = shared_state.get('create_qwen_advanced_params')
 
-        with gr.TabItem("Voice Design"):
+        with gr.TabItem("Voice Design", id="tab_voice_design"):
             gr.Markdown("Create new voices from natural language descriptions")
 
             with gr.Row():
@@ -62,6 +67,11 @@ class VoiceDesignTool(Tool):
                         label="Voice Design Instructions",
                         placeholder="Describe the voice: e.g., 'Young female voice, bright and cheerful, slightly breathy' or 'Deep male voice with a warm, comforting tone, speak slowly'",
                         lines=3
+                    )
+                    components['prompt_assistant'] = create_prompt_assistant(
+                        shared_state=shared_state,
+                        target_ids=["voice_design.reference", "voice_design.instructions"],
+                        default_target_id="voice_design.reference",
                     )
 
                     with gr.Row():
@@ -113,6 +123,7 @@ class VoiceDesignTool(Tool):
         show_input_modal_js = shared_state.get('show_input_modal_js')
         save_preference = shared_state.get('save_preference')
         input_trigger = shared_state.get('input_trigger')
+        prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         SAMPLES_DIR = shared_state.get('SAMPLES_DIR')
         OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
         TEMP_DIR = shared_state.get('TEMP_DIR') or OUTPUT_DIR
@@ -232,6 +243,27 @@ class VoiceDesignTool(Tool):
                     components['top_p'], components['repetition_penalty'], components['max_new_tokens']],
             outputs=[components['design_output_audio'], components['design_status'], components['design_save_btn']]
         )
+
+        if components.get('prompt_assistant'):
+            wire_prompt_assistant_events(
+                assistant=components['prompt_assistant'],
+                target_components={
+                    "voice_design.reference": components['design_text_input'],
+                    "voice_design.instructions": components['design_instruct_input'],
+                },
+                status_component=components['design_status'],
+                shared_state=shared_state,
+            )
+
+        if prompt_apply_trigger is not None:
+            wire_prompt_apply_listener(
+                prompt_apply_trigger=prompt_apply_trigger,
+                target_components={
+                    "voice_design.reference": components['design_text_input'],
+                    "voice_design.instructions": components['design_instruct_input'],
+                },
+                status_component=components['design_status'],
+            )
 
         # Save designed voice - show modal
         components['design_save_btn'].click(

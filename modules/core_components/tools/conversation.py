@@ -25,6 +25,11 @@ from textwrap import dedent
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
+from modules.core_components.ui_components.prompt_assistant import (
+    create_prompt_assistant,
+    wire_prompt_assistant_events,
+    wire_prompt_apply_listener,
+)
 
 
 class ConversationTool(Tool):
@@ -92,7 +97,7 @@ class ConversationTool(Tool):
         is_luxtts = initial_conv_model == "LuxTTS"
         is_chatterbox = initial_conv_model == "Chatterbox"
 
-        with gr.TabItem("Conversation") as conv_tab:
+        with gr.TabItem("Conversation", id="tab_conversation") as conv_tab:
             components['conv_tab'] = conv_tab
             gr.Markdown("Choose a model and create multi-speaker conversations with your custom voices")
             components['conv_model_type'] = gr.Radio(
@@ -127,6 +132,11 @@ class ConversationTool(Tool):
                             CustomVoice: Qwen Preset speakers with style control and Pause Controls.
                             LuxTTS: Voice cloning with custom samples, sequential generation."""),
                         lines=18
+                    )
+                    components['prompt_assistant'] = create_prompt_assistant(
+                        shared_state=shared_state,
+                        target_ids=["conversation.script"],
+                        default_target_id="conversation.script",
                     )
 
                     # Qwen speaker mapping
@@ -529,6 +539,7 @@ class ConversationTool(Tool):
         play_completion_beep = shared_state.get('play_completion_beep')
         get_or_create_voice_prompt = shared_state.get('get_or_create_voice_prompt')
         _user_config = shared_state.get('_user_config', {})
+        prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
 
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager(_user_config)
@@ -1560,6 +1571,21 @@ class ConversationTool(Tool):
                                                            vv_sentences_per_chunk, progress)
 
         # Event handlers
+        if components.get('prompt_assistant'):
+            wire_prompt_assistant_events(
+                assistant=components['prompt_assistant'],
+                target_components={"conversation.script": components['conversation_script']},
+                status_component=components['conv_status'],
+                shared_state=shared_state,
+            )
+
+        if prompt_apply_trigger is not None:
+            wire_prompt_apply_listener(
+                prompt_apply_trigger=prompt_apply_trigger,
+                target_components={"conversation.script": components['conversation_script']},
+                status_component=components['conv_status'],
+            )
+
         components['conv_generate_btn'].click(
             unified_conversation_generate,
             inputs=[

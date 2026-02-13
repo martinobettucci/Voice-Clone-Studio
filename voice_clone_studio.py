@@ -201,6 +201,7 @@ def create_ui():
         # Hidden triggers for modals
         confirm_trigger = gr.Textbox(label="Confirm Trigger", value="", elem_id="confirm-trigger")
         input_trigger = gr.Textbox(label="Input Trigger", value="", elem_id="input-trigger")
+        prompt_apply_trigger = gr.Textbox(label="Prompt Apply Trigger", value="", elem_id="prompt-apply-trigger")
 
         # Header with unload button
         with gr.Row():
@@ -249,13 +250,15 @@ def create_ui():
                 'foley_manager': _foley_manager
             },
             confirm_trigger=confirm_trigger,
-            input_trigger=input_trigger
+            input_trigger=input_trigger,
+            prompt_apply_trigger=prompt_apply_trigger,
         )
 
         # ============================================================
         # LOAD ALL MODULAR TOOLS
         # ============================================================
-        with gr.Tabs(elem_id="main-tabs"):
+        with gr.Tabs(elem_id="main-tabs") as main_tabs:
+            shared_state['main_tabs_component'] = main_tabs
             tool_components = create_enabled_tools(shared_state)
         setup_tool_events(tool_components, shared_state)
 

@@ -21,6 +21,11 @@ from pathlib import Path
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.foley_manager import get_foley_manager
 from modules.core_components.constants import MMAUDIO_GENERATION_DEFAULTS
+from modules.core_components.ui_components.prompt_assistant import (
+    create_prompt_assistant,
+    wire_prompt_assistant_events,
+    wire_prompt_apply_listener,
+)
 
 
 class SoundEffectsTool(Tool):
@@ -51,7 +56,7 @@ class SoundEffectsTool(Tool):
             "Medium (44kHz)", "Large v2 (44kHz)"
         ]
 
-        with gr.TabItem("Sound Effects"):
+        with gr.TabItem("Sound Effects", id="tab_sound_effects"):
             gr.Markdown("Generate sound effects and foley audio from text prompts or video clips")
             # Mode toggle
             components['sfx_mode'] = gr.Radio(
@@ -78,6 +83,11 @@ class SoundEffectsTool(Tool):
                         placeholder="What to avoid: e.g., 'music, speech, noise'",
                         lines=2,
                         value="human sounds, music, speech, voices"
+                    )
+                    components['prompt_assistant'] = create_prompt_assistant(
+                        shared_state=shared_state,
+                        target_ids=["sound_effects.prompt", "sound_effects.negative"],
+                        default_target_id="sound_effects.prompt",
                     )
 
                     with gr.Row():
@@ -201,6 +211,7 @@ class SoundEffectsTool(Tool):
         save_preference = shared_state.get('save_preference')
         show_input_modal_js = shared_state['show_input_modal_js']
         input_trigger = shared_state['input_trigger']
+        prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         _user_config = shared_state.get('_user_config', {})
 
         foley_manager = get_foley_manager(
@@ -230,6 +241,27 @@ class SoundEffectsTool(Tool):
                 components['sfx_duration'],
             ]
         )
+
+        if components.get('prompt_assistant'):
+            wire_prompt_assistant_events(
+                assistant=components['prompt_assistant'],
+                target_components={
+                    "sound_effects.prompt": components['sfx_prompt'],
+                    "sound_effects.negative": components['sfx_negative_prompt'],
+                },
+                status_component=components['sfx_status'],
+                shared_state=shared_state,
+            )
+
+        if prompt_apply_trigger is not None:
+            wire_prompt_apply_listener(
+                prompt_apply_trigger=prompt_apply_trigger,
+                target_components={
+                    "sound_effects.prompt": components['sfx_prompt'],
+                    "sound_effects.negative": components['sfx_negative_prompt'],
+                },
+                status_component=components['sfx_status'],
+            )
 
         # Source / Result radio — toggle which video is visible
         def toggle_video_preview(choice):
