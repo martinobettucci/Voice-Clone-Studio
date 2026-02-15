@@ -1284,6 +1284,21 @@ class TTSManager:
     # CHATTERBOX METHODS
     # ============================================================
 
+    def _resolve_chatterbox_source(self):
+        """Resolve Chatterbox source path/repo with offline-aware behavior."""
+        offline_mode = self.user_config.get("offline_mode", False)
+        source = resolve_model_source(
+            "ResembleAI/chatterbox",
+            offline_mode=offline_mode,
+            settings_download_name="Chatterbox",
+            auto_download_when_online=True,
+        )
+
+        source_path = Path(source)
+        if source_path.exists():
+            return source_path
+        return source
+
     def get_chatterbox_tts(self):
         """Load Chatterbox TTS model (English)."""
         self._check_and_unload_if_different("chatterbox_tts")
@@ -1294,7 +1309,11 @@ class TTSManager:
                 from modules.chatterbox import ChatterboxTTS
 
                 device = get_device()
-                self._chatterbox_tts_model = ChatterboxTTS.from_pretrained(device)
+                source = self._resolve_chatterbox_source()
+                if isinstance(source, Path):
+                    self._chatterbox_tts_model = ChatterboxTTS.from_local(source, device)
+                else:
+                    self._chatterbox_tts_model = ChatterboxTTS.from_pretrained(device)
                 print("Chatterbox TTS loaded!")
 
             except ImportError as e:
@@ -1315,7 +1334,11 @@ class TTSManager:
                 from modules.chatterbox import ChatterboxMultilingualTTS
 
                 device = get_device()
-                self._chatterbox_mtl_model = ChatterboxMultilingualTTS.from_pretrained(device)
+                source = self._resolve_chatterbox_source()
+                if isinstance(source, Path):
+                    self._chatterbox_mtl_model = ChatterboxMultilingualTTS.from_local(source, device)
+                else:
+                    self._chatterbox_mtl_model = ChatterboxMultilingualTTS.from_pretrained(device)
                 print("Chatterbox Multilingual TTS loaded!")
 
             except ImportError as e:
@@ -1336,7 +1359,11 @@ class TTSManager:
                 from modules.chatterbox import ChatterboxVC
 
                 device = get_device()
-                self._chatterbox_vc_model = ChatterboxVC.from_pretrained(device)
+                source = self._resolve_chatterbox_source()
+                if isinstance(source, Path):
+                    self._chatterbox_vc_model = ChatterboxVC.from_local(source, device)
+                else:
+                    self._chatterbox_vc_model = ChatterboxVC.from_pretrained(device)
                 print("Chatterbox VC loaded!")
 
             except ImportError as e:

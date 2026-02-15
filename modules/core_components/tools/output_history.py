@@ -36,36 +36,13 @@ class OutputHistoryTool(Tool):
         """Create Output History tool UI."""
         components = {}
 
-        # Get OUTPUT_DIR from shared_state
-        OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
-
-        # Helper function to get output files as FileLister format
-        def get_output_files_for_lister():
-            """Get list of generated output files for the FileLister widget.
-
-            Returns:
-                List of dicts with 'name' and 'date' keys
-            """
-            if not OUTPUT_DIR or not OUTPUT_DIR.exists():
-                return []
-            files = sorted(OUTPUT_DIR.glob("*.wav"), key=lambda x: x.stat().st_mtime, reverse=True)
-            result = []
-            for f in files:
-                try:
-                    mtime = datetime.fromtimestamp(f.stat().st_mtime)
-                    date_str = mtime.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    date_str = ""
-                result.append({"name": f.name, "date": date_str})
-            return result
-
         with gr.TabItem("Output History") as tab:
             components['tab'] = tab
             gr.Markdown("Browse and manage previously generated audio files")
             with gr.Row():
                 with gr.Column(scale=1):
                     components['file_lister'] = FileLister(
-                        value=get_output_files_for_lister(),
+                        value=[],
                         height=400,
                         show_footer=False,
                         interactive=True,
@@ -78,6 +55,7 @@ class OutputHistoryTool(Tool):
                         label="Playback",
                         type="filepath",
                         autoplay=False,
+                        interactive=False,
                         elem_id="output-history-audio"
                     )
 
@@ -99,15 +77,15 @@ class OutputHistoryTool(Tool):
         """Wire up Output History events."""
 
         # Get required items from shared_state
-        OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
+        get_tenant_output_dir = shared_state.get('get_tenant_output_dir')
         show_confirmation_modal_js = shared_state.get('show_confirmation_modal_js')
         confirm_trigger = shared_state.get('confirm_trigger')
 
-        def get_output_files_for_lister():
+        def get_output_files_for_lister(output_dir):
             """Get list of generated output files for the FileLister widget."""
-            if not OUTPUT_DIR or not OUTPUT_DIR.exists():
+            if not output_dir or not output_dir.exists():
                 return []
-            files = sorted(OUTPUT_DIR.glob("*.wav"), key=lambda x: x.stat().st_mtime, reverse=True)
+            files = sorted(output_dir.glob("*.wav"), key=lambda x: x.stat().st_mtime, reverse=True)
             result = []
             for f in files:
                 try:
@@ -118,11 +96,15 @@ class OutputHistoryTool(Tool):
                 result.append({"name": f.name, "date": date_str})
             return result
 
-        def refresh_outputs():
+        def refresh_outputs(request: gr.Request):
             """Refresh the output file list."""
-            return get_output_files_for_lister()
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+                return get_output_files_for_lister(output_dir)
+            except Exception as e:
+                return [{"name": f"(Tenant Error) {str(e)}", "date": ""}]
 
-        def on_file_selection_change(lister_value):
+        def on_file_selection_change(lister_value, request: gr.Request):
             """Handle file selection changes from FileLister.
 
             Single file selected: load audio + metadata.
@@ -132,9 +114,13 @@ class OutputHistoryTool(Tool):
                 return None, ""
 
             selected = lister_value.get("selected", [])
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+            except Exception as e:
+                return None, f"Tenant error: {str(e)}"
 
             if len(selected) == 1:
-                file_path = OUTPUT_DIR / selected[0]
+                file_path = output_dir / selected[0]
                 if file_path.exists():
                     metadata_file = file_path.with_suffix(".txt")
                     if metadata_file.exists():
@@ -147,7 +133,7 @@ class OutputHistoryTool(Tool):
             # Multiple or no selection - clear
             return None, ""
 
-        def delete_selected_files(action, lister_value):
+        def delete_selected_files(action, lister_value, request: gr.Request):
             """Delete selected output files and their metadata."""
             # Ignore empty calls or wrong context
             if not action or not action.strip() or not action.startswith("output_"):
@@ -161,12 +147,16 @@ class OutputHistoryTool(Tool):
                 return "[ERROR] No file(s) selected", gr.update()
 
             selected = lister_value["selected"]
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+            except Exception as e:
+                return f"Tenant error: {str(e)}", gr.update()
             deleted_count = 0
             errors = []
 
             for filename in selected:
                 try:
-                    audio_path = OUTPUT_DIR / filename
+                    audio_path = output_dir / filename
                     txt_path = audio_path.with_suffix(".txt")
 
                     if audio_path.exists():
@@ -177,7 +167,7 @@ class OutputHistoryTool(Tool):
                 except Exception as e:
                     errors.append(f"{filename}: {str(e)}")
 
-            updated_files = get_output_files_for_lister()
+            updated_files = get_output_files_for_lister(output_dir)
 
             if errors:
                 msg = f"Deleted {deleted_count} file(s), {len(errors)} error(s): {'; '.join(errors)}"

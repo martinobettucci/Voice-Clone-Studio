@@ -13,6 +13,7 @@ ARCHITECTURE:
 
 import os
 import sys
+import argparse
 from pathlib import Path
 import torch
 import json
@@ -74,8 +75,10 @@ from modules.core_components.tools import (
     play_completion_beep,
     format_help_html,
     TRIGGER_HIDE_CSS,
-    CONFIG_FILE
+    CONFIG_FILE,
+    set_runtime_options,
 )
+from modules.core_components.tenant_context import validate_tenant_id
 
 # Add modules to path
 sys.path.insert(0, str(Path(__file__).parent / "modules"))
@@ -84,8 +87,51 @@ sys.path.insert(0, str(Path(__file__).parent / "modules"))
 # CONFIG & SETUP
 # ============================================================================
 
+
+def _parse_cli_args():
+    parser = argparse.ArgumentParser(description="Voice Clone Studio")
+    parser.add_argument(
+        "--default-tenant",
+        type=str,
+        default=None,
+        help=(
+            "Fallback tenant id to use when tenant header is missing. "
+            "Must match: [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}"
+        ),
+    )
+    parser.add_argument(
+        "--allow-config",
+        action="store_true",
+        help="Enable configuration UI/API mutations (Settings tab and preference writes).",
+    )
+    args, _ = parser.parse_known_args()
+
+    if args.default_tenant:
+        args.default_tenant = args.default_tenant.strip()
+        if not validate_tenant_id(args.default_tenant):
+            parser.error(
+                "--default-tenant is invalid. Expected pattern: "
+                "[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}"
+            )
+
+    return args
+
+
+_cli_args = _parse_cli_args()
+set_runtime_options(
+    default_tenant=_cli_args.default_tenant,
+    allow_config=_cli_args.allow_config,
+)
+
 # Load config (CONFIG_FILE imported from tools)
 _user_config = load_config()
+
+if _cli_args.default_tenant:
+    print(f"Default tenant fallback enabled: {_cli_args.default_tenant}")
+if _cli_args.allow_config:
+    print("Configuration UI/API enabled (--allow-config).")
+else:
+    print("Configuration UI/API disabled (pass --allow-config to enable).")
 
 # Apply deterministic runtime behavior early (before model loading)
 configure_runtime_reproducibility(_user_config.get("deterministic_mode", False))

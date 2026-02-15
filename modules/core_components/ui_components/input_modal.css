@@ -63,6 +63,33 @@
   margin-bottom: 1.5rem;
   box-sizing: border-box;
 }
+#input-modal-overlay .modal-save-mode {
+  display: none;
+  margin-top: -0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 6px;
+  background: var(--background-fill-secondary);
+  gap: 0.8rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+#input-modal-overlay .modal-save-mode.show {
+  display: flex;
+}
+#input-modal-overlay .modal-save-mode .save-mode-label {
+  font-weight: 600;
+  color: var(--body-text-color);
+  margin-right: 0.25rem;
+}
+#input-modal-overlay .modal-save-mode label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--body-text-color);
+  font-size: 0.9rem;
+}
 #input-modal-overlay input[type="text"]:focus {
   outline: none;
   border-color: var(--border-color-accent);

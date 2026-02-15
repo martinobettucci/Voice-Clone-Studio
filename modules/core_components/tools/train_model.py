@@ -41,7 +41,7 @@ class TrainModelTool(Tool):
                         choices=["(Select Dataset)"] + get_dataset_folders(),
                         value="(Select Dataset)",
                         label="Training Dataset",
-                        info="Select prepared subfolder",
+                        info="Select dataset prepared in Library Manager",
                         interactive=True
                     )
 
@@ -65,10 +65,11 @@ class TrainModelTool(Tool):
 
                     train_quick_guide = dedent("""\
                         **Quick Guide:**
-                        1. Select dataset folder
-                        2. Enter speaker name
-                        3. Choose reference audio from dataset
-                        4. Configure parameters & start training (defaults work well for most cases)
+                        1. Create/prepare dataset in Library Manager
+                        2. Select dataset folder
+                        3. Enter speaker name
+                        4. Choose reference audio from dataset
+                        5. Configure parameters & start training (defaults work well for most cases)
 
                         *See Help Guide tab -> Train Model for detailed instructions*
                     """)
@@ -132,9 +133,9 @@ class TrainModelTool(Tool):
         get_dataset_folders = shared_state['get_dataset_folders']
         get_trained_model_names = shared_state['get_trained_model_names']
         train_model = shared_state['train_model']
+        get_tenant_datasets_dir = shared_state['get_tenant_datasets_dir']
         input_trigger = shared_state['input_trigger']
         show_input_modal_js = shared_state['show_input_modal_js']
-        DATASETS_DIR = shared_state['DATASETS_DIR']
 
         def get_selected_ref_filename(lister_value):
             """Extract selected filename from FileLister value."""
@@ -146,9 +147,9 @@ class TrainModelTool(Tool):
             return None
 
         # --- Folder change: update ref audio lister ---
-        def update_ref_audio_lister(folder):
+        def update_ref_audio_lister(folder, request: gr.Request):
             """Update reference audio lister when folder changes."""
-            files = get_dataset_files(folder)
+            files = get_dataset_files(folder, request=request, strict=True)
             return files, None
 
         components['train_folder_dropdown'].change(
@@ -158,18 +159,25 @@ class TrainModelTool(Tool):
         )
 
         # Auto-refresh datasets when tab is selected
+        def refresh_train_folders(request: gr.Request):
+            return gr.update(
+                choices=["(Select Dataset)"] + get_dataset_folders(request=request, strict=True),
+                value="(Select Dataset)",
+            )
+
         components['train_tab'].select(
-            lambda: gr.update(choices=["(Select Dataset)"] + get_dataset_folders(), value="(Select Dataset)"),
+            refresh_train_folders,
             outputs=[components['train_folder_dropdown']]
         )
 
         # --- Ref audio preview on selection ---
-        def load_ref_audio_preview(lister_value, folder):
+        def load_ref_audio_preview(lister_value, folder, request: gr.Request):
             """Load reference audio preview from FileLister selection."""
             filename = get_selected_ref_filename(lister_value)
             if not folder or not filename or folder in ("(No folders)", "(Select Dataset)"):
                 return None
-            audio_path = DATASETS_DIR / folder / filename
+            datasets_dir = get_tenant_datasets_dir(request=request, strict=True)
+            audio_path = datasets_dir / folder / filename
             if audio_path.exists():
                 return str(audio_path)
             return None
@@ -190,9 +198,9 @@ class TrainModelTool(Tool):
         # Hidden JSON to pass existing model names to JS for validation
         components['existing_models_json'] = gr.JSON(value=[], visible=False)
 
-        def fetch_existing_models():
+        def fetch_existing_models(request: gr.Request):
             """Fetch current model list before opening modal."""
-            return get_trained_model_names()
+            return get_trained_model_names(request=request, strict=True)
 
         # Build the base modal JS using show_input_modal_js
         base_modal_js = show_input_modal_js(
@@ -234,7 +242,17 @@ class TrainModelTool(Tool):
         )
 
         # --- Handle training modal submission ---
-        def handle_train_model_input(input_value, folder, ref_lister, batch_size, lr, epochs, save_interval, progress=gr.Progress()):
+        def handle_train_model_input(
+            input_value,
+            folder,
+            ref_lister,
+            batch_size,
+            lr,
+            epochs,
+            save_interval,
+            request: gr.Request,
+            progress=gr.Progress(),
+        ):
             """Process input modal submission for training."""
             if not input_value or not input_value.startswith("train_model_"):
                 return gr.update()
@@ -245,7 +263,10 @@ class TrainModelTool(Tool):
             parts = input_value.split("_")
             if len(parts) >= 3:
                 speaker_name = "_".join(parts[2:-1])
-                return train_model(folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval, progress)
+                return train_model(
+                    folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval,
+                    progress, request=request
+                )
 
             return gr.update()
 

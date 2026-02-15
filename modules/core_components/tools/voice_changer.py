@@ -103,6 +103,7 @@ class VoiceChangerTool(Tool):
                     components['output_audio'] = gr.Audio(
                         label="Converted Audio",
                         type="filepath",
+                        interactive=False,
                     )
 
                     with gr.Row():

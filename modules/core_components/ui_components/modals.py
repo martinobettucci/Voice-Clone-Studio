@@ -82,7 +82,17 @@ def create_confirmation_workflow(button, confirm_callback, cancel_callback=None,
     return confirm_trigger, js_func
 
 
-def show_input_modal_js(title, message="", placeholder="Enter text...", default_value="", submit_button_text="Save", context="", validation_js=""):
+def show_input_modal_js(
+    title,
+    message="",
+    placeholder="Enter text...",
+    default_value="",
+    submit_button_text="Save",
+    context="",
+    validation_js="",
+    show_save_mode=False,
+    default_save_mode="new",
+):
     """
     Generate JavaScript function to show the input modal.
 
@@ -113,6 +123,7 @@ def show_input_modal_js(title, message="", placeholder="Enter text...", default_
         const submitBtn = document.getElementById('input-modal-submit-btn');
         const cancelBtn = document.getElementById('input-modal-cancel-btn');
         const errorEl = document.getElementById('input-modal-error');
+        const saveModeWrap = document.getElementById('input-modal-save-mode');
 
         if (titleEl) titleEl.textContent = {title!r};
         if (messageEl) {{
@@ -126,6 +137,7 @@ def show_input_modal_js(title, message="", placeholder="Enter text...", default_
         if (submitBtn) {{
             submitBtn.textContent = {submit_button_text!r};
             submitBtn.setAttribute('data-context', {context!r});
+            submitBtn.setAttribute('data-show-save-mode', {str(bool(show_save_mode)).lower()!r});
         }}
         if (cancelBtn) {{
             cancelBtn.setAttribute('data-context', {context!r});
@@ -133,6 +145,17 @@ def show_input_modal_js(title, message="", placeholder="Enter text...", default_
         if (errorEl) {{
             errorEl.classList.remove('show');
             errorEl.textContent = '';
+        }}
+        if (saveModeWrap) {{
+            const show = {str(bool(show_save_mode)).lower()};
+            saveModeWrap.classList.toggle('show', show);
+            if (show) {{
+                const defaultMode = {default_save_mode!r};
+                const radio = saveModeWrap.querySelector(`input[name="input-modal-save-mode-choice"][value="${{defaultMode}}"]`);
+                if (radio) {{
+                    radio.checked = true;
+                }}
+            }}
         }}
 
         {validation_setup}

@@ -45,6 +45,7 @@ function submitInputModalValue(action, button) {
   if (!overlay || !inputField) return;
 
   let valueToSubmit = '';
+  const saveModeEnabled = !!(button && button.getAttribute('data-show-save-mode') === 'true');
 
   if (action === 'submit') {
     valueToSubmit = inputField.value.trim();
@@ -71,7 +72,7 @@ function submitInputModalValue(action, button) {
     }
 
     // Check for overwrite if existing files list is provided
-    if (window.inputModalExistingFiles && Array.isArray(window.inputModalExistingFiles)) {
+    if (!saveModeEnabled && window.inputModalExistingFiles && Array.isArray(window.inputModalExistingFiles)) {
       const cleanName = _normalizeInputName(valueToSubmit).toLowerCase();
       if (cleanName && window.inputModalExistingFiles.some(f => f.toLowerCase() === cleanName)) {
         _showConfirmBar();
@@ -103,7 +104,12 @@ function submitInputModalValue(action, button) {
 
   // Get context from button's data attribute
   const context = button ? button.getAttribute('data-context') || '' : '';
-  const prefixedValue = context + valueToSubmit;
+  let prefixedValue = context + valueToSubmit;
+  if (saveModeEnabled) {
+    const checked = document.querySelector('input[name="input-modal-save-mode-choice"]:checked');
+    const mode = checked ? checked.value : 'new';
+    prefixedValue = context + mode + '::' + valueToSubmit;
+  }
 
   // Find the trigger element
   function findTrigger() {

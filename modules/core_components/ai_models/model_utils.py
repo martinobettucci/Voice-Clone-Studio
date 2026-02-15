@@ -441,7 +441,7 @@ def get_trained_model_names(models_dir=None):
 def train_model(folder, speaker_name, ref_audio_filename, batch_size,
                 learning_rate, num_epochs, save_interval,
                 user_config, datasets_dir, project_root,
-                play_completion_beep=None, progress=None):
+                play_completion_beep=None, progress=None, trained_models_root=None):
     """Complete training workflow: validate, prepare data, and train model.
 
     Args:
@@ -484,8 +484,11 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
         save_interval = 5
 
     # Create output directory
-    trained_models_folder = user_config.get("trained_models_folder", "models")
-    output_dir = project_root / trained_models_folder / speaker_name.strip()
+    if trained_models_root is not None:
+        output_dir = Path(trained_models_root) / speaker_name.strip()
+    else:
+        trained_models_folder = user_config.get("trained_models_folder", "models")
+        output_dir = project_root / trained_models_folder / speaker_name.strip()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     base_dir = datasets_dir / folder

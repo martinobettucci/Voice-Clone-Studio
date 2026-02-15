@@ -178,7 +178,8 @@ class SoundEffectsTool(Tool):
                     # Audio output (always visible)
                     components['sfx_output_audio'] = gr.Audio(
                         label="Generated Audio",
-                        type="filepath"
+                        type="filepath",
+                        interactive=False,
                     )
 
                     # Save button

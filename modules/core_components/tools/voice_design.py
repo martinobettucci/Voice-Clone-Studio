@@ -108,7 +108,8 @@ class VoiceDesignTool(Tool):
                     gr.Markdown("### Preview & Save")
                     components['design_output_audio'] = gr.Audio(
                         label="Generated Audio",
-                        type="filepath"
+                        type="filepath",
+                        interactive=False,
                     )
 
                     components['design_save_btn'] = gr.Button("Save Sample", variant="primary", interactive=False)
@@ -124,9 +125,10 @@ class VoiceDesignTool(Tool):
         save_preference = shared_state.get('save_preference')
         input_trigger = shared_state.get('input_trigger')
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
-        SAMPLES_DIR = shared_state.get('SAMPLES_DIR')
-        OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
-        TEMP_DIR = shared_state.get('TEMP_DIR') or OUTPUT_DIR
+        get_tenant_samples_dir = shared_state.get('get_tenant_samples_dir')
+        get_tenant_output_dir = shared_state.get('get_tenant_output_dir')
+        get_tenant_paths = shared_state.get('get_tenant_paths')
+        configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         play_completion_beep = shared_state.get('play_completion_beep')
 
         # Get TTS manager (singleton)
@@ -134,6 +136,7 @@ class VoiceDesignTool(Tool):
 
         def generate_voice_design_handler(text_to_generate, language, instruct, seed, save_to_output,
                                           do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
+                                          request: gr.Request = None,
                                           progress=gr.Progress()):
             """Generate audio using voice design with natural language instructions."""
             if not text_to_generate or not text_to_generate.strip():
@@ -150,6 +153,8 @@ class VoiceDesignTool(Tool):
 
                 set_seed(seed)
                 seed_msg = f"Seed: {seed}"
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 progress(0.1, desc="Loading VoiceDesign model...")
 
@@ -176,10 +181,13 @@ class VoiceDesignTool(Tool):
                     audio_data = audio_data.numpy()
 
                 if save_to_output:
+                    OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
                     out_file = OUTPUT_DIR / f"voice_design_{timestamp}.wav"
                     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 else:
                     # Temporary previews must stay out of output history.
+                    tenant_paths = get_tenant_paths(request=request, strict=True)
+                    TEMP_DIR = tenant_paths.temp_dir
                     out_file = TEMP_DIR / f"temp_voice_design_{timestamp}.wav"
                     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -193,7 +201,7 @@ class VoiceDesignTool(Tool):
             except Exception as e:
                 return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False)
 
-        def save_designed_voice(audio, design_name, ref_text, instruct, seed):
+        def save_designed_voice(audio, design_name, ref_text, instruct, seed, request: gr.Request = None):
             """Save a designed voice as a sample (tool-specific implementation)."""
             if not audio:
                 return "❌ No audio to save"
@@ -206,6 +214,8 @@ class VoiceDesignTool(Tool):
                 safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in design_name.strip())
 
                 # Copy audio file to samples folder
+                SAMPLES_DIR = get_tenant_samples_dir(request=request, strict=True)
+                SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
                 wav_path = SAMPLES_DIR / f"{safe_name}.wav"
                 json_path = SAMPLES_DIR / f"{safe_name}.json"
 
@@ -280,7 +290,7 @@ class VoiceDesignTool(Tool):
 
         # Handle save designed voice input modal submission
         if input_trigger:
-            def handle_save_design_input(input_value, audio, ref_text, instruct, seed):
+            def handle_save_design_input(input_value, audio, ref_text, instruct, seed, request: gr.Request = None):
                 """Process input modal submission for saving designed voice."""
                 # Context filtering: only process if this is our context
                 if not input_value or not input_value.startswith("save_design_"):
@@ -292,7 +302,7 @@ class VoiceDesignTool(Tool):
                 if len(parts) >= 3:
                     # Remove context prefix and timestamp (last part)
                     design_name = "_".join(parts[2:-1])
-                    status = save_designed_voice(audio, design_name, ref_text, instruct, seed)
+                    status = save_designed_voice(audio, design_name, ref_text, instruct, seed, request=request)
                     return status, gr.update(interactive=False)
 
                 return gr.update(), gr.update()

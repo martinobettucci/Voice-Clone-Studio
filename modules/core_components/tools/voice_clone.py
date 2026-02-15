@@ -68,10 +68,11 @@ class VoiceCloneTool(Tool):
         if not visible_options:
             visible_options = VOICE_CLONE_OPTIONS
 
-        # Resolve default model based on which engines are enabled
-        from modules.core_components.constants import get_default_voice_clone_model
-        default_model = get_default_voice_clone_model(_user_config)
-        saved_model = _user_config.get("voice_clone_model", default_model)
+        # Resolve preferred/default model based on engine preferences and visibility
+        from modules.core_components.constants import resolve_preferred_tts_engine_and_model, coerce_choice_value
+        _preferred_engine, preferred_model = resolve_preferred_tts_engine_and_model(_user_config)
+        saved_model = coerce_choice_value(_user_config.get("voice_clone_model", preferred_model))
+        saved_model = str(saved_model) if saved_model is not None else preferred_model
         if saved_model not in visible_options:
             saved_model = visible_options[0]
         show_input_modal_js = shared_state['show_input_modal_js']
@@ -85,7 +86,7 @@ class VoiceCloneTool(Tool):
 
         with gr.TabItem("Voice Clone", id="tab_voice_clone") as voice_clone_tab:
             components['voice_clone_tab'] = voice_clone_tab
-            gr.Markdown("Clone Voices from Samples. <small>(Use Prep Audio Samples to add samples)</small>")
+            gr.Markdown("Clone voices from tenant samples. <small>(Create/manage them in Library Manager)</small>")
             with gr.Row():
                 # Left column - Sample selection (1/3 width)
                 with gr.Column(scale=1):
@@ -251,7 +252,8 @@ class VoiceCloneTool(Tool):
 
                     components['output_audio'] = gr.Audio(
                         label="Generated Audio",
-                        type="filepath"
+                        type="filepath",
+                        interactive=False,
                     )
 
                     components['clone_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=5)
@@ -268,6 +270,7 @@ class VoiceCloneTool(Tool):
         load_sample_details = shared_state['load_sample_details']
         get_prompt_cache_path = shared_state['get_prompt_cache_path']
         get_or_create_voice_prompt = shared_state['get_or_create_voice_prompt']
+        configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         refresh_samples = shared_state['refresh_samples']
         show_input_modal_js = shared_state['show_input_modal_js']
         show_confirmation_modal_js = shared_state['show_confirmation_modal_js']
@@ -277,7 +280,7 @@ class VoiceCloneTool(Tool):
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
-        OUTPUT_DIR = shared_state['OUTPUT_DIR']
+        get_tenant_output_dir = shared_state['get_tenant_output_dir']
         play_completion_beep = shared_state.get('play_completion_beep')
 
         # Get TTS manager (singleton)
@@ -302,6 +305,7 @@ class VoiceCloneTool(Tool):
                                    lux_rms=0.01, lux_ref_duration=30, lux_guidance_scale=3.0,
                                    cb_exaggeration=0.5, cb_cfg_weight=0.5, cb_temperature=0.8,
                                    cb_repetition_penalty=1.2, cb_top_p=1.0, cb_language="English",
+                                   request: gr.Request = None,
                                    progress=gr.Progress()):
             """Generate audio using voice cloning - supports Qwen, VibeVoice, and LuxTTS engines."""
             if not sample_name:
@@ -336,7 +340,7 @@ class VoiceCloneTool(Tool):
                     model_size = "1.7B"
 
             # Find the selected sample
-            samples = get_available_samples()
+            samples = get_available_samples(request=request, strict=True)
             sample = None
             for s in samples:
                 if s["name"] == sample_name:
@@ -351,7 +355,7 @@ class VoiceCloneTool(Tool):
             if not sample_ref_text.strip():
                 return None, (
                     f"❌ No transcript found for sample '{sample_name}'.\n\n"
-                    "Please transcribe this sample first in the **Prep Audio** tab "
+                    "Please transcribe this sample first in the **Library Manager** tab "
                     "(using Whisper or VibeVoice ASR), then try again."
                 )
 
@@ -363,6 +367,8 @@ class VoiceCloneTool(Tool):
 
                 set_seed(seed)
                 seed_msg = f"Seed: {seed}"
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 if engine == "qwen":
                     # Qwen engine - uses cached prompts
@@ -376,7 +382,8 @@ class VoiceCloneTool(Tool):
                         wav_path=sample["wav_path"],
                         ref_text=sample["ref_text"],
                         model_size=model_size,
-                        progress_callback=progress
+                        progress_callback=progress,
+                        request=request,
                     )
 
                     cache_status = "cached" if was_cached else "newly processed"
@@ -486,6 +493,8 @@ class VoiceCloneTool(Tool):
                 # Generate unique filename
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 safe_name = "".join(c if c.isalnum() else "_" for c in sample_name)
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"{safe_name}_{timestamp}.wav"
 
                 sf.write(str(output_file), wavs[0], sr)
@@ -513,12 +522,12 @@ class VoiceCloneTool(Tool):
                 traceback.print_exc()
                 return None, f"❌ Error generating audio: {str(e)}"
 
-        def load_sample_from_lister(lister_value):
+        def load_sample_from_lister(lister_value, request: gr.Request):
             """Load audio, text, and info for the selected sample from FileLister."""
             sample_name = get_selected_sample_name(lister_value)
             if not sample_name:
                 return None, "", ""
-            return load_sample_details(sample_name)
+            return load_sample_details(sample_name, request=request, strict=True)
 
         # Connect event handlers for Voice Clone tab
         components['sample_lister'].change(
@@ -549,8 +558,11 @@ class VoiceCloneTool(Tool):
         )
 
         # Auto-refresh samples when tab is selected
+        def refresh_samples_for_tab(request: gr.Request):
+            return get_sample_choices(request=request, strict=True)
+
         components['voice_clone_tab'].select(
-            lambda: get_sample_choices(),
+            refresh_samples_for_tab,
             outputs=[components['sample_lister']]
         )
 
@@ -638,9 +650,9 @@ class VoiceCloneTool(Tool):
             outputs=[components['qwen_emotion_preset'], components['clone_status']]
         )
 
-        def generate_from_lister(lister_value, *args):
+        def generate_from_lister(lister_value, *args, request: gr.Request = None):
             """Extract sample name from lister and pass to generate."""
-            return generate_audio_handler(get_selected_sample_name(lister_value), *args)
+            return generate_audio_handler(get_selected_sample_name(lister_value), *args, request=request)
 
         components['generate_btn'].click(
             generate_from_lister,
@@ -698,23 +710,36 @@ class VoiceCloneTool(Tool):
         )
 
         # Refresh emotion dropdowns and auto-load first sample when tab is selected
-        def on_tab_select(lister_value):
+        def on_tab_select(lister_value, request: gr.Request):
             """When tab is selected, refresh emotions and auto-load sample if not loaded."""
             emotion_update = gr.update(choices=shared_state['get_emotion_choices'](shared_state['_active_emotions']))
+            visible_models = []
+            engine_settings = shared_state["_user_config"].get("enabled_engines", {})
+            tts_engines = shared_state.get("TTS_ENGINES", {})
+            for engine_key, engine_info in tts_engines.items():
+                if engine_settings.get(engine_key, engine_info.get("default_enabled", True)):
+                    visible_models.extend(engine_info.get("choices", []))
+            if not visible_models:
+                visible_models = shared_state.get("VOICE_CLONE_OPTIONS", [])
+            preferred_model = shared_state["_user_config"].get(
+                "voice_clone_model",
+                (visible_models[0] if visible_models else "Qwen3 - Large"),
+            )
+            model_update = gr.update(value=(preferred_model if preferred_model in visible_models else (visible_models[0] if visible_models else preferred_model)))
 
             # Auto-load selected sample
             sample_name = get_selected_sample_name(lister_value)
             if sample_name:
-                audio, text, info = load_sample_details(sample_name)
-                return emotion_update, audio, text, info
+                audio, text, info = load_sample_details(sample_name, request=request, strict=True)
+                return emotion_update, audio, text, info, model_update
 
-            return emotion_update, None, "", ""
+            return emotion_update, None, "", "", model_update
 
         components['voice_clone_tab'].select(
             on_tab_select,
             inputs=[components['sample_lister']],
             outputs=[components['qwen_emotion_preset'], components['sample_audio'],
-                     components['sample_text'], components['sample_info']]
+                     components['sample_text'], components['sample_info'], components['clone_model_dropdown']]
         )
 
 

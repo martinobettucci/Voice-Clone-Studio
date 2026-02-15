@@ -6,4 +6,4 @@ echo "Voice Clone Studio"
 echo "========================================"
 echo ""
 
-uv run python voice_clone_studio.py
+uv run python voice_clone_studio.py "$@"

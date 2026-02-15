@@ -62,7 +62,6 @@ class VoicePresetsTool(Tool):
         get_sample_choices = shared_state['get_sample_choices']
         get_dataset_folders = shared_state['get_dataset_folders']
         get_dataset_files = shared_state['get_dataset_files']
-        DATASETS_DIR = shared_state['DATASETS_DIR']
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
 
@@ -131,18 +130,11 @@ class VoicePresetsTool(Tool):
                     with components['trained_section']:
                         def get_initial_model_list():
                             """Get initial list of trained models for dropdown initialization."""
-                            models = get_trained_models()
-                            if not models:
-                                return ["(No trained models found)"]
-                            return ["(Select Model)"] + [m['display_name'] for m in models]
+                            return ["(Select Model)"]
 
                         def refresh_trained_models():
                             """Refresh model list."""
-                            models = get_trained_models()
-                            if not models:
-                                return gr.update(choices=["(No trained models found)"], value="(No trained models found)")
-                            choices = ["(Select Model)"] + [m['display_name'] for m in models]
-                            return gr.update(choices=choices, value="(Select Model)")
+                            return gr.update(choices=["(Select Model)"], value="(Select Model)")
 
                         initial_choices = get_initial_model_list()
                         initial_value = initial_choices[0]
@@ -166,7 +158,7 @@ class VoicePresetsTool(Tool):
                         components['icl_sample_section'] = gr.Column(visible=False)
                         with components['icl_sample_section']:
                             components['icl_dataset_dropdown'] = gr.Dropdown(
-                                choices=["(Select Dataset)"] + get_dataset_folders(),
+                                choices=["(Select Dataset)"],
                                 value="(Select Dataset)",
                                 label="Dataset",
                                 info="Select the dataset used for training",
@@ -277,7 +269,8 @@ class VoicePresetsTool(Tool):
 
                     components['custom_output_audio'] = gr.Audio(
                         label="Generated Audio",
-                        type="filepath"
+                        type="filepath",
+                        interactive=False,
                     )
                     components['preset_status'] = gr.Textbox(label="Status", max_lines=5, interactive=False)
 
@@ -292,7 +285,7 @@ class VoicePresetsTool(Tool):
         get_sample_choices = shared_state['get_sample_choices']
         get_dataset_folders = shared_state['get_dataset_folders']
         get_dataset_files = shared_state['get_dataset_files']
-        DATASETS_DIR = shared_state['DATASETS_DIR']
+        get_tenant_datasets_dir = shared_state['get_tenant_datasets_dir']
         show_input_modal_js = shared_state['show_input_modal_js']
         show_confirmation_modal_js = shared_state['show_confirmation_modal_js']
         save_emotion_handler = shared_state['save_emotion_handler']
@@ -301,7 +294,8 @@ class VoicePresetsTool(Tool):
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
-        OUTPUT_DIR = shared_state['OUTPUT_DIR']
+        get_tenant_output_dir = shared_state['get_tenant_output_dir']
+        configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         play_completion_beep = shared_state.get('play_completion_beep')
         user_config = shared_state.get('_user_config', {})
 
@@ -312,7 +306,8 @@ class VoicePresetsTool(Tool):
 
         def generate_custom_voice_handler(text_to_generate, language, speaker, instruct, seed, model_size="1.7B",
                                           do_sample=True, temperature=0.9, top_k=50, top_p=1.0,
-                                          repetition_penalty=1.05, max_new_tokens=2048, progress=gr.Progress()):
+                                          repetition_penalty=1.05, max_new_tokens=2048,
+                                          request: gr.Request = None, progress=gr.Progress()):
             """Generate audio using the CustomVoice model with premium speakers."""
             if not text_to_generate or not text_to_generate.strip():
                 return None, "❌ Please enter text to generate."
@@ -321,6 +316,8 @@ class VoicePresetsTool(Tool):
                 return None, "❌ Please select a speaker."
 
             try:
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
                 progress(0.1, desc=f"Loading CustomVoice model ({model_size})...")
 
                 audio_data, sr = tts_manager.generate_custom_voice(
@@ -340,6 +337,8 @@ class VoicePresetsTool(Tool):
 
                 progress(0.8, desc="Saving audio...")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"custom_{speaker}_{timestamp}.wav"
 
                 sf.write(str(output_file), audio_data, sr)
@@ -374,7 +373,7 @@ class VoicePresetsTool(Tool):
                                                 do_sample=True, temperature=0.9, top_k=50, top_p=1.0,
                                                 repetition_penalty=1.05, max_new_tokens=2048,
                                                 icl_enabled=False, icl_dataset=None, icl_sample_name=None,
-                                                progress=gr.Progress()):
+                                                request: gr.Request = None, progress=gr.Progress()):
             """Generate audio using a trained custom voice model checkpoint."""
             if not text_to_generate or not text_to_generate.strip():
                 return None, "❌ Please enter text to generate."
@@ -388,7 +387,8 @@ class VoicePresetsTool(Tool):
                 if not icl_sample_name or icl_sample_name.strip() == "":
                     return None, "❌ Please select a voice sample for ICL mode."
 
-                audio_path = DATASETS_DIR / icl_dataset / icl_sample_name
+                datasets_dir = get_tenant_datasets_dir(request=request, strict=True)
+                audio_path = datasets_dir / icl_dataset / icl_sample_name
                 if not audio_path.exists():
                     return None, f"❌ Audio file not found: {icl_sample_name}"
 
@@ -406,6 +406,8 @@ class VoicePresetsTool(Tool):
                     )
 
             try:
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
                 mode_desc = "ICL mode" if icl_enabled and voice_sample_path else "speaker embedding"
                 progress(0.1, desc=f"Loading trained model ({mode_desc})...")
 
@@ -431,6 +433,8 @@ class VoicePresetsTool(Tool):
 
                 progress(0.8, desc="Saving audio...")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"trained_{speaker_name}_{timestamp}.wav"
 
                 sf.write(str(output_file), audio_data, sr)
@@ -507,7 +511,8 @@ class VoicePresetsTool(Tool):
 
         def generate_with_voice_type(text, lang, speaker_sel, instruct, seed, model_size, voice_type, premium_speaker, trained_model,
                                      do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
-                                     icl_enabled=False, icl_dataset=None, icl_lister_value=None, progress=gr.Progress()):
+                                     icl_enabled=False, icl_dataset=None, icl_lister_value=None,
+                                     request: gr.Request = None, progress=gr.Progress()):
             """Generate audio with either premium or trained voice."""
             icl_sample_name = get_selected_icl_filename(icl_lister_value) if icl_lister_value else None
 
@@ -519,14 +524,14 @@ class VoicePresetsTool(Tool):
                 return generate_custom_voice_handler(
                     text, lang, speaker, instruct, seed,
                     "1.7B" if model_size == "Large" else "0.6B",
-                    do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
+                    do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens, request,
                     progress
                 )
             else:
                 if not trained_model or trained_model in ["(No trained models found)", "(Select Model)"]:
                     return None, "❌ Please select a trained model or train one first"
 
-                models = get_trained_models()
+                models = get_trained_models(request=request, strict=True)
                 model_path = None
                 speaker_name = None
                 for model in models:
@@ -541,7 +546,7 @@ class VoicePresetsTool(Tool):
                 return generate_with_trained_model_handler(
                     text, lang, speaker_name, model_path, instruct, seed,
                     do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
-                    icl_enabled, icl_dataset, icl_sample_name,
+                    icl_enabled, icl_dataset, icl_sample_name, request,
                     progress
                 )
 
@@ -586,10 +591,14 @@ class VoicePresetsTool(Tool):
             )
 
         # Auto-refresh trained models when tab is selected
+        def refresh_trained_model_dropdown(request: gr.Request):
+            models = get_trained_models(request=request, strict=True)
+            if not models:
+                return gr.update(choices=["(No trained models found)"])
+            return gr.update(choices=["(Select Model)"] + [m['display_name'] for m in models])
+
         components['voice_presets_tab'].select(
-            lambda: (
-                gr.update(choices=["(Select Model)"] + [m['display_name'] for m in get_trained_models()] if get_trained_models() else ["(No trained models found)"])
-            ),
+            refresh_trained_model_dropdown,
             outputs=[components['trained_model_dropdown']]
         )
 
@@ -610,9 +619,9 @@ class VoicePresetsTool(Tool):
             return None
 
         # ICL dataset change: update sample lister
-        def update_icl_samples(folder):
+        def update_icl_samples(folder, request: gr.Request):
             """Update ICL sample lister when dataset changes."""
-            files = get_dataset_files(folder)
+            files = get_dataset_files(folder, request=request, strict=True)
             return files, None
 
         components['icl_dataset_dropdown'].change(
@@ -622,18 +631,25 @@ class VoicePresetsTool(Tool):
         )
 
         # ICL refresh datasets
+        def refresh_icl_datasets(request: gr.Request):
+            return gr.update(
+                choices=["(Select Dataset)"] + get_dataset_folders(request=request, strict=True),
+                value="(Select Dataset)",
+            )
+
         components['icl_refresh_datasets'].click(
-            lambda: gr.update(choices=["(Select Dataset)"] + get_dataset_folders(), value="(Select Dataset)"),
+            refresh_icl_datasets,
             outputs=[components['icl_dataset_dropdown']]
         )
 
         # ICL sample preview on selection
-        def load_icl_audio_preview(lister_value, folder):
+        def load_icl_audio_preview(lister_value, folder, request: gr.Request):
             """Load ICL audio preview from FileLister selection."""
             filename = get_selected_icl_filename(lister_value)
             if not folder or not filename or folder in ("(No folders)", "(Select Dataset)"):
                 return None
-            audio_path = DATASETS_DIR / folder / filename
+            datasets_dir = get_tenant_datasets_dir(request=request, strict=True)
+            audio_path = datasets_dir / folder / filename
             if audio_path.exists():
                 return str(audio_path)
             return None

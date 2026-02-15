@@ -435,7 +435,8 @@ class ConversationTool(Tool):
 
                     components['conv_output_audio'] = gr.Audio(
                         label="Generated Conversation",
-                        type="filepath"
+                        type="filepath",
+                        interactive=False,
                     )
                     components['conv_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=5)
 
@@ -455,7 +456,7 @@ class ConversationTool(Tool):
                     - Up to 8 different speakers
                     - Tip: Use `[break=1.5]` inline for custom pauses
                     - Advanced pause control (periods, commas, questions, hyphens)
-                    - Prepare 3-10 second voice samples in samples/ folder
+                    - Prepare 3-10 second voice samples in Library Manager
                     """)
 
                     vibevoice_tips_text = dedent("""\
@@ -532,7 +533,8 @@ class ConversationTool(Tool):
         get_available_samples = shared_state['get_available_samples']
         get_sample_choices = shared_state['get_sample_choices']
         save_preference = shared_state['save_preference']
-        OUTPUT_DIR = shared_state['OUTPUT_DIR']
+        get_tenant_output_dir = shared_state['get_tenant_output_dir']
+        configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         CUSTOM_VOICE_SPEAKERS = shared_state['CUSTOM_VOICE_SPEAKERS']
         LANGUAGES = shared_state['LANGUAGES']
         _active_emotions = shared_state.get('_active_emotions', {})
@@ -544,11 +546,11 @@ class ConversationTool(Tool):
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager(_user_config)
 
-        def prepare_voice_samples_dict(v1, v2=None, v3=None, v4=None, v5=None, v6=None, v7=None, v8=None):
+        def prepare_voice_samples_dict(v1, v2=None, v3=None, v4=None, v5=None, v6=None, v7=None, v8=None, request: gr.Request = None):
             """Prepare voice samples dictionary for generation."""
             from modules.core_components.tools import strip_sample_extension
             samples = {}
-            available_samples = get_available_samples()
+            available_samples = get_available_samples(request=request, strict=True)
 
             voice_inputs = [("Speaker1", v1), ("Speaker2", v2), ("Speaker3", v3), ("Speaker4", v4),
                             ("Speaker5", v5), ("Speaker6", v6), ("Speaker7", v7), ("Speaker8", v8)]
@@ -578,7 +580,7 @@ class ConversationTool(Tool):
                 names = ", ".join(missing)
                 return (
                     f"No transcript found for: {names}.\n\n"
-                    "Please transcribe these samples first in the **Prep Audio** tab "
+                    "Please transcribe these samples first in the **Library Manager** tab "
                     "(using Whisper or VibeVoice ASR), then try again."
                 )
             return None
@@ -611,6 +613,7 @@ class ConversationTool(Tool):
         def generate_conversation_handler(conversation_data, pause_linebreak, pause_period, pause_comma,
                                           pause_question, pause_hyphen, language, seed, model_size,
                                           do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
+                                          request: gr.Request = None,
                                           progress=gr.Progress()):
             """Generate multi-speaker conversation with Qwen Speakers preset speakers."""
             if not conversation_data or not conversation_data.strip():
@@ -646,6 +649,8 @@ class ConversationTool(Tool):
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
                 set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 progress(0.1, desc=f"Loading CustomVoice model ({model_size})...")
                 model = tts_manager.get_qwen3_custom_voice(model_size)
@@ -728,6 +733,8 @@ class ConversationTool(Tool):
 
                 # Save
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"conversation_qwen3_{timestamp}.wav"
                 sf.write(str(output_file), final_audio, sr)
 
@@ -770,6 +777,7 @@ class ConversationTool(Tool):
                                                pause_period, pause_comma, pause_question, pause_hyphen,
                                                language, seed, model_size, do_sample, temperature, top_k,
                                                top_p, repetition_penalty, max_new_tokens, emotion_intensity,
+                                               request: gr.Request = None,
                                                progress=gr.Progress()):
             """Generate multi-speaker conversation with Qwen Base + custom voice samples."""
             if not conversation_data or not conversation_data.strip():
@@ -809,6 +817,8 @@ class ConversationTool(Tool):
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
                 set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 progress(0.1, desc=f"Loading Base model ({model_size})...")
                 model = tts_manager.get_qwen3_base(model_size)
@@ -854,7 +864,9 @@ class ConversationTool(Tool):
                     # Get voice prompt (cached if available)
                     voice_prompt = None
                     if get_or_create_voice_prompt:
-                        voice_prompt = get_or_create_voice_prompt(model, speaker_key, voice_sample_path, ref_text, model_size)
+                        voice_prompt = get_or_create_voice_prompt(
+                            model, speaker_key, voice_sample_path, ref_text, model_size, request=request
+                        )
 
                     # Generate segments
                     for j in range(0, len(parts), 2):
@@ -906,6 +918,8 @@ class ConversationTool(Tool):
 
                 # Save
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"conversation_qwen_base_{timestamp}.wav"
                 sf.write(str(output_file), final_audio, sr)
 
@@ -947,7 +961,7 @@ class ConversationTool(Tool):
 
         def generate_vibevoice_longform_handler(script_text, voice_samples_dict, model_size, cfg_scale, seed,
                                                 num_steps, do_sample, temperature, top_k, top_p, repetition_penalty,
-                                                sentences_per_chunk=0, progress=gr.Progress()):
+                                                sentences_per_chunk=0, request: gr.Request = None, progress=gr.Progress()):
             """Generate long-form multi-speaker audio with VibeVoice (up to 90 min)."""
             if not script_text or not script_text.strip():
                 return None, "❌ Please enter a script."
@@ -960,6 +974,8 @@ class ConversationTool(Tool):
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
                 set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 progress(0.1, desc=f"Loading VibeVoice TTS ({model_size})...")
                 model = tts_manager.get_vibevoice_tts(model_size)
@@ -1156,6 +1172,8 @@ class ConversationTool(Tool):
 
                     # Save
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                     output_file = OUTPUT_DIR / f"Conversation_vibevoice_{timestamp}.wav"
                     sf.write(str(output_file), generated_audio, sr)
 
@@ -1194,6 +1212,7 @@ class ConversationTool(Tool):
             pause_linebreak, seed,
             num_steps, t_shift, speed, guidance_scale,
             rms, ref_duration, return_smooth,
+            request: gr.Request = None,
             progress=gr.Progress()
         ):
             """Generate multi-speaker conversation with LuxTTS voice cloning.
@@ -1243,6 +1262,8 @@ class ConversationTool(Tool):
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
                 set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 progress(0.05, desc="Loading LuxTTS model...")
                 tts_manager.get_luxtts()
@@ -1300,6 +1321,8 @@ class ConversationTool(Tool):
 
                 # Save
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"conversation_luxtts_{timestamp}.wav"
                 sf.write(str(output_file), final_audio, sr)
 
@@ -1340,6 +1363,7 @@ class ConversationTool(Tool):
             conversation_data, voice_samples_dict,
             pause_linebreak, language, seed,
             exaggeration, cfg_weight, temperature, repetition_penalty, top_p,
+            request: gr.Request = None,
             progress=gr.Progress()
         ):
             """Generate multi-speaker conversation with Chatterbox voice cloning.
@@ -1387,6 +1411,8 @@ class ConversationTool(Tool):
                 if seed < 0:
                     seed = random.randint(0, 2147483647)
                 set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
 
                 # Determine if multilingual
                 lang_code = CHATTERBOX_LANG_TO_CODE.get(language, "en")
@@ -1463,6 +1489,8 @@ class ConversationTool(Tool):
 
                 # Save
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output_file = OUTPUT_DIR / f"conversation_chatterbox_{timestamp}.wav"
                 sf.write(str(output_file), final_audio, sr)
 
@@ -1527,10 +1555,12 @@ class ConversationTool(Tool):
             cb_pause_linebreak,
             cb_exaggeration, cb_cfg_weight, cb_temperature, cb_repetition_penalty, cb_top_p,
             # Shared
-            seed, progress=gr.Progress()
+            seed,
+            request: gr.Request = None,
+            progress=gr.Progress()
         ):
             """Route to appropriate generation function based on model type."""
-            voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8)
+            voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8, request=request)
 
             if model_type == "Qwen Speakers":
                 qwen_size = "1.7B" if qwen_custom_model_size == "Large" else "0.6B"
@@ -1538,7 +1568,7 @@ class ConversationTool(Tool):
                                                      qwen_custom_pause_comma, qwen_custom_pause_question,
                                                      qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size,
                                                      qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
-                                                     qwen_repetition_penalty, qwen_max_new_tokens, progress)
+                                                     qwen_repetition_penalty, qwen_max_new_tokens, request, progress)
             elif model_type == "Qwen Base":
                 qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
                 return generate_conversation_base_handler(script, voice_samples, qwen_base_pause_linebreak,
@@ -1547,17 +1577,17 @@ class ConversationTool(Tool):
                                                           qwen_lang, qwen_seed, qwen_size,
                                                           qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
                                                           qwen_repetition_penalty, qwen_max_new_tokens,
-                                                          emotion_intensity, progress)
+                                                          emotion_intensity, request, progress)
             elif model_type == "LuxTTS":
                 return generate_luxtts_conversation_handler(script, voice_samples, lux_pause_linebreak,
                                                             seed, lux_num_steps, lux_t_shift, lux_speed,
                                                             lux_guidance_scale, lux_rms, lux_ref_duration,
-                                                            lux_return_smooth, progress)
+                                                            lux_return_smooth, request, progress)
             elif model_type == "Chatterbox":
                 return generate_chatterbox_conversation_handler(script, voice_samples, cb_pause_linebreak,
                                                                 qwen_lang, seed,
                                                                 cb_exaggeration, cb_cfg_weight, cb_temperature,
-                                                                cb_repetition_penalty, cb_top_p, progress)
+                                                                cb_repetition_penalty, cb_top_p, request, progress)
             else:  # VibeVoice
                 if vv_model_size == "Small":
                     vv_size = "1.5B"
@@ -1568,7 +1598,7 @@ class ConversationTool(Tool):
                 return generate_vibevoice_longform_handler(script, voice_samples, vv_size, vv_cfg, seed,
                                                            vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
                                                            vv_top_p, vv_repetition_penalty,
-                                                           vv_sentences_per_chunk, progress)
+                                                           vv_sentences_per_chunk, request, progress)
 
         # Event handlers
         if components.get('prompt_assistant'):
@@ -1680,9 +1710,9 @@ class ConversationTool(Tool):
         )
 
         # Refresh voice samples handler
-        def refresh_all_voice_samples():
+        def refresh_all_voice_samples(request: gr.Request):
             """Refresh all shared voice sample dropdowns."""
-            updated_samples = get_sample_choices()
+            updated_samples = get_sample_choices(request=request, strict=True)
             update = gr.update(choices=updated_samples)
             return [update] * 8
 

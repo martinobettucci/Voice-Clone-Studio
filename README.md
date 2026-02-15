@@ -6,7 +6,7 @@ Is a multi model, modular Gradio-based web UI for voice cloning, voice design, m
 
 ## Architecture
 
-Voice Clone Studio is fully modular. The main file dynamically loads self-contained tools as tabs. Each tool can be enabled or disabled from Settings without touching any code.  It supports multipe engine for voice cloning, as well as Model finetuning. More features are also planned.
+Voice Clone Studio is fully modular. The main file dynamically loads self-contained tools as tabs. Configuration UI/API can be enabled at launch time, and tools support multiple engines for voice cloning and model finetuning.
 
 ## Features
 
@@ -98,7 +98,7 @@ Create voices from natural language descriptions - no audio needed, using Qwen3-
 
 Fine-tune your own custom voice models with your training data:
 
-- **Dataset Management** - Organize training samples in the `datasets/` folder
+- **Dataset Management** - Organize training samples in tenant-scoped dataset libraries
 - **Audio Preparation** - Auto-converts to 24kHz 16-bit mono format
 - **Training Pipeline** - Complete 3-step workflow (validation → extract codes → train)
 - **Epoch Selection** - Compare different training checkpoints
@@ -113,27 +113,23 @@ Fine-tune your own custom voice models with your training data:
 
 **Workflow:**
 
-1. Prepare audio files (WAV/MP3) and organize in `datasets/YourSpeakerName/` folder
+1. Upload/create dataset files in **Library Manager**
 2. Use **Batch Transcribe** to automatically transcribe all files at once
 3. Review and edit individual transcripts as needed
 4. Configure training parameters (model size, epochs, learning rate)
 5. Monitor training progress in real-time
 6. Use trained model in Voice Presets tab
 
-### Prep Audio
+### Library Manager (SaaS)
 
-Unified audio preparation workspace for both voice samples and training datasets:
+Tenant-scoped browser workflow for remote users (single source of truth for sample + dataset prep):
 
-- **Trim** - Use waveform selection to cut audio
-- **Normalize** - Balance audio levels
-- **Convert to Mono** - Ensure single-channel audio
-- **Denoise** - Clean audio with DeepFilterNet
-- **Extract from Video** - Automatically extract audio tracks from video files
-- **Auto-Split Audio** - Split long recordings into sentence-level clips using Qwen3-ASR-detected boundaries
-- **Transcribe** - Qwen3 ASR, Whisper, or VibeVoice ASR automatic transcription
-- **Batch Transcribe** - Process entire folders of audio files at once
-- **Save as Sample** - One-click sample creation
-- **Dataset Management** - Create, delete, and organize dataset folders directly from the UI
+- **Samples subtab** - Upload audio/video, preview, transcript edit/save, delete, clear cache, open in Processing Studio
+- **Datasets subtab** - Dataset folder create/delete, file browse, bulk upload, transcript edit/save, delete, batch transcribe, open in Processing Studio
+- **Processing Studio subtab** - Load source (upload/sample/dataset), trim/edit, denoise/normalize/mono, single-file ASR, save to Samples or Dataset, auto-split long audio to dataset clips
+- **Video ingestion** - Video files are accepted and converted to audio for sample/dataset workflows
+- **Quota Visibility** - Tenant usage meter (samples + datasets) shown in tab header
+- **Isolation** - Tenant header required (default `X-Tenant-Id`) unless a valid `--default-tenant` is configured
 
 ### Sound Effects
 
@@ -171,7 +167,12 @@ Centralized application configuration:
 - **Folder paths** - Configurable directories for samples, output, datasets, models
 - **Model downloads** - Download models directly to local storage
 - **Visible Tools** - Enable or disable any tool tab (restart to apply)
-- **Help Guide** - Built-in documentation for all tools
+
+Note: the Settings tab is only exposed when launching with `--allow-config`.
+
+### Help Guide
+
+Dedicated top-level tab with usage guides for every active tab, including detailed end-to-end Library Manager workflows.
 
 ---
 
@@ -403,6 +404,19 @@ docker-compose exec voice-clone-studio python tests/integration_test_denoiser.py
 python voice_clone_studio.py
 ```
 
+Optional runtime flags:
+
+```bash
+# Enable config UI/API (Settings + preference persistence)
+python voice_clone_studio.py --allow-config
+
+# Fallback tenant for requests without tenant header
+python voice_clone_studio.py --default-tenant legacy
+
+# Combine both
+python voice_clone_studio.py --default-tenant legacy --allow-config
+```
+
 Or use the launcher scripts:
 
 ```bash
@@ -415,13 +429,18 @@ launch.bat
 
 The UI will open at `http://127.0.0.1:7860`
 
+### Multi-Tenant SaaS Requirement
+
+For remote multi-tenant deployments, route traffic through an auth/reverse-proxy that injects
+`X-Tenant-Id` (or your configured tenant header). The app stores user media under tenant-scoped paths.
+
 ### Prepare Voice Samples
 
-1. Go to the **Prep Audio** tab
+1. Go to **Library Manager** -> **Samples** or **Processing Studio**
 2. Upload or record audio (3-10 seconds of clear speech)
 3. Trim, normalize, and denoise as needed
 4. Transcribe or manually enter the text
-5. Save as a sample with a name
+5. Save to Samples with a name
 
 ### Clone a Voice
 
@@ -448,10 +467,10 @@ Voice-Clone-Studio/
 ├── setup-windows.bat / setup-linux.sh / setup-mac.sh  # Platform setup scripts
 ├── wheel/                         # Pre-built custom Gradio components
 │   └── gradio_filelister-0.4.0-py3-none-any.whl
-├── samples/                       # Voice samples (.wav + .json)
-├── output/                        # Generated audio outputs
-├── datasets/                      # Training datasets
-├── models/                        # Downloaded & trained models
+├── samples/                       # Base sample root (tenant data under samples/tenants/<tenant-id>/)
+├── output/                        # Base output root (tenant data under output/tenants/<tenant-id>/)
+├── datasets/                      # Base dataset root (tenant data under datasets/tenants/<tenant-id>/)
+├── models/                        # Downloaded + trained models
 ├── docs/                          # Documentation
 │   ├── updates.md                 # Version history
 │   ├── troubleshooting.md         # Troubleshooting guide
@@ -465,10 +484,11 @@ Voice-Clone-Studio/
     │   │   ├── voice_design.py
     │   │   ├── voice_changer.py
     │   │   ├── sound_effects.py
-    │   │   ├── prep_audio.py
+    │   │   ├── library_manager.py
     │   │   ├── output_history.py
     │   │   ├── train_model.py
-    │   │   └── settings.py
+    │   │   ├── settings.py
+    │   │   └── prep_audio.py         # Legacy fallback (not active in default UI)
     │   ├── ai_models/             # TTS & ASR model managers
     │   ├── ui_components/         # Modals, theme
     │   ├── gradio_filelister/     # Custom file browser component

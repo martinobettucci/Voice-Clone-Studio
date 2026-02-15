@@ -3,6 +3,17 @@
     <h3 id="input-modal-title">Enter Value</h3>
     <p id="input-modal-message" class="modal-message">Please enter a value:</p>
     <input type="text" id="input-modal-field" placeholder="Enter text..." />
+    <div id="input-modal-save-mode" class="modal-save-mode">
+      <span class="save-mode-label">Save mode</span>
+      <label>
+        <input type="radio" name="input-modal-save-mode-choice" value="new" checked />
+        Save as new
+      </label>
+      <label>
+        <input type="radio" name="input-modal-save-mode-choice" value="replace" />
+        Replace existing
+      </label>
+    </div>
     <div class="modal-error" id="input-modal-error"></div>
     <div class="modal-actions" id="input-modal-main-actions">
       <button class="modal-btn primary" id="input-modal-submit-btn" onclick="submitInputModalValue('submit', this)">Save</button>

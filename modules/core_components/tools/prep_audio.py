@@ -276,8 +276,8 @@ class PrepSamplesTool(Tool):
         show_input_modal_js = shared_state['show_input_modal_js']
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
-        SAMPLES_DIR = shared_state['SAMPLES_DIR']
-        DATASETS_DIR = shared_state['DATASETS_DIR']
+        get_tenant_samples_dir = shared_state['get_tenant_samples_dir']
+        get_tenant_datasets_dir = shared_state['get_tenant_datasets_dir']
         get_dataset_folders = shared_state['get_dataset_folders']
         get_dataset_files = shared_state['get_dataset_files']
 
@@ -333,11 +333,12 @@ class PrepSamplesTool(Tool):
                 return selected[0]
             return None
 
-        def get_dataset_dir(folder):
+        def get_dataset_dir(folder, request: gr.Request = None):
             """Get directory for a dataset folder."""
+            datasets_dir = get_tenant_datasets_dir(request=request, strict=True)
             if folder and folder not in ("(No folders)", "(Select Dataset)"):
-                return DATASETS_DIR / folder
-            return DATASETS_DIR
+                return datasets_dir / folder
+            return datasets_dir
 
         # ===== Mode switching =====
 
@@ -365,22 +366,22 @@ class PrepSamplesTool(Tool):
 
         # ===== Selection handlers =====
 
-        def on_sample_selection_change(lister_value):
+        def on_sample_selection_change(lister_value, request: gr.Request):
             """Handle sample selection - load into editor and transcription."""
             sample_name = get_selected_sample_name(lister_value)
             if not sample_name:
                 return gr.update(visible=False), gr.update(visible=True), "", ""
 
-            audio_path, ref_text, info_text = load_sample_details(sample_name)
+            audio_path, ref_text, info_text = load_sample_details(sample_name, request=request, strict=True)
             return gr.update(visible=True, value=audio_path), gr.update(visible=False, value=None), ref_text, info_text
 
-        def on_dataset_selection_change(folder, lister_value):
+        def on_dataset_selection_change(folder, lister_value, request: gr.Request):
             """Load audio and transcript for selected dataset item."""
             filename = get_selected_filename(lister_value)
             if not filename:
                 return gr.update(visible=False), gr.update(visible=True), "", ""
 
-            base_dir = get_dataset_dir(folder)
+            base_dir = get_dataset_dir(folder, request=request)
             audio_path = base_dir / filename
             txt_path = audio_path.with_suffix(".txt")
 
@@ -397,14 +398,14 @@ class PrepSamplesTool(Tool):
 
         # ===== File load (samples mode) =====
 
-        def on_prep_audio_load_handler(audio_file):
+        def on_prep_audio_load_handler(audio_file, request: gr.Request):
             """When audio/video is loaded via file input."""
             if audio_file is None:
                 return gr.update(), ""
             try:
                 if is_video_file(audio_file):
                     print(f"{_DIM}Video file detected: {Path(audio_file).name}{_RESET}")
-                    audio_path, message = extract_audio_from_video(audio_file)
+                    audio_path, message = extract_audio_from_video(audio_file, request)
                     if audio_path:
                         duration = get_audio_duration(audio_path)
                         info = f"[VIDEO] Audio extracted\nDuration: {format_time(duration)} ({duration:.2f}s)"
@@ -420,7 +421,7 @@ class PrepSamplesTool(Tool):
 
         # ===== Delete handler (unified) =====
 
-        def delete_handler(action, data_type, sample_lister, dataset_lister, folder):
+        def delete_handler(action, data_type, sample_lister, dataset_lister, folder, request: gr.Request):
             """Delete selected items or folder based on current mode."""
             no_update = gr.update(), gr.update(), gr.update(), gr.update()
             if not action or not action.strip():
@@ -431,13 +432,13 @@ class PrepSamplesTool(Tool):
                 if not folder or folder in ("(No folders)", "(Select Dataset)"):
                     return "No folder selected", gr.update(), gr.update(), gr.update()
 
-                folder_path = DATASETS_DIR / folder
+                folder_path = get_tenant_datasets_dir(request=request, strict=True) / folder
                 if not folder_path.exists():
                     return f"Folder '{folder}' not found", gr.update(), gr.update(), gr.update()
 
                 try:
                     shutil.rmtree(str(folder_path))
-                    updated_folders = ["(Select Dataset)"] + get_dataset_folders()
+                    updated_folders = ["(Select Dataset)"] + get_dataset_folders(request=request, strict=True)
                     return (f"Deleted folder '{folder}'",
                             gr.update(),
                             gr.update(value=[]),
@@ -452,7 +453,7 @@ class PrepSamplesTool(Tool):
                 if not dataset_lister or not dataset_lister.get("selected"):
                     return "No file(s) selected", gr.update(), gr.update(), gr.update()
 
-                base_dir = get_dataset_dir(folder)
+                base_dir = get_dataset_dir(folder, request=request)
                 deleted_count = 0
                 errors = []
 
@@ -468,7 +469,7 @@ class PrepSamplesTool(Tool):
                     except Exception as e:
                         errors.append(f"{filename}: {str(e)}")
 
-                updated = get_dataset_files(folder)
+                updated = get_dataset_files(folder, request=request, strict=True)
                 if errors:
                     msg = f"Deleted {deleted_count} file(s), {len(errors)} error(s): {'; '.join(errors)}"
                 else:
@@ -483,6 +484,7 @@ class PrepSamplesTool(Tool):
                     return "No sample selected", gr.update(), gr.update(), gr.update()
 
                 import os
+                sample_dir = get_tenant_samples_dir(request=request, strict=True)
                 deleted_count = 0
                 errors = []
 
@@ -490,25 +492,25 @@ class PrepSamplesTool(Tool):
                     from modules.core_components.tools import strip_sample_extension
                     sample_name = strip_sample_extension(display_name)
                     try:
-                        wav_path = SAMPLES_DIR / f"{sample_name}.wav"
+                        wav_path = sample_dir / f"{sample_name}.wav"
                         if wav_path.exists():
                             os.remove(wav_path)
-                        json_path = SAMPLES_DIR / f"{sample_name}.json"
+                        json_path = sample_dir / f"{sample_name}.json"
                         if json_path.exists():
                             os.remove(json_path)
                         for model_size in ["0.6B", "1.7B"]:
-                            cache_path = get_prompt_cache_path(sample_name, model_size)
+                            cache_path = get_prompt_cache_path(sample_name, model_size, request=request, strict=True)
                             if cache_path.exists():
                                 os.remove(cache_path)
                         # Also delete LuxTTS cache
-                        luxtts_cache = SAMPLES_DIR / f"{sample_name}_luxtts.pt"
+                        luxtts_cache = sample_dir / f"{sample_name}_luxtts.pt"
                         if luxtts_cache.exists():
                             os.remove(luxtts_cache)
                         deleted_count += 1
                     except Exception as e:
                         errors.append(f"{sample_name}: {str(e)}")
 
-                updated = get_sample_choices()
+                updated = get_sample_choices(request=request, strict=True)
                 if errors:
                     msg = f"Deleted {deleted_count} sample(s), {len(errors)} error(s): {'; '.join(errors)}"
                 else:
@@ -517,26 +519,27 @@ class PrepSamplesTool(Tool):
 
         # ===== Cache clear (samples only) =====
 
-        def clear_sample_cache_handler(lister_value):
+        def clear_sample_cache_handler(lister_value, request: gr.Request):
             """Clear voice prompt cache for a sample."""
             sample_name = get_selected_sample_name(lister_value)
             if not sample_name:
                 return "No sample selected", gr.update()
             try:
                 import os
+                sample_dir = get_tenant_samples_dir(request=request, strict=True)
                 deleted = []
                 for model_size in ["0.6B", "1.7B"]:
-                    cache_path = get_prompt_cache_path(sample_name, model_size)
+                    cache_path = get_prompt_cache_path(sample_name, model_size, request=request, strict=True)
                     if cache_path.exists():
                         os.remove(cache_path)
                         deleted.append(model_size)
                 # Also clear LuxTTS cache
-                luxtts_cache = SAMPLES_DIR / f"{sample_name}_luxtts.pt"
+                luxtts_cache = sample_dir / f"{sample_name}_luxtts.pt"
                 if luxtts_cache.exists():
                     os.remove(luxtts_cache)
                     deleted.append("LuxTTS")
                 if deleted:
-                    _, _, new_info = load_sample_details(sample_name)
+                    _, _, new_info = load_sample_details(sample_name, request=request, strict=True)
                     return f"Cache cleared for: {', '.join(deleted)}", new_info
                 return "No cache files found", gr.update()
             except Exception as e:
@@ -602,41 +605,43 @@ class PrepSamplesTool(Tool):
                 return f"Error transcribing: {str(e)}", ""
 
         # ===== Save handlers =====
-        def _do_save_sample(clean_name, audio, transcription):
+        def _do_save_sample(clean_name, audio, transcription, request: gr.Request):
             """Perform the actual sample save (shared by initial save and overwrite)."""
             import json, os
 
             cleaned_text = re.sub(r'\[.*?\]\s*', '', transcription).strip() if transcription else ""
 
+            sample_dir = get_tenant_samples_dir(request=request, strict=True)
+            sample_dir.mkdir(parents=True, exist_ok=True)
             audio_path = Path(audio).resolve()
-            original_path = (SAMPLES_DIR / f"{clean_name}.wav").resolve()
+            original_path = (sample_dir / f"{clean_name}.wav").resolve()
             audio_unmodified = audio_path == original_path
 
             meta = {"Type": "Sample", "Text": cleaned_text}
-            json_path = SAMPLES_DIR / f"{clean_name}.json"
+            json_path = sample_dir / f"{clean_name}.json"
             json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
             if audio_unmodified:
                 return (f"Sample '{clean_name}' updated (text only)",
-                        get_sample_choices(), gr.update(), gr.update())
+                        get_sample_choices(request=request, strict=True), gr.update(), gr.update())
 
             audio_data, sr = sf.read(audio)
-            sf.write(str(SAMPLES_DIR / f"{clean_name}.wav"), audio_data, sr)
+            sf.write(str(sample_dir / f"{clean_name}.wav"), audio_data, sr)
 
             cleared = []
             for model_size in ["0.6B", "1.7B"]:
-                cache_path = get_prompt_cache_path(clean_name, model_size)
+                cache_path = get_prompt_cache_path(clean_name, model_size, request=request, strict=True)
                 if cache_path.exists():
                     os.remove(cache_path)
                     cleared.append(model_size)
 
             cache_msg = f", cache cleared ({', '.join(cleared)})" if cleared else ""
             return (f"Sample '{clean_name}' saved (audio + text{cache_msg})",
-                    get_sample_choices(), gr.update(), gr.update())
+                    get_sample_choices(request=request, strict=True), gr.update(), gr.update())
 
-        def _do_save_dataset(clean_name, audio, transcription, folder):
+        def _do_save_dataset(clean_name, audio, transcription, folder, request: gr.Request):
             """Perform the actual dataset clip save (shared by initial save and overwrite)."""
-            base_dir = get_dataset_dir(folder)
+            base_dir = get_dataset_dir(folder, request=request)
             base_dir.mkdir(parents=True, exist_ok=True)
             results = []
 
@@ -666,11 +671,11 @@ class PrepSamplesTool(Tool):
                     results.append(f"Error saving transcript: {str(e)}")
 
             msg = " | ".join(results) if results else "Nothing to save"
-            updated_files = get_dataset_files(folder)
+            updated_files = get_dataset_files(folder, request=request, strict=True)
             return msg, gr.update(), updated_files, gr.update()
 
         def handle_input_modal(input_value, audio, transcription, folder, language, transcribe_model,
-                               split_min, split_max, silence_trim, discard_under):
+                               split_min, split_max, silence_trim, discard_under, request: gr.Request):
             """Process input modal results for save sample/dataset, auto-split, and create folder."""
             # 4 outputs: prep_status, sample_lister, dataset_lister, folder_dropdown
             no_update = gr.update(), gr.update(), gr.update(), gr.update()
@@ -696,7 +701,7 @@ class PrepSamplesTool(Tool):
                         return "Invalid sample name", gr.update(), gr.update(), gr.update()
 
                     try:
-                        return _do_save_sample(clean_name, audio, transcription)
+                        return _do_save_sample(clean_name, audio, transcription, request=request)
                     except Exception as e:
                         return f"Error saving sample: {str(e)}", gr.update(), gr.update(), gr.update()
 
@@ -723,7 +728,7 @@ class PrepSamplesTool(Tool):
                         return "Select a dataset folder first", gr.update(), gr.update(), gr.update()
 
                     try:
-                        return _do_save_dataset(clean_name, audio, transcription, folder)
+                        return _do_save_dataset(clean_name, audio, transcription, folder, request=request)
                     except Exception as e:
                         return f"Error saving: {str(e)}", gr.update(), gr.update(), gr.update()
 
@@ -744,7 +749,7 @@ class PrepSamplesTool(Tool):
                     engine, asr_size = parse_asr_model(transcribe_model)
                     status, files = auto_split_audio_handler(
                         clip_prefix, audio, folder, language, engine, asr_size or "Large",
-                        split_min, split_max, silence_trim, discard_under
+                        split_min, split_max, silence_trim, discard_under, request=request
                     )
                     return status, gr.update(), files, gr.update()
 
@@ -762,14 +767,14 @@ class PrepSamplesTool(Tool):
                     if not folder_name:
                         return "Invalid folder name", gr.update(), gr.update(), gr.update()
 
-                    folder_path = DATASETS_DIR / folder_name
+                    folder_path = get_tenant_datasets_dir(request=request, strict=True) / folder_name
                     if folder_path.exists():
                         return (f"Folder '{folder_name}' already exists",
                                 gr.update(), gr.update(), gr.update())
 
                     try:
                         folder_path.mkdir(parents=True, exist_ok=True)
-                        updated_folders = ["(Select Dataset)"] + get_dataset_folders()
+                        updated_folders = ["(Select Dataset)"] + get_dataset_folders(request=request, strict=True)
                         return (f"Created folder '{folder_name}'",
                                 gr.update(),
                                 gr.update(),
@@ -783,14 +788,14 @@ class PrepSamplesTool(Tool):
 
         # ===== Batch transcribe (dataset mode only) =====
 
-        def batch_transcribe_handler(folder, replace_existing, language, transcribe_model, progress=gr.Progress()):
+        def batch_transcribe_handler(folder, replace_existing, language, transcribe_model, request: gr.Request, progress=gr.Progress()):
             """Batch transcribe all audio files in a dataset folder."""
             if not folder or folder in ("(No folders)", "(Select Dataset)"):
                 return "Please select a dataset folder first."
 
             try:
                 engine, asr_size = parse_asr_model(transcribe_model)
-                base_dir = DATASETS_DIR / folder
+                base_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
                 if not base_dir.exists():
                     return f"Folder not found: {folder}"
 
@@ -836,9 +841,9 @@ class PrepSamplesTool(Tool):
                 else:
                     if not asr_manager.whisper_available:
                         return "Whisper not available. Use VibeVoice ASR instead."
-                    progress(0.05, desc=f"Loading Whisper ({size or 'Medium'})...")
+                    progress(0.05, desc=f"Loading Whisper ({asr_size or 'Medium'})...")
                     try:
-                        model = asr_manager.get_whisper(size=size or "Medium")
+                        model = asr_manager.get_whisper(size=asr_size or "Medium")
                         status_log.append("Loaded Whisper model")
                     except ImportError as e:
                         return f"Error: {str(e)}"
@@ -1168,7 +1173,7 @@ class PrepSamplesTool(Tool):
 
         def auto_split_audio_handler(clip_prefix, audio_file, folder, language, engine, asr_size,
                                      split_min=4.0, split_max=20.0, silence_trim=1.0,
-                                     discard_under=1.0, progress=gr.Progress()):
+                                     discard_under=1.0, request: gr.Request = None, progress=gr.Progress()):
             """Auto-split a long audio file into training clips using word-level timestamps.
 
             Supports two engines:
@@ -1337,7 +1342,7 @@ class PrepSamplesTool(Tool):
                 if len(data.shape) > 1:
                     data = np.mean(data, axis=1)
 
-                base_dir = DATASETS_DIR / folder
+                base_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
                 base_dir.mkdir(parents=True, exist_ok=True)
 
                 # Find the next available clip number (avoid overwriting existing clips)
@@ -1393,7 +1398,7 @@ class PrepSamplesTool(Tool):
                     play_completion_beep()
 
                 # Refresh file list
-                updated_files = get_dataset_files(folder)
+                updated_files = get_dataset_files(folder, request=request, strict=True)
                 status_msg = (f"Created {saved_count} clips from {duration:.1f}s audio "
                               f"(saved to {folder}/)")
                 if engine == "Qwen3 ASR" and duration > 300:
@@ -1451,8 +1456,11 @@ class PrepSamplesTool(Tool):
         )
 
         # --- Dataset lister events ---
+        def on_dataset_folder_change(folder, request: gr.Request):
+            return get_dataset_files(folder, request=request, strict=True)
+
         components['finetune_folder_dropdown'].change(
-            lambda folder: get_dataset_files(folder),
+            on_dataset_folder_change,
             inputs=[components['finetune_folder_dropdown']],
             outputs=[components['dataset_lister']]
         )
@@ -1494,12 +1502,12 @@ class PrepSamplesTool(Tool):
         )
 
         # --- Auto-refresh when tab is selected ---
-        def on_prep_tab_select(data_type, folder):
+        def on_prep_tab_select(data_type, folder, request: gr.Request):
             """Refresh all file lists when Prep Audio tab is selected."""
-            sample_files = get_sample_choices()
-            folder_choices = ["(Select Dataset)"] + get_dataset_folders()
+            sample_files = get_sample_choices(request=request, strict=True)
+            folder_choices = ["(Select Dataset)"] + get_dataset_folders(request=request, strict=True)
             if is_dataset_mode(data_type) and folder and folder not in ("(No folders)", "(Select Dataset)"):
-                dataset_files = get_dataset_files(folder)
+                dataset_files = get_dataset_files(folder, request=request, strict=True)
             else:
                 dataset_files = gr.update()
             return sample_files, gr.update(choices=folder_choices), dataset_files
@@ -1623,17 +1631,18 @@ class PrepSamplesTool(Tool):
             context="save_dataset_"
         )
 
-        def get_existing_files(data_type, folder):
+        def get_existing_files(data_type, folder, request: gr.Request):
             """Return JSON list of existing file names (without extension) for overwrite detection."""
             import json as json_mod
             if is_dataset_mode(data_type):
-                base_dir = get_dataset_dir(folder)
+                base_dir = get_dataset_dir(folder, request=request)
                 if base_dir.exists():
                     names = [f.stem for f in base_dir.glob("*.wav")]
                     return json_mod.dumps(names)
                 return "[]"
             else:
-                names = [f.stem for f in SAMPLES_DIR.glob("*.wav")]
+                sample_dir = get_tenant_samples_dir(request=request, strict=True)
+                names = [f.stem for f in sample_dir.glob("*.wav")]
                 return json_mod.dumps(names)
 
         save_js = f"""

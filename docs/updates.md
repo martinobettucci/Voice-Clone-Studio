@@ -1,5 +1,49 @@
 # Version History
 
+## February 15, 2026
+#### Version 1.7.1 - Unified Library Manager + Standalone Help Guide
+
+**Library Manager Unification**
+- **Prep Workflows Consolidated** - Sample prep + dataset prep flows are now unified inside Library Manager
+- **3-Subtab UX** - `Samples`, `Datasets`, and `Processing Studio` split workflows by task while keeping full feature parity
+- **Prep Samples Removed from Main Tabs** - Library Manager is now the active path for all sample/dataset preparation operations
+- **Processing Parity** - Upload audio/video, extract audio from video, editor trim flow, denoise/normalize/mono, ASR, save to samples/datasets, batch transcribe, and auto-split are all available in Library Manager
+
+**Help Guide**
+- **Top-Level Help Tab** - Help Guide moved out of Settings into its own dedicated tab
+- **Updated Topics** - Help now documents all current active tabs (including detailed Library Manager guidance)
+- **Settings Visibility Note** - Help explicitly documents that Settings requires `--allow-config`
+
+**Runtime & Tool Visibility**
+- **Settings Gating** - Settings/config mutation remains disabled unless app is launched with `--allow-config`
+- **Default Tenant Runtime Option** - `--default-tenant <id>` fallback remains supported for trusted deployments
+- **Tool Toggle Migration** - Legacy `enabled_tools[\"Prep Samples\"]` now maps forward to `enabled_tools[\"Library Manager\"]` when needed
+
+## February 13, 2026
+#### Version 1.7.0 - Multi-Tenant Library Manager (SaaS Ready)
+
+**Library Manager**
+- **New Library Manager Tool** - Dedicated tab for browser-based sample and dataset management
+- **Bulk Uploads** - Upload multiple audio/video files to Samples or Dataset folders
+- **Transcript Editing** - Edit/save sample metadata transcripts and dataset `.txt` transcripts directly in UI
+- **Dataset Folder Management** - Create/delete dataset folders from the browser
+- **Batch Transcribe** - Batch ASR transcription for selected dataset folders
+
+**Multi-Tenant Isolation**
+- **Tenant Header Enforcement** - Tenant-scoped actions now require tenant header (default `X-Tenant-Id`)
+- **Tenant Path Routing** - Samples, datasets, outputs, temp files, and trained model artifacts are resolved under `tenants/<tenant-id>/`
+- **TTS Cache Isolation** - Qwen/Lux prompt cache files are now tenant-scoped
+
+**Quota Controls**
+- **Per-file upload cap** - Default 200MB limit per uploaded file
+- **Per-tenant media quota** - Default 5GB cap across samples + datasets
+- **Usage Meter** - Tenant storage usage is shown in Library Manager
+
+**Settings + Migration**
+- **New Settings Controls** - Tenant header name, per-file limit, and per-tenant quota are configurable
+- **Migration Script** - Added `scripts/migrate_to_tenant_storage.py` for moving/copying legacy shared assets into tenant storage
+- **Runtime Controls** - Added `--default-tenant <id>` fallback routing and `--allow-config` to explicitly enable Settings/config mutation APIs
+
 ## February 11, 2026
 #### Version 1.6.0 - Chatterbox TTS & Voice Changer
 

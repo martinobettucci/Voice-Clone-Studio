@@ -11,7 +11,18 @@ import json
 import markdown
 import platform
 from pathlib import Path
+from typing import Any
 # from modules.core_components.tool_base import ToolConfig, Tool
+from modules.core_components.tenant_context import (
+    TenantResolutionError,
+    tenant_error_message,
+    validate_tenant_id,
+)
+from modules.core_components.tenant_storage import (
+    BaseStoragePaths,
+    TenantPaths,
+    TenantStorageService,
+)
 
 # Import all tool modules here
 from modules.core_components.tools import voice_clone
@@ -19,12 +30,13 @@ from modules.core_components.tools import voice_changer
 from modules.core_components.tools import voice_presets
 from modules.core_components.tools import conversation
 from modules.core_components.tools import voice_design
-from modules.core_components.tools import prep_audio
+from modules.core_components.tools import library_manager
 from modules.core_components.tools import train_model
 from modules.core_components.tools import sound_effects
 from modules.core_components.tools import prompt_manager
 from modules.core_components.tools import output_history
 from modules.core_components.tools import settings
+from modules.core_components import help_page
 
 # Registry of available tools
 # Format: 'tool_name': (module, ToolConfig)
@@ -34,13 +46,51 @@ ALL_TOOLS = {
     'voice_presets': (voice_presets, voice_presets.VoicePresetsTool.config),
     'conversation': (conversation, conversation.ConversationTool.config),
     'voice_design': (voice_design, voice_design.VoiceDesignTool.config),
-    'prep_audio': (prep_audio, prep_audio.PrepSamplesTool.config),
+    'library_manager': (library_manager, library_manager.LibraryManagerTool.config),
     'train_model': (train_model, train_model.TrainModelTool.config),
     'sound_effects': (sound_effects, sound_effects.SoundEffectsTool.config),
     'prompt_manager': (prompt_manager, prompt_manager.PromptManagerTool.config),
     'output_history': (output_history, output_history.OutputHistoryTool.config),
+    'help_guide': (help_page, help_page.HelpGuideTool.config),
     'settings': (settings, settings.SettingsTool.config),
 }
+
+_RUNTIME_ALLOW_CONFIG_API = False
+_RUNTIME_DEFAULT_TENANT = None
+
+
+def set_runtime_options(default_tenant=None, allow_config=None):
+    """Set runtime-only options that are not persisted to config.json."""
+    global _RUNTIME_ALLOW_CONFIG_API, _RUNTIME_DEFAULT_TENANT, _tenant_service
+
+    if allow_config is not None:
+        _RUNTIME_ALLOW_CONFIG_API = bool(allow_config)
+
+    if default_tenant is not None:
+        tenant = str(default_tenant).strip()
+        if tenant and not validate_tenant_id(tenant):
+            raise ValueError(
+                "Invalid default tenant id. Expected pattern: [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}"
+            )
+        _RUNTIME_DEFAULT_TENANT = tenant or None
+    else:
+        _RUNTIME_DEFAULT_TENANT = None
+
+    if _tenant_service is not None:
+        _tenant_service.update_default_tenant(_RUNTIME_DEFAULT_TENANT)
+
+    return get_runtime_options()
+
+
+def get_runtime_options():
+    return {
+        "allow_config": bool(_RUNTIME_ALLOW_CONFIG_API),
+        "default_tenant": _RUNTIME_DEFAULT_TENANT,
+    }
+
+
+def is_config_api_enabled():
+    return bool(_RUNTIME_ALLOW_CONFIG_API)
 
 
 def get_tool_registry():
@@ -63,6 +113,11 @@ def get_enabled_tools(user_config):
 
     enabled_tools = []
     for name, (module, config) in ALL_TOOLS.items():
+        if config.name == "Help Guide":
+            enabled_tools.append((module, config))
+            continue
+        if config.name == "Settings" and not is_config_api_enabled():
+            continue
         # Default to enabled if not specified
         is_enabled = tool_settings.get(config.name, config.enabled)
         if is_enabled:
@@ -125,6 +180,7 @@ def create_enabled_tools(shared_state):
         except Exception as e:
             print(f"Warning: Failed to create tool '{config.name}': {e}")
 
+    shared_state["tool_components"] = tool_components
     return tool_components
 
 
@@ -153,11 +209,19 @@ __all__ = [
     'get_tool_registry',
     'get_enabled_tools',
     'save_tool_settings',
+    'set_runtime_options',
+    'get_runtime_options',
+    'is_config_api_enabled',
     'create_enabled_tools',
     'setup_tool_events',
     'PROJECT_ROOT',
     'CONFIG_FILE',
     'get_configured_dir',
+    'get_base_storage_paths',
+    'get_tenant_service',
+    'resolve_tenant_paths',
+    'format_tenant_usage_meter',
+    'configure_tts_manager_for_tenant',
     'load_config',
     'save_config',
     'save_preference',
@@ -212,6 +276,63 @@ def get_configured_dir(folder_key, default):
     """
     config = load_config()
     return PROJECT_ROOT / config.get(folder_key, default)
+
+
+_tenant_service = None
+
+
+def get_base_storage_paths(config=None):
+    """Get configured base paths before tenant routing is applied."""
+    cfg = config or load_config()
+    return BaseStoragePaths(
+        samples_dir=PROJECT_ROOT / cfg.get("samples_folder", "samples"),
+        datasets_dir=PROJECT_ROOT / cfg.get("datasets_folder", "datasets"),
+        output_dir=PROJECT_ROOT / cfg.get("output_folder", "output"),
+        trained_models_dir=PROJECT_ROOT / cfg.get("trained_models_folder", "models"),
+        temp_dir=PROJECT_ROOT / cfg.get("temp_folder", "temp"),
+    )
+
+
+def get_tenant_service(config=None):
+    """Get singleton tenant storage service, refreshed from config when needed."""
+    global _tenant_service
+    cfg = config or load_config()
+    base_paths = get_base_storage_paths(cfg)
+    header_name = cfg.get("tenant_header_name", "X-Tenant-Id")
+    file_limit = cfg.get("tenant_file_limit_mb", 200)
+    quota_gb = cfg.get("tenant_media_quota_gb", 5)
+
+    if _tenant_service is None:
+        _tenant_service = TenantStorageService(
+            base_paths=base_paths,
+            tenant_header_name=header_name,
+            tenant_file_limit_mb=file_limit,
+            tenant_media_quota_gb=quota_gb,
+            default_tenant_id=_RUNTIME_DEFAULT_TENANT,
+        )
+    else:
+        _tenant_service.base_paths = base_paths
+        _tenant_service.update_header_name(header_name)
+        _tenant_service.update_limits(file_limit, quota_gb)
+        _tenant_service.update_default_tenant(_RUNTIME_DEFAULT_TENANT)
+
+    return _tenant_service
+
+
+def resolve_tenant_paths(request=None, required=True, config=None):
+    """Resolve tenant paths from request header."""
+    service = get_tenant_service(config=config)
+    return service.get_tenant_paths(request=request, required=required)
+
+
+def format_tenant_usage_meter(usage_summary):
+    """Render compact usage meter text for UI labels."""
+    used = usage_summary.get("used_bytes", 0)
+    limit = usage_summary.get("limit_bytes", 0)
+    pct = usage_summary.get("percent", 0.0)
+    from modules.core_components.tenant_storage import format_bytes
+
+    return f"Tenant storage: {format_bytes(used)} / {format_bytes(limit)} ({pct:.1f}%)"
 
 # Shared CSS for all tools
 # - Hides trigger widgets used by modal system
@@ -282,9 +403,11 @@ def load_config():
     """
     default_config = {
         "transcribe_model": "Whisper",
+        "preferred_asr_engine": "Qwen3 ASR",
         "tts_base_size": "Large",
         "custom_voice_size": "Large",
         "voice_clone_model": "Qwen3 - Large",
+        "preferred_voice_clone_engine": "Qwen3",
         "language": "Auto",
         "conv_pause_duration": 0.5,
         "whisper_language": "Auto-detect",
@@ -299,6 +422,9 @@ def load_config():
         "temp_folder": "temp",
         "models_folder": "models",
         "trained_models_folder": "models",
+        "tenant_header_name": "X-Tenant-Id",
+        "tenant_file_limit_mb": 200,
+        "tenant_media_quota_gb": 5,
         "emotions": None,
         "conv_model_type": "Qwen Speakers",
         "conv_model_size": "Large",
@@ -333,6 +459,26 @@ def load_config():
 
     # Migration guards for Prompt Manager endpoint config.
     config_changed = False
+    def _scalar_choice(value):
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2:
+                return value[1]
+            if len(value) == 1:
+                return value[0]
+            return ""
+        return value
+
+    # Normalize any legacy tuple/list dropdown payloads.
+    normalized_asr = _scalar_choice(default_config.get("transcribe_model"))
+    if normalized_asr != default_config.get("transcribe_model"):
+        default_config["transcribe_model"] = normalized_asr
+        config_changed = True
+
+    normalized_vc = _scalar_choice(default_config.get("voice_clone_model"))
+    if normalized_vc != default_config.get("voice_clone_model"):
+        default_config["voice_clone_model"] = normalized_vc
+        config_changed = True
+
     llm_model = str(default_config.get("llm_model", "")).strip()
     if not llm_model or llm_model.lower().endswith(".gguf"):
         default_config["llm_model"] = "gpt-4o-mini"
@@ -344,6 +490,15 @@ def load_config():
 
     if not str(default_config.get("llm_ollama_url", "")).strip():
         default_config["llm_ollama_url"] = "http://127.0.0.1:11434/v1"
+        config_changed = True
+
+    enabled_tools = default_config.get("enabled_tools", {})
+    if (
+        isinstance(enabled_tools, dict)
+        and "Prep Samples" in enabled_tools
+        and "Library Manager" not in enabled_tools
+    ):
+        enabled_tools["Library Manager"] = bool(enabled_tools["Prep Samples"])
         config_changed = True
 
     if config_changed:
@@ -369,7 +524,7 @@ def load_config():
     return default_config
 
 
-def save_config(config, key=None, value=None):
+def save_config(config, key=None, value=None, force=False):
     """Save user preferences to config file.
 
     Optionally update a single preference before saving.
@@ -379,14 +534,19 @@ def save_config(config, key=None, value=None):
         key: Optional - preference key to update before saving
         value: Optional - preference value to set
     """
+    if not force and not is_config_api_enabled():
+        return False
+
     if key is not None:
         config[key] = value
 
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
+        return True
     except Exception as e:
         print(f"Warning: Could not save config: {e}")
+        return False
 
 
 def format_help_html(markdown_text, height="70vh"):
@@ -468,28 +628,41 @@ def play_completion_beep():
 
 # ===== Sample Management Helpers (Voice Clone & related tools) =====
 
-def get_sample_choices():
-    """Get list of sample names for FileLister/dropdown.
+def _resolve_tenant_paths_or_error(request=None, strict=False, config=None):
+    """Resolve tenant paths with optional non-raising behavior."""
+    service = get_tenant_service(config=config)
+    try:
+        paths = service.get_tenant_paths(request=request, required=strict)
+        return paths, None
+    except TenantResolutionError:
+        return None, tenant_error_message(service.tenant_header_name)
 
-    Scans for .wav files (primary source), loads name from .json metadata if available.
-    Returns names with .wav extension so FileLister displays file icons.
-    Use strip_sample_extension() to get the bare name for lookups.
-    """
+
+def _tenant_error_list_entry(message: str) -> list[str]:
+    return [f"(Tenant Error) {message}"]
+
+
+def get_sample_choices(request=None, strict=False, config=None):
+    """Get list of sample names for FileLister/dropdown for current tenant."""
     import json
-    SAMPLES_DIR = get_configured_dir("samples_folder", "samples")
+
+    paths, error_msg = _resolve_tenant_paths_or_error(request=request, strict=strict, config=config)
+    if error_msg:
+        return _tenant_error_list_entry(error_msg)
+    if paths is None:
+        return ["(No samples found)"]
 
     samples = []
-    for wav_file in SAMPLES_DIR.glob("*.wav"):
+    for wav_file in paths.samples_dir.glob("*.wav"):
         json_file = wav_file.with_suffix(".json")
         name = wav_file.stem
         if json_file.exists():
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
-                    name = meta.get("name", wav_file.stem)
-            except:
+                    name = meta.get("Name", meta.get("name", wav_file.stem))
+            except Exception:
                 pass
-        # Add .wav extension for FileLister file icon display
         if not name.lower().endswith(".wav"):
             name += ".wav"
         samples.append(name)
@@ -502,17 +675,16 @@ def strip_sample_extension(name):
         return name[:-4]
     return name
 
-def get_available_samples():
-    """Get full sample data (wav path, text, metadata).
-
-    Scans for .wav files (primary source), loads metadata from .json if available.
-    Samples without .json are still included with empty ref_text.
-    """
+def get_available_samples(request=None, strict=False, config=None):
+    """Get full sample data for current tenant."""
     import json
-    SAMPLES_DIR = get_configured_dir("samples_folder", "samples")
+
+    paths, _error_msg = _resolve_tenant_paths_or_error(request=request, strict=strict, config=config)
+    if paths is None:
+        return []
 
     samples = []
-    for wav_file in SAMPLES_DIR.glob("*.wav"):
+    for wav_file in paths.samples_dir.glob("*.wav"):
         json_file = wav_file.with_suffix(".json")
         meta = {}
         name = wav_file.stem
@@ -521,9 +693,9 @@ def get_available_samples():
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
-                name = meta.get("name", wav_file.stem)
+                name = meta.get("Name", meta.get("name", wav_file.stem))
                 ref_text = meta.get("Text", meta.get("text", ""))
-            except:
+            except Exception:
                 pass
         samples.append({
             "name": name,
@@ -533,12 +705,14 @@ def get_available_samples():
         })
     return samples
 
-def get_prompt_cache_path(sample_name, model_size):
-    """Get cache path for voice prompt."""
-    samples_folder = get_configured_dir("samples_folder", "samples")
-    return samples_folder / f"{sample_name}_{model_size}.pt"
+def get_prompt_cache_path(sample_name, model_size, request=None, strict=False, config=None):
+    """Get cache path for voice prompt in tenant sample directory."""
+    paths, _error_msg = _resolve_tenant_paths_or_error(request=request, strict=strict, config=config)
+    if paths is None:
+        return get_configured_dir("samples_folder", "samples") / f"{sample_name}_{model_size}.pt"
+    return paths.samples_dir / f"{sample_name}_{model_size}.pt"
 
-def load_sample_details(sample_name):
+def load_sample_details(sample_name, request=None, strict=False, config=None):
     """
     Load full details for a sample: audio path, text, and info.
 
@@ -549,13 +723,17 @@ def load_sample_details(sample_name):
         return None, "", ""
 
     import soundfile as sf
-    samples = get_available_samples()
+    samples = get_available_samples(request=request, strict=strict, config=config)
 
     for s in samples:
         if s["name"] == sample_name:
             # Check cache status for both model sizes
-            cache_small = get_prompt_cache_path(sample_name, "0.6B").exists()
-            cache_large = get_prompt_cache_path(sample_name, "1.7B").exists()
+            cache_small = get_prompt_cache_path(
+                sample_name, "0.6B", request=request, strict=False, config=config
+            ).exists()
+            cache_large = get_prompt_cache_path(
+                sample_name, "1.7B", request=request, strict=False, config=config
+            ).exists()
 
             if cache_small and cache_large:
                 cache_status = "Qwen Cache: ⚡ Small, Large"
@@ -567,8 +745,9 @@ def load_sample_details(sample_name):
                 cache_status = "Qwen Cache: 📦 Not cached"
 
             # Check LuxTTS cache status
-            SAMPLES_DIR = get_configured_dir("samples_folder", "samples")
-            luxtts_cached = (SAMPLES_DIR / f"{sample_name}_luxtts.pt").exists()
+            paths, _error_msg = _resolve_tenant_paths_or_error(request=request, strict=False, config=config)
+            sample_dir = paths.samples_dir if paths is not None else get_configured_dir("samples_folder", "samples")
+            luxtts_cached = (sample_dir / f"{sample_name}_luxtts.pt").exists()
             lux_status = "LuxTTS: ⚡ Cached" if luxtts_cached else "LuxTTS: 📦 Not cached"
 
             try:
@@ -588,27 +767,29 @@ def load_sample_details(sample_name):
     return None, "", ""
 
 
-# ===== Dataset Management Helpers (Prep Dataset & Train Model tools) =====
+# ===== Dataset Management Helpers (Library Manager & Train Model tools) =====
 
-def get_dataset_folders():
-    """Get list of subfolders in datasets directory."""
-    DATASETS_DIR = get_configured_dir("datasets_folder", "datasets")
-    if not DATASETS_DIR.exists():
+def get_dataset_folders(request=None, strict=False, config=None):
+    """Get list of subfolders in current tenant datasets directory."""
+    paths, error_msg = _resolve_tenant_paths_or_error(request=request, strict=strict, config=config)
+    if error_msg:
+        return _tenant_error_list_entry(error_msg)
+    if paths is None or not paths.datasets_dir.exists():
         return ["(No folders)"]
-    folders = sorted([d.name for d in DATASETS_DIR.iterdir() if d.is_dir()])
+    folders = sorted([d.name for d in paths.datasets_dir.iterdir() if d.is_dir()])
     return folders if folders else ["(No folders)"]
 
 
-def get_dataset_files(folder=None):
-    """Get list of audio file names in a dataset subfolder for FileLister."""
-    DATASETS_DIR = get_configured_dir("datasets_folder", "datasets")
-    if not DATASETS_DIR.exists():
+def get_dataset_files(folder=None, request=None, strict=False, config=None):
+    """Get list of audio file names in a tenant dataset subfolder for FileLister."""
+    paths, _error_msg = _resolve_tenant_paths_or_error(request=request, strict=strict, config=config)
+    if paths is None or not paths.datasets_dir.exists():
         return []
 
     if folder and folder not in ("(No folders)", "(Select Dataset)"):
-        scan_dir = DATASETS_DIR / folder
+        scan_dir = paths.datasets_dir / folder
     else:
-        scan_dir = DATASETS_DIR
+        scan_dir = paths.datasets_dir
 
     if not scan_dir.exists():
         return []
@@ -621,7 +802,60 @@ def get_dataset_files(folder=None):
     return [f.name for f in audio_files]
 
 
-def get_or_create_voice_prompt_standalone(model, sample_name, wav_path, ref_text, model_size, progress_callback=None):
+def get_tenant_usage_summary(request=None, strict=False, config=None):
+    """Return tenant media usage summary dict or None if tenant unresolved."""
+    service = get_tenant_service(config=config)
+    paths, _error_msg = _resolve_tenant_paths_or_error(request=request, strict=strict, config=config)
+    if paths is None:
+        return None
+    return service.compute_usage_summary(paths)
+
+
+def get_tenant_path_bundle(request=None, strict=False, config=None):
+    """Return tenant path dataclass for current request."""
+    if strict:
+        return resolve_tenant_paths(request=request, required=True, config=config)
+    paths, _error_msg = _resolve_tenant_paths_or_error(request=request, strict=False, config=config)
+    return paths
+
+
+def get_tenant_samples_dir(request=None, strict=False, config=None):
+    paths = get_tenant_path_bundle(request=request, strict=strict, config=config)
+    if paths is None:
+        return get_configured_dir("samples_folder", "samples")
+    return paths.samples_dir
+
+
+def get_tenant_datasets_dir(request=None, strict=False, config=None):
+    paths = get_tenant_path_bundle(request=request, strict=strict, config=config)
+    if paths is None:
+        return get_configured_dir("datasets_folder", "datasets")
+    return paths.datasets_dir
+
+
+def get_tenant_output_dir(request=None, strict=False, config=None):
+    paths = get_tenant_path_bundle(request=request, strict=strict, config=config)
+    if paths is None:
+        return get_configured_dir("output_folder", "output")
+    return paths.output_dir
+
+
+def get_tenant_trained_models_dir(request=None, strict=False, config=None):
+    paths = get_tenant_path_bundle(request=request, strict=strict, config=config)
+    if paths is None:
+        return get_configured_dir("trained_models_folder", "models")
+    return paths.trained_models_dir
+
+
+def get_or_create_voice_prompt_standalone(
+    model,
+    sample_name,
+    wav_path,
+    ref_text,
+    model_size,
+    progress_callback=None,
+    request=None,
+):
     """
     Get cached voice prompt or create new one using tts_manager.
 
@@ -630,6 +864,7 @@ def get_or_create_voice_prompt_standalone(model, sample_name, wav_path, ref_text
     from modules.core_components.ai_models.tts_manager import get_tts_manager
 
     tts_manager = get_tts_manager()
+    tts_manager.samples_dir = get_tenant_samples_dir(request=request, strict=False)
 
     # Compute hash to check if sample has changed
     sample_hash = tts_manager.compute_sample_hash(wav_path, ref_text)
@@ -659,6 +894,15 @@ def get_or_create_voice_prompt_standalone(model, sample_name, wav_path, ref_text
     tts_manager.save_voice_prompt(sample_name, prompt_items, sample_hash, model_size)
 
     return prompt_items, False  # False = newly created
+
+
+def configure_tts_manager_for_tenant(request=None, strict=False, config=None):
+    """Ensure global TTS manager uses current tenant sample directory for caches."""
+    from modules.core_components.ai_models.tts_manager import get_tts_manager
+
+    tts_manager = get_tts_manager()
+    tts_manager.samples_dir = get_tenant_samples_dir(request=request, strict=strict, config=config)
+    return tts_manager
 
 
 def build_shared_state(
@@ -813,6 +1057,11 @@ def build_shared_state(
         'SAMPLES_DIR': directories.get('SAMPLES_DIR'),
         'DATASETS_DIR': directories.get('DATASETS_DIR'),
         'TEMP_DIR': directories.get('TEMP_DIR'),
+        'TENANT_HEADER_NAME': user_config.get("tenant_header_name", "X-Tenant-Id"),
+        'TENANT_FILE_LIMIT_MB': int(user_config.get("tenant_file_limit_mb", 200)),
+        'TENANT_MEDIA_QUOTA_GB': int(user_config.get("tenant_media_quota_gb", 5)),
+        'tenant_service': get_tenant_service(user_config),
+        'ALLOW_CONFIG_API': is_config_api_enabled(),
 
         # Constants
         'LANGUAGES': constants.get('LANGUAGES', []),
@@ -870,39 +1119,95 @@ def build_shared_state(
         'prompt_parse_apply_payload': prompt_hub.parse_apply_payload,
 
         # Helper functions
-        'get_trained_models': lambda: get_trained_models_util(directories.get('OUTPUT_DIR').parent / user_config.get("models_folder", "models")),
-        'get_trained_model_names': lambda: get_trained_model_names_util(
-            directories.get('OUTPUT_DIR').parent / user_config.get("trained_models_folder", "models")
+        'get_tenant_paths': lambda request=None, strict=False: resolve_tenant_paths(
+            request=request, required=strict, config=user_config
         ),
-        'train_model': lambda folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval, progress=None: train_model_util(
+        'get_tenant_usage_summary': lambda request=None, strict=False: get_tenant_usage_summary(
+            request=request, strict=strict, config=user_config
+        ),
+        'format_tenant_usage_meter': format_tenant_usage_meter,
+        'get_tenant_samples_dir': lambda request=None, strict=False: get_tenant_samples_dir(
+            request=request, strict=strict, config=user_config
+        ),
+        'get_tenant_datasets_dir': lambda request=None, strict=False: get_tenant_datasets_dir(
+            request=request, strict=strict, config=user_config
+        ),
+        'get_tenant_output_dir': lambda request=None, strict=False: get_tenant_output_dir(
+            request=request, strict=strict, config=user_config
+        ),
+        'get_tenant_trained_models_dir': lambda request=None, strict=False: get_tenant_trained_models_dir(
+            request=request, strict=strict, config=user_config
+        ),
+
+        'get_trained_models': lambda request=None, strict=False: get_trained_models_util(
+            get_tenant_trained_models_dir(request=request, strict=strict, config=user_config)
+        ),
+        'get_trained_model_names': lambda request=None, strict=False: get_trained_model_names_util(
+            get_tenant_trained_models_dir(request=request, strict=strict, config=user_config)
+        ),
+        'train_model': lambda folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval, progress=None, request=None: train_model_util(
             folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval,
-            user_config, directories.get('DATASETS_DIR'),
+            user_config, get_tenant_datasets_dir(request=request, strict=True, config=user_config),
             directories.get('OUTPUT_DIR').parent,  # project_root
-            play_completion_beep, progress
+            play_completion_beep, progress,
+            trained_models_root=get_tenant_trained_models_dir(request=request, strict=True, config=user_config),
         ),
 
         # Dataset management helpers
-        'get_dataset_folders': get_dataset_folders,
-        'get_dataset_files': get_dataset_files,
+        'get_dataset_folders': lambda request=None, strict=False: get_dataset_folders(
+            request=request, strict=strict, config=user_config
+        ),
+        'get_dataset_files': lambda folder=None, request=None, strict=False: get_dataset_files(
+            folder=folder, request=request, strict=strict, config=user_config
+        ),
 
         # Sample management helpers (Voice Clone & related tools)
-        'get_sample_choices': get_sample_choices,
-        'get_available_samples': get_available_samples,
-        'get_prompt_cache_path': get_prompt_cache_path,
-        'load_sample_details': load_sample_details,
+        'get_sample_choices': lambda request=None, strict=False: get_sample_choices(
+            request=request, strict=strict, config=user_config
+        ),
+        'get_available_samples': lambda request=None, strict=False: get_available_samples(
+            request=request, strict=strict, config=user_config
+        ),
+        'get_prompt_cache_path': lambda sample_name, model_size, request=None, strict=False: get_prompt_cache_path(
+            sample_name=sample_name, model_size=model_size, request=request, strict=strict, config=user_config
+        ),
+        'load_sample_details': lambda sample_name, request=None, strict=False: load_sample_details(
+            sample_name=sample_name, request=request, strict=strict, config=user_config
+        ),
         'get_or_create_voice_prompt': get_or_create_voice_prompt_standalone,  # Default mock for standalone, main app overrides
-        'refresh_samples': lambda: __import__('gradio').update(choices=get_sample_choices()),
+        'configure_tts_manager_for_tenant': lambda request=None, strict=False: configure_tts_manager_for_tenant(
+            request=request, strict=strict, config=user_config
+        ),
+        'refresh_samples': lambda request=None, strict=False: __import__('gradio').update(
+            choices=get_sample_choices(request=request, strict=strict, config=user_config)
+        ),
 
-        # Audio utilities (Prep Samples tool) - imported from audio_utils
+        # Audio utilities (shared by Library Manager and related tools)
         'is_audio_file': is_audio_file_util,
         'is_video_file': is_video_file_util,
-        'extract_audio_from_video': lambda path: extract_audio_from_video_util(path, directories.get('TEMP_DIR')),
+        'extract_audio_from_video': lambda path, request=None: extract_audio_from_video_util(
+            path, get_tenant_path_bundle(request=request, strict=True, config=user_config).temp_dir
+            if get_tenant_path_bundle(request=request, strict=True, config=user_config)
+            else directories.get('TEMP_DIR')
+        ),
         'get_audio_duration': get_audio_duration_util,
         'format_time': format_time_util,
-        'normalize_audio': lambda audio: normalize_audio_util(audio, directories.get('TEMP_DIR')),
-        'convert_to_mono': lambda audio: convert_to_mono_util(audio, directories.get('TEMP_DIR')),
+        'normalize_audio': lambda audio, request=None: normalize_audio_util(
+            audio,
+            (get_tenant_path_bundle(request=request, strict=True, config=user_config).temp_dir
+             if get_tenant_path_bundle(request=request, strict=True, config=user_config)
+             else directories.get('TEMP_DIR'))
+        ),
+        'convert_to_mono': lambda audio, request=None: convert_to_mono_util(
+            audio,
+            (get_tenant_path_bundle(request=request, strict=True, config=user_config).temp_dir
+             if get_tenant_path_bundle(request=request, strict=True, config=user_config)
+             else directories.get('TEMP_DIR'))
+        ),
         'clean_audio': lambda audio, progress=None: clean_audio_standalone(audio, progress),
-        'save_as_sample': lambda audio, text, name: save_as_sample_util(audio, text, name, directories.get('SAMPLES_DIR')),
+        'save_as_sample': lambda audio, text, name, request=None: save_as_sample_util(
+            audio, text, name, get_tenant_samples_dir(request=request, strict=True, config=user_config)
+        ),
 
         # Model downloading
         'download_model_from_huggingface': lambda model_id, progress=None: download_model_util(
@@ -919,7 +1224,15 @@ def build_shared_state(
     shared_state['delete_emotion_handler'] = lambda confirm_val, emotion_name: handle_delete_emotion(
         shared_state['_active_emotions'], confirm_val, emotion_name
     )
-    shared_state['save_preference'] = lambda k, v: save_config(shared_state['_user_config'], k, v)
+    def _save_preference(k, v):
+        # Gradio events that call this helper often declare outputs=[].
+        # Return None so these callbacks are treated as side-effect-only.
+        if not is_config_api_enabled():
+            return None
+        save_config(shared_state['_user_config'], k, v)
+        return None
+
+    shared_state['save_preference'] = _save_preference
 
     # Add managers if provided (for main app)
     if managers:

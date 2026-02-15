@@ -158,6 +158,62 @@ def get_default_asr_model(user_config=None):
     return ASR_OPTIONS[0] if ASR_OPTIONS else DEFAULT_ASR_MODEL
 
 
+def get_asr_models_for_engine(engine_key: str) -> list[str]:
+    """Return ASR model choices for an engine key."""
+    info = ASR_ENGINES.get(engine_key, {})
+    return list(info.get("choices", []))
+
+
+def coerce_choice_value(value):
+    """Normalize Gradio-style (label, value) entries to scalar values."""
+    if isinstance(value, (tuple, list)):
+        if len(value) >= 2:
+            return value[1]
+        if len(value) == 1:
+            return value[0]
+        return ""
+    return value
+
+
+def get_tts_models_for_engine(engine_key: str) -> list[str]:
+    """Return voice-clone model choices for a TTS engine key."""
+    info = TTS_ENGINES.get(engine_key, {})
+    return list(info.get("choices", []))
+
+
+def resolve_preferred_asr_engine_and_model(user_config=None) -> tuple[str, str]:
+    """Resolve preferred ASR engine/model with safe fallbacks."""
+    if user_config is None:
+        return "Qwen3 ASR", DEFAULT_ASR_MODEL
+
+    enabled = user_config.get("enabled_asr_engines", {})
+    preferred_engine = str(coerce_choice_value(user_config.get("preferred_asr_engine", "Qwen3 ASR")) or "Qwen3 ASR")
+    preferred_model = str(coerce_choice_value(user_config.get("transcribe_model", DEFAULT_ASR_MODEL)) or DEFAULT_ASR_MODEL)
+
+    candidate_engines = [preferred_engine] + [k for k in ASR_ENGINES.keys() if k != preferred_engine]
+    resolved_engine = None
+    for engine_key in candidate_engines:
+        info = ASR_ENGINES.get(engine_key)
+        if not info:
+            continue
+        if enabled.get(engine_key, info.get("default_enabled", True)):
+            resolved_engine = engine_key
+            break
+
+    if resolved_engine is None:
+        resolved_engine = next(iter(ASR_ENGINES.keys()), "Qwen3 ASR")
+
+    engine_models = get_asr_models_for_engine(resolved_engine)
+    if preferred_model in engine_models:
+        resolved_model = preferred_model
+    elif engine_models:
+        resolved_model = engine_models[-1]
+    else:
+        resolved_model = DEFAULT_ASR_MODEL
+
+    return resolved_engine, resolved_model
+
+
 def get_default_voice_clone_model(user_config=None):
     """Get the preferred default voice clone model, respecting engine visibility.
 
@@ -175,6 +231,39 @@ def get_default_voice_clone_model(user_config=None):
 
     # All engines disabled — return first option as absolute fallback
     return VOICE_CLONE_OPTIONS[0]
+
+
+def resolve_preferred_tts_engine_and_model(user_config=None) -> tuple[str, str]:
+    """Resolve preferred voice-clone engine/model with safe fallbacks."""
+    if user_config is None:
+        return "Qwen3", DEFAULT_VOICE_CLONE_MODEL
+
+    enabled = user_config.get("enabled_engines", {})
+    preferred_engine = str(coerce_choice_value(user_config.get("preferred_voice_clone_engine", "Qwen3")) or "Qwen3")
+    preferred_model = str(coerce_choice_value(user_config.get("voice_clone_model", DEFAULT_VOICE_CLONE_MODEL)) or DEFAULT_VOICE_CLONE_MODEL)
+
+    candidate_engines = [preferred_engine] + [k for k in TTS_ENGINES.keys() if k != preferred_engine]
+    resolved_engine = None
+    for engine_key in candidate_engines:
+        info = TTS_ENGINES.get(engine_key)
+        if not info:
+            continue
+        if enabled.get(engine_key, info.get("default_enabled", True)):
+            resolved_engine = engine_key
+            break
+
+    if resolved_engine is None:
+        resolved_engine = next(iter(TTS_ENGINES.keys()), "Qwen3")
+
+    engine_models = get_tts_models_for_engine(resolved_engine)
+    if preferred_model in engine_models:
+        resolved_model = preferred_model
+    elif engine_models:
+        resolved_model = engine_models[-1]
+    else:
+        resolved_model = DEFAULT_VOICE_CLONE_MODEL
+
+    return resolved_engine, resolved_model
 
 
 def check_engine_availability(user_config, save_config_fn=None):
@@ -348,6 +437,8 @@ SUPPORTED_MODELS = {
     "vibevoice-asr",
     # LuxTTS models
     "luxtts",
+    # Chatterbox models
+    "chatterbox",
     # Whisper models
     "whisper"
 }
@@ -367,8 +458,11 @@ AUDIO_CHANNELS = 1  # Mono
 
 DEFAULT_CONFIG = {
     "transcribe_model": "Whisper",
+    "preferred_asr_engine": "Qwen3 ASR",
     "tts_base_size": "Large",
     "custom_voice_size": "Large",
+    "voice_clone_model": "Qwen3 - Large",
+    "preferred_voice_clone_engine": "Qwen3",
     "language": "Auto",
     "conv_pause_duration": 0.5,
     "conv_pause_linebreak": 0.5,
