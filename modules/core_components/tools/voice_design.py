@@ -11,7 +11,6 @@ if __name__ == "__main__":
     sys.path.insert(0, str(project_root))
 import gradio as gr
 import soundfile as sf
-import shutil
 import json
 import torch
 import random
@@ -21,6 +20,12 @@ from modules.core_components.ai_models.model_utils import set_seed
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
+from modules.core_components.tools.generated_output_save import (
+    get_existing_wav_stems,
+    parse_modal_submission,
+    persist_audio_to_wav,
+    sanitize_output_name,
+)
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -88,11 +93,6 @@ class VoiceDesignTool(Tool):
                             scale=1
                         )
 
-                    components['save_to_output_checkbox'] = gr.Checkbox(
-                        label="Save to Output folder instead of Temp",
-                        value=False
-                    )
-
                     # Qwen Advanced Parameters
                     design_params = create_qwen_advanced_params(
                         include_emotion=False,
@@ -109,10 +109,11 @@ class VoiceDesignTool(Tool):
                     components['design_output_audio'] = gr.Audio(
                         label="Generated Audio",
                         type="filepath",
-                        interactive=False,
+                        interactive=True,
                     )
 
                     components['design_save_btn'] = gr.Button("Save Sample", variant="primary", interactive=False)
+                    components['design_existing_files_json'] = gr.State(value="[]")
 
         return components
 
@@ -126,7 +127,6 @@ class VoiceDesignTool(Tool):
         input_trigger = shared_state.get('input_trigger')
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         get_tenant_samples_dir = shared_state.get('get_tenant_samples_dir')
-        get_tenant_output_dir = shared_state.get('get_tenant_output_dir')
         get_tenant_paths = shared_state.get('get_tenant_paths')
         configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         play_completion_beep = shared_state.get('play_completion_beep')
@@ -134,7 +134,7 @@ class VoiceDesignTool(Tool):
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager()
 
-        def generate_voice_design_handler(text_to_generate, language, instruct, seed, save_to_output,
+        def generate_voice_design_handler(text_to_generate, language, instruct, seed,
                                           do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
                                           request: gr.Request = None,
                                           progress=gr.Progress()):
@@ -171,7 +171,7 @@ class VoiceDesignTool(Tool):
                     max_new_tokens=max_new_tokens
                 )
 
-                progress(0.8, desc=f"Saving audio ({'output' if save_to_output else 'temp'})...")
+                progress(0.8, desc="Saving preview...")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 # Ensure audio is numpy array (move to CPU if tensor)
@@ -180,23 +180,18 @@ class VoiceDesignTool(Tool):
                 elif hasattr(audio_data, "numpy"):
                     audio_data = audio_data.numpy()
 
-                if save_to_output:
-                    OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                    out_file = OUTPUT_DIR / f"voice_design_{timestamp}.wav"
-                    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                else:
-                    # Temporary previews must stay out of output history.
-                    tenant_paths = get_tenant_paths(request=request, strict=True)
-                    TEMP_DIR = tenant_paths.temp_dir
-                    out_file = TEMP_DIR / f"temp_voice_design_{timestamp}.wav"
-                    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+                # Temporary previews must stay out of output history.
+                tenant_paths = get_tenant_paths(request=request, strict=True)
+                TEMP_DIR = tenant_paths.temp_dir
+                out_file = TEMP_DIR / f"temp_voice_design_{timestamp}.wav"
+                TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
                 sf.write(str(out_file), audio_data, sr)
 
                 progress(1.0, desc="Done!")
                 if play_completion_beep:
                     play_completion_beep()
-                return str(out_file), f"Voice design generated. Save to samples to keep.\n{seed_msg}", gr.update(interactive=True)
+                return str(out_file), f"Voice design generated. Ready to save.\n{seed_msg}", gr.update(interactive=True)
 
             except Exception as e:
                 return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False)
@@ -211,7 +206,9 @@ class VoiceDesignTool(Tool):
 
             try:
                 # Clean the name
-                safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in design_name.strip())
+                safe_name = sanitize_output_name(design_name)
+                if not safe_name:
+                    return "❌ Invalid name"
 
                 # Copy audio file to samples folder
                 SAMPLES_DIR = get_tenant_samples_dir(request=request, strict=True)
@@ -219,12 +216,7 @@ class VoiceDesignTool(Tool):
                 wav_path = SAMPLES_DIR / f"{safe_name}.wav"
                 json_path = SAMPLES_DIR / f"{safe_name}.json"
 
-                # If audio is a path, copy it
-                if isinstance(audio, str):
-                    shutil.copy(audio, wav_path)
-                else:
-                    # If audio is data, save it
-                    sf.write(str(wav_path), audio, 24000)
+                persist_audio_to_wav(audio, wav_path, default_sample_rate=24000)
 
                 # Create metadata
                 metadata = {
@@ -248,7 +240,7 @@ class VoiceDesignTool(Tool):
         components['design_generate_btn'].click(
             generate_voice_design_handler,
             inputs=[components['design_text_input'], components['design_language'], components['design_instruct_input'],
-                    components['design_seed'], components['save_to_output_checkbox'],
+                    components['design_seed'],
                     components['do_sample'], components['temperature'], components['top_k'],
                     components['top_p'], components['repetition_penalty'], components['max_new_tokens']],
             outputs=[components['design_output_audio'], components['design_status'], components['design_save_btn']]
@@ -276,16 +268,39 @@ class VoiceDesignTool(Tool):
             )
 
         # Save designed voice - show modal
+        design_modal_js = show_input_modal_js(
+            title="Save Designed Voice",
+            message="Enter a name for this voice design:",
+            placeholder="e.g., Bright-Female, Deep-Male, Cheerful-Voice",
+            context="save_design_"
+        )
+
+        def get_existing_sample_names(request: gr.Request):
+            import json as json_mod
+
+            sample_dir = get_tenant_samples_dir(request=request, strict=True)
+            return json_mod.dumps(get_existing_wav_stems(sample_dir))
+
+        design_save_js = f"""
+        (existingFilesJson) => {{
+            try {{
+                window.inputModalExistingFiles = JSON.parse(existingFilesJson || '[]');
+            }} catch(e) {{
+                window.inputModalExistingFiles = [];
+            }}
+            const openModal = {design_modal_js};
+            openModal('');
+        }}
+        """
+
         components['design_save_btn'].click(
+            fn=get_existing_sample_names,
+            inputs=[],
+            outputs=[components['design_existing_files_json']],
+        ).then(
             fn=None,
-            inputs=None,
-            outputs=None,
-            js=show_input_modal_js(
-                title="Save Designed Voice",
-                message="Enter a name for this voice design:",
-                placeholder="e.g., Bright-Female, Deep-Male, Cheerful-Voice",
-                context="save_design_"
-            )
+            inputs=[components['design_existing_files_json']],
+            js=design_save_js
         )
 
         # Handle save designed voice input modal submission
@@ -293,19 +308,18 @@ class VoiceDesignTool(Tool):
             def handle_save_design_input(input_value, audio, ref_text, instruct, seed, request: gr.Request = None):
                 """Process input modal submission for saving designed voice."""
                 # Context filtering: only process if this is our context
-                if not input_value or not input_value.startswith("save_design_"):
-                    return gr.update()
+                matched, cancelled, design_name = parse_modal_submission(input_value, "save_design_")
+                if not matched:
+                    return gr.update(), gr.update()
+                if cancelled:
+                    return gr.update(), gr.update()
+                if not design_name or not design_name.strip():
+                    return "❌ Please enter a name.", gr.update()
 
-                # Extract design name from context prefix
-                # Format: "save_design_<name>_<timestamp>"
-                parts = input_value.split("_")
-                if len(parts) >= 3:
-                    # Remove context prefix and timestamp (last part)
-                    design_name = "_".join(parts[2:-1])
-                    status = save_designed_voice(audio, design_name, ref_text, instruct, seed, request=request)
+                status = save_designed_voice(audio, design_name, ref_text, instruct, seed, request=request)
+                if status.startswith("✓"):
                     return status, gr.update(interactive=False)
-
-                return gr.update(), gr.update()
+                return status, gr.update()
 
             input_trigger.change(
                 handle_save_design_input,

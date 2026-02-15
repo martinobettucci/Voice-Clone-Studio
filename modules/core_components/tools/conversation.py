@@ -16,6 +16,7 @@ import torch
 import numpy as np
 import random
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 from modules.core_components.ai_models.model_utils import (
@@ -29,6 +30,11 @@ from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
     wire_prompt_apply_listener,
+)
+from modules.core_components.tools.generated_output_save import (
+    get_existing_wav_stems,
+    parse_modal_submission,
+    save_generated_output,
 )
 
 
@@ -436,8 +442,12 @@ class ConversationTool(Tool):
                     components['conv_output_audio'] = gr.Audio(
                         label="Generated Conversation",
                         type="filepath",
-                        interactive=False,
+                        interactive=True,
                     )
+                    components['conv_save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
+                    components['conv_suggested_name'] = gr.State(value="")
+                    components['conv_metadata_text'] = gr.State(value="")
+                    components['conv_existing_files_json'] = gr.State(value="[]")
                     components['conv_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=5)
 
                     # Model-specific tips
@@ -534,6 +544,9 @@ class ConversationTool(Tool):
         get_sample_choices = shared_state['get_sample_choices']
         save_preference = shared_state['save_preference']
         get_tenant_output_dir = shared_state['get_tenant_output_dir']
+        get_tenant_paths = shared_state['get_tenant_paths']
+        show_input_modal_js = shared_state['show_input_modal_js']
+        input_trigger = shared_state['input_trigger']
         configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         CUSTOM_VOICE_SPEAKERS = shared_state['CUSTOM_VOICE_SPEAKERS']
         LANGUAGES = shared_state['LANGUAGES']
@@ -610,6 +623,19 @@ class ConversationTool(Tool):
             combined_instruct = ', '.join(instructions) if instructions else ''
             return clean_text, combined_instruct
 
+        def _error_result(message: str):
+            return None, message, "", ""
+
+        def _save_preview(audio_data, sr, filename_prefix: str, status_text: str, metadata_text: str, request: gr.Request):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tenant_paths = get_tenant_paths(request=request, strict=True)
+            temp_dir = tenant_paths.temp_dir
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            safe_prefix = "".join(c if c.isalnum() or c in "_-" else "_" for c in filename_prefix)
+            preview_file = temp_dir / f"{safe_prefix}_{timestamp}.wav"
+            sf.write(str(preview_file), audio_data, sr)
+            return str(preview_file), status_text, safe_prefix, metadata_text
+
         def generate_conversation_handler(conversation_data, pause_linebreak, pause_period, pause_comma,
                                           pause_question, pause_hyphen, language, seed, model_size,
                                           do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens,
@@ -617,7 +643,7 @@ class ConversationTool(Tool):
                                           progress=gr.Progress()):
             """Generate multi-speaker conversation with Qwen Speakers preset speakers."""
             if not conversation_data or not conversation_data.strip():
-                return None, "❌ Please enter conversation lines."
+                return _error_result("❌ Please enter conversation lines.")
 
             conversation_data = preprocess_conversation_script(conversation_data)
 
@@ -642,7 +668,7 @@ class ConversationTool(Tool):
                                     lines.append((speaker, text))
 
                 if not lines:
-                    return None, "❌ No valid conversation lines found. Use format: [N]: Text"
+                    return _error_result("❌ No valid conversation lines found. Use format: [N]: Text")
 
                 # Set seed
                 seed = int(seed) if seed is not None else -1
@@ -731,18 +757,9 @@ class ConversationTool(Tool):
 
                 final_audio = np.concatenate(conversation_audio)
 
-                # Save
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"conversation_qwen3_{timestamp}.wav"
-                sf.write(str(output_file), final_audio, sr)
-
-                # Save metadata
-                metadata_file = output_file.with_suffix(".txt")
                 speakers_used = list(set(s for s, _ in lines))
                 metadata = dedent(f"""\
-                    Generated: {timestamp}
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
                     Type: Qwen3-TTS Conversation
                     Model: CustomVoice {model_size}
                     Language: {language}
@@ -762,16 +779,16 @@ class ConversationTool(Tool):
                     """)
                 # Strip leading blank lines and left-strip all lines for flush-left output
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Conversation saved: {output_file.name}\n{len(lines)} lines | {duration:.1f}s | Seed: {seed} | {model_size}"
+                status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | {model_size}"
+                return _save_preview(final_audio, sr, "conversation_qwen3", status, metadata_out, request=request)
 
             except Exception as e:
-                return None, f"❌ Error generating conversation: {str(e)}"
+                return _error_result(f"❌ Error generating conversation: {str(e)}")
 
         def generate_conversation_base_handler(conversation_data, voice_samples_dict, pause_linebreak,
                                                pause_period, pause_comma, pause_question, pause_hyphen,
@@ -781,10 +798,10 @@ class ConversationTool(Tool):
                                                progress=gr.Progress()):
             """Generate multi-speaker conversation with Qwen Base + custom voice samples."""
             if not conversation_data or not conversation_data.strip():
-                return None, "❌ Please enter conversation lines."
+                return _error_result("❌ Please enter conversation lines.")
 
             if not voice_samples_dict:
-                return None, "❌ Please select at least one voice sample."
+                return _error_result("❌ Please select at least one voice sample.")
 
             conversation_data = preprocess_conversation_script(conversation_data)
 
@@ -810,7 +827,7 @@ class ConversationTool(Tool):
                                     lines.append((speaker_key, sample_data["wav_path"], sample_data["ref_text"], text))
 
                 if not lines:
-                    return None, "❌ No valid conversation lines found. Use format: [N]: Text (N=1-8)"
+                    return _error_result("❌ No valid conversation lines found. Use format: [N]: Text (N=1-8)")
 
                 # Set seed
                 seed = int(seed) if seed is not None else -1
@@ -916,18 +933,9 @@ class ConversationTool(Tool):
 
                 final_audio = np.concatenate(conversation_audio)
 
-                # Save
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"conversation_qwen_base_{timestamp}.wav"
-                sf.write(str(output_file), final_audio, sr)
-
-                # Save metadata
-                metadata_file = output_file.with_suffix(".txt")
                 speakers_used = list(set(k for k, _, _, _ in lines))
                 metadata = dedent(f"""\
-                    Generated: {timestamp}
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
                     Type: Qwen3-TTS Conversation (Base Model + Custom Voices)
                     Model: Base {model_size}
                     Language: {language}
@@ -946,25 +954,25 @@ class ConversationTool(Tool):
                     {conversation_data.strip()}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Conversation saved: {output_file.name}\n{len(lines)} lines | {duration:.1f}s | Seed: {seed} | Base {model_size}"
+                status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | Base {model_size}"
+                return _save_preview(final_audio, sr, "conversation_qwen_base", status, metadata_out, request=request)
 
             except Exception as e:
                 import traceback
                 print(f"Error in generate_conversation_base_handler:\n{traceback.format_exc()}")
-                return None, f"❌ Error generating conversation: {str(e)}"
+                return _error_result(f"❌ Error generating conversation: {str(e)}")
 
         def generate_vibevoice_longform_handler(script_text, voice_samples_dict, model_size, cfg_scale, seed,
                                                 num_steps, do_sample, temperature, top_k, top_p, repetition_penalty,
                                                 sentences_per_chunk=0, request: gr.Request = None, progress=gr.Progress()):
             """Generate long-form multi-speaker audio with VibeVoice (up to 90 min)."""
             if not script_text or not script_text.strip():
-                return None, "❌ Please enter a script."
+                return _error_result("❌ Please enter a script.")
 
             script_text = preprocess_conversation_script(script_text)
 
@@ -1052,7 +1060,7 @@ class ConversationTool(Tool):
                         available_samples.append((speaker_key, wav_path))
 
                 if not available_samples:
-                    return None, "❌ Please provide at least one voice sample (Speaker1)."
+                    return _error_result("❌ Please provide at least one voice sample (Speaker1).")
 
                 voice_samples = [sample for _, sample in available_samples]
                 speaker_to_sample = {speaker: idx for idx, (speaker, _) in enumerate(available_samples)}
@@ -1145,7 +1153,7 @@ class ConversationTool(Tool):
                             print(f"  Chunk {idx + 1}/{len(chunks)} produced no audio, skipping")
 
                     if not audio_segments:
-                        return None, "❌ VibeVoice failed to generate audio for any chunk"
+                        return _error_result("❌ VibeVoice failed to generate audio for any chunk")
 
                     generated_audio = np.concatenate(audio_segments)
 
@@ -1164,25 +1172,15 @@ class ConversationTool(Tool):
                         audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
                         generated_audio = audio_tensor.squeeze().numpy()
                     else:
-                        return None, "❌ No audio generated"
+                        return _error_result("❌ No audio generated")
 
-                progress(0.9, desc="Saving audio...")
+                progress(0.9, desc="Saving preview...")
 
                 if generated_audio is not None:
-
-                    # Save
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                    output_file = OUTPUT_DIR / f"Conversation_vibevoice_{timestamp}.wav"
-                    sf.write(str(output_file), generated_audio, sr)
-
-                    # Save metadata
-                    metadata_file = output_file.with_suffix(".txt")
                     duration = len(generated_audio) / sr
                     chunk_info = f"Lines per Chunk: {sentences_per_chunk}" if sentences_per_chunk > 0 else "Chunking: Off"
                     metadata = dedent(f"""\
-                        Generated: {timestamp}
+                        Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
                         Type: VibeVoice Conversation
                         Model: VibeVoice-{model_size}
                         Seed: {seed}
@@ -1195,17 +1193,18 @@ class ConversationTool(Tool):
                         {script_text.strip()}
                         """)
                     metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                    metadata_file.write_text(metadata_out, encoding="utf-8")
 
                     progress(1.0, desc="Done!")
                     if play_completion_beep:
                         play_completion_beep()
-                    return str(output_file), f"Conversation saved: {output_file.name}\n{len(lines)} lines | {duration:.1f}s | Seed: {seed}"
+                    status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | VibeVoice"
+                    return _save_preview(generated_audio, sr, "conversation_vibevoice", status, metadata_out, request=request)
+                return _error_result("❌ No audio generated.")
 
             except Exception as e:
                 import traceback
                 print(f"Error in generate_vibevoice_longform_handler:\n{traceback.format_exc()}")
-                return None, f"❌ Error generating conversation: {str(e)}"
+                return _error_result(f"❌ Error generating conversation: {str(e)}")
 
         def generate_luxtts_conversation_handler(
             conversation_data, voice_samples_dict,
@@ -1221,15 +1220,15 @@ class ConversationTool(Tool):
             then stitched together with configurable pauses between speaker turns.
             """
             if not conversation_data or not conversation_data.strip():
-                return None, "Error: Please enter conversation lines."
+                return _error_result("Error: Please enter conversation lines.")
 
             if not voice_samples_dict:
-                return None, "Error: Please select at least one voice sample."
+                return _error_result("Error: Please select at least one voice sample.")
 
             # Check all samples have transcripts
             transcript_error = validate_samples_have_transcripts(voice_samples_dict)
             if transcript_error:
-                return None, f"Error: {transcript_error}"
+                return _error_result(f"Error: {transcript_error}")
 
             conversation_data = preprocess_conversation_script(conversation_data)
 
@@ -1255,7 +1254,7 @@ class ConversationTool(Tool):
                                     lines.append((speaker_key, sample_data["wav_path"], sample_data.get("name", speaker_key), text, sample_data.get("ref_text", "")))
 
                 if not lines:
-                    return None, "Error: No valid conversation lines found. Use format: [N]: Text (N=1-8)"
+                    return _error_result("Error: No valid conversation lines found. Use format: [N]: Text (N=1-8)")
 
                 # Set seed
                 seed = int(seed) if seed is not None else -1
@@ -1303,7 +1302,7 @@ class ConversationTool(Tool):
                     all_segments.append((audio_data, line_pause))
 
                 if not all_segments:
-                    return None, "Error: No audio segments generated."
+                    return _error_result("Error: No audio segments generated.")
 
                 # Concatenate
                 progress(0.9, desc="Stitching conversation...")
@@ -1319,18 +1318,9 @@ class ConversationTool(Tool):
 
                 final_audio = np.concatenate(conversation_audio)
 
-                # Save
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"conversation_luxtts_{timestamp}.wav"
-                sf.write(str(output_file), final_audio, sr)
-
-                # Save metadata
-                metadata_file = output_file.with_suffix(".txt")
                 speakers_used = list(set(k for k, _, _, _, _ in lines))
                 metadata = dedent(f"""\
-                    Generated: {timestamp}
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
                     Type: LuxTTS Conversation
                     Seed: {seed}
                     Sample Rate: {sr}Hz
@@ -1346,18 +1336,18 @@ class ConversationTool(Tool):
                     {conversation_data.strip()}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Conversation saved: {output_file.name}\n{len(lines)} lines | {duration:.1f}s | Seed: {seed} | LuxTTS"
+                status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | LuxTTS"
+                return _save_preview(final_audio, sr, "conversation_luxtts", status, metadata_out, request=request)
 
             except Exception as e:
                 import traceback
                 print(f"Error in generate_luxtts_conversation_handler:\n{traceback.format_exc()}")
-                return None, f"Error generating LuxTTS conversation: {str(e)}"
+                return _error_result(f"Error generating LuxTTS conversation: {str(e)}")
 
         def generate_chatterbox_conversation_handler(
             conversation_data, voice_samples_dict,
@@ -1373,10 +1363,10 @@ class ConversationTool(Tool):
             English uses the fast default model; other languages use Multilingual.
             """
             if not conversation_data or not conversation_data.strip():
-                return None, "Error: Please enter conversation lines."
+                return _error_result("Error: Please enter conversation lines.")
 
             if not voice_samples_dict:
-                return None, "Error: Please select at least one voice sample."
+                return _error_result("Error: Please select at least one voice sample.")
 
             conversation_data = preprocess_conversation_script(conversation_data)
 
@@ -1404,7 +1394,7 @@ class ConversationTool(Tool):
                                     lines.append((speaker_key, sample_data["wav_path"], sample_data.get("name", speaker_key), text))
 
                 if not lines:
-                    return None, "Error: No valid conversation lines found. Use format: [N]: Text (N=1-8)"
+                    return _error_result("Error: No valid conversation lines found. Use format: [N]: Text (N=1-8)")
 
                 # Set seed
                 seed = int(seed) if seed is not None else -1
@@ -1471,7 +1461,7 @@ class ConversationTool(Tool):
                     all_segments.append((audio_data, line_pause))
 
                 if not all_segments:
-                    return None, "Error: No audio segments generated."
+                    return _error_result("Error: No audio segments generated.")
 
                 # Concatenate
                 progress(0.9, desc="Stitching conversation...")
@@ -1487,18 +1477,9 @@ class ConversationTool(Tool):
 
                 final_audio = np.concatenate(conversation_audio)
 
-                # Save
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"conversation_chatterbox_{timestamp}.wav"
-                sf.write(str(output_file), final_audio, sr)
-
-                # Save metadata
-                metadata_file = output_file.with_suffix(".txt")
                 speakers_used = list(set(k for k, _, _, _ in lines))
                 metadata = dedent(f"""\
-                    Generated: {timestamp}
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
                     Type: Chatterbox Conversation
                     Model: {model_label}
                     Language: {language}
@@ -1515,18 +1496,18 @@ class ConversationTool(Tool):
                     {conversation_data.strip()}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Conversation saved: {output_file.name}\n{len(lines)} lines | {duration:.1f}s | Seed: {seed} | Chatterbox {model_label}"
+                status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | Chatterbox {model_label}"
+                return _save_preview(final_audio, sr, "conversation_chatterbox", status, metadata_out, request=request)
 
             except Exception as e:
                 import traceback
                 print(f"Error in generate_chatterbox_conversation_handler:\n{traceback.format_exc()}")
-                return None, f"Error generating Chatterbox conversation: {str(e)}"
+                return _error_result(f"Error generating Chatterbox conversation: {str(e)}")
 
         def unified_conversation_generate(
             model_type, script,
@@ -1564,30 +1545,30 @@ class ConversationTool(Tool):
 
             if model_type == "Qwen Speakers":
                 qwen_size = "1.7B" if qwen_custom_model_size == "Large" else "0.6B"
-                return generate_conversation_handler(script, qwen_custom_pause_linebreak, qwen_custom_pause_period,
-                                                     qwen_custom_pause_comma, qwen_custom_pause_question,
-                                                     qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size,
-                                                     qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
-                                                     qwen_repetition_penalty, qwen_max_new_tokens, request, progress)
+                result = generate_conversation_handler(script, qwen_custom_pause_linebreak, qwen_custom_pause_period,
+                                                       qwen_custom_pause_comma, qwen_custom_pause_question,
+                                                       qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size,
+                                                       qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
+                                                       qwen_repetition_penalty, qwen_max_new_tokens, request, progress)
             elif model_type == "Qwen Base":
                 qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
-                return generate_conversation_base_handler(script, voice_samples, qwen_base_pause_linebreak,
-                                                          qwen_base_pause_period, qwen_base_pause_comma,
-                                                          qwen_base_pause_question, qwen_base_pause_hyphen,
-                                                          qwen_lang, qwen_seed, qwen_size,
-                                                          qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
-                                                          qwen_repetition_penalty, qwen_max_new_tokens,
-                                                          emotion_intensity, request, progress)
+                result = generate_conversation_base_handler(script, voice_samples, qwen_base_pause_linebreak,
+                                                            qwen_base_pause_period, qwen_base_pause_comma,
+                                                            qwen_base_pause_question, qwen_base_pause_hyphen,
+                                                            qwen_lang, qwen_seed, qwen_size,
+                                                            qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
+                                                            qwen_repetition_penalty, qwen_max_new_tokens,
+                                                            emotion_intensity, request, progress)
             elif model_type == "LuxTTS":
-                return generate_luxtts_conversation_handler(script, voice_samples, lux_pause_linebreak,
-                                                            seed, lux_num_steps, lux_t_shift, lux_speed,
-                                                            lux_guidance_scale, lux_rms, lux_ref_duration,
-                                                            lux_return_smooth, request, progress)
+                result = generate_luxtts_conversation_handler(script, voice_samples, lux_pause_linebreak,
+                                                              seed, lux_num_steps, lux_t_shift, lux_speed,
+                                                              lux_guidance_scale, lux_rms, lux_ref_duration,
+                                                              lux_return_smooth, request, progress)
             elif model_type == "Chatterbox":
-                return generate_chatterbox_conversation_handler(script, voice_samples, cb_pause_linebreak,
-                                                                qwen_lang, seed,
-                                                                cb_exaggeration, cb_cfg_weight, cb_temperature,
-                                                                cb_repetition_penalty, cb_top_p, request, progress)
+                result = generate_chatterbox_conversation_handler(script, voice_samples, cb_pause_linebreak,
+                                                                  qwen_lang, seed,
+                                                                  cb_exaggeration, cb_cfg_weight, cb_temperature,
+                                                                  cb_repetition_penalty, cb_top_p, request, progress)
             else:  # VibeVoice
                 if vv_model_size == "Small":
                     vv_size = "1.5B"
@@ -1595,10 +1576,19 @@ class ConversationTool(Tool):
                     vv_size = "Large (4-bit)"
                 else:
                     vv_size = "Large"
-                return generate_vibevoice_longform_handler(script, voice_samples, vv_size, vv_cfg, seed,
-                                                           vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
-                                                           vv_top_p, vv_repetition_penalty,
-                                                           vv_sentences_per_chunk, request, progress)
+                result = generate_vibevoice_longform_handler(script, voice_samples, vv_size, vv_cfg, seed,
+                                                             vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
+                                                             vv_top_p, vv_repetition_penalty,
+                                                             vv_sentences_per_chunk, request, progress)
+
+            audio_value, status, suggested_name, metadata_text = result
+            return (
+                audio_value,
+                status,
+                gr.update(interactive=bool(audio_value)),
+                suggested_name,
+                metadata_text,
+            )
 
         # Event handlers
         if components.get('prompt_assistant'):
@@ -1651,7 +1641,76 @@ class ConversationTool(Tool):
                 # Shared
                 components['conv_seed']
             ],
-            outputs=[components['conv_output_audio'], components['conv_status']]
+            outputs=[
+                components['conv_output_audio'],
+                components['conv_status'],
+                components['conv_save_btn'],
+                components['conv_suggested_name'],
+                components['conv_metadata_text'],
+            ]
+        )
+
+        save_conv_modal_js = show_input_modal_js(
+            title="Save Conversation Output",
+            message="Enter a filename for this generated conversation:",
+            placeholder="e.g., my_conversation_take",
+            context="save_conv_"
+        )
+
+        def get_conv_existing_files(request: gr.Request):
+            output_dir = get_tenant_output_dir(request=request, strict=True)
+            return json.dumps(get_existing_wav_stems(output_dir))
+
+        save_conv_js = f"""
+        (existingFilesJson, suggestedName) => {{
+            try {{
+                window.inputModalExistingFiles = JSON.parse(existingFilesJson || '[]');
+            }} catch(e) {{
+                window.inputModalExistingFiles = [];
+            }}
+            const openModal = {save_conv_modal_js};
+            openModal(suggestedName);
+        }}
+        """
+
+        components['conv_save_btn'].click(
+            fn=get_conv_existing_files,
+            inputs=[],
+            outputs=[components['conv_existing_files_json']],
+        ).then(
+            fn=None,
+            inputs=[components['conv_existing_files_json'], components['conv_suggested_name']],
+            js=save_conv_js,
+        )
+
+        def handle_conv_save_input(input_value, audio_value, metadata_text, request: gr.Request):
+            matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_conv_")
+            if not matched:
+                return gr.update(), gr.update()
+            if cancelled:
+                return gr.update(), gr.update()
+            if not chosen_name or not chosen_name.strip():
+                return "❌ Please enter a filename.", gr.update()
+            if not audio_value:
+                return "❌ No generated audio to save.", gr.update(interactive=False)
+
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+                output_path = save_generated_output(
+                    audio_value=audio_value,
+                    output_dir=output_dir,
+                    raw_name=chosen_name,
+                    metadata_text=metadata_text,
+                    default_sample_rate=24000,
+                )
+                return f"Saved: {output_path.name}", gr.update(interactive=False)
+            except Exception as e:
+                return f"❌ Save failed: {str(e)}", gr.update()
+
+        input_trigger.change(
+            handle_conv_save_input,
+            inputs=[input_trigger, components['conv_output_audio'], components['conv_metadata_text']],
+            outputs=[components['conv_status'], components['conv_save_btn']]
         )
 
         # Toggle UI based on model selection

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import gc
+import types
 
 from .model_utils import (
     get_device, get_dtype, get_attention_implementation,
@@ -17,6 +18,174 @@ from .model_utils import (
     empty_device_cache, log_gpu_memory,
     run_pre_load_hooks
 )
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    """Return True if exception looks like an out-of-memory failure."""
+    msg = str(exc).lower()
+    return "out of memory" in msg
+
+
+def _patch_qwen3_asr_low_memory_runtime(
+    qwen_model,
+    *,
+    aggressive_cleanup: bool = True,
+    debug_memory: bool = False,
+):
+    """Patch qwen-asr transformers inference to reduce transient VRAM retention."""
+    if getattr(qwen_model, "_vcs_low_memory_patch", False):
+        return
+
+    if not hasattr(qwen_model, "_infer_asr_transformers"):
+        return
+
+    def _infer_asr_transformers_low_mem(self, contexts, wavs, languages):
+        outs = []
+        texts = [self._build_text_prompt(context=c, force_language=fl) for c, fl in zip(contexts, languages)]
+
+        batch_size = self.max_inference_batch_size
+        if batch_size is None or batch_size < 1:
+            batch_size = len(texts)
+
+        for i in range(0, len(texts), batch_size):
+            sub_text = texts[i : i + batch_size]
+            sub_wavs = wavs[i : i + batch_size]
+
+            raw_inputs = self.processor(text=sub_text, audio=sub_wavs, return_tensors="pt", padding=True)
+            model_inputs = {}
+            for key, value in raw_inputs.items():
+                if isinstance(value, torch.Tensor):
+                    tensor = value.to(self.model.device)
+                    if torch.is_floating_point(tensor):
+                        tensor = tensor.to(self.model.dtype)
+                    model_inputs[key] = tensor
+                else:
+                    model_inputs[key] = value
+
+            generated = self.model.generate(**model_inputs, max_new_tokens=self.max_new_tokens)
+            sequences = generated.sequences if hasattr(generated, "sequences") else generated
+
+            # Drop large generate() internals as soon as possible to avoid retention.
+            for attr in ("past_key_values", "logits", "hidden_states", "attentions", "scores"):
+                if hasattr(generated, attr):
+                    setattr(generated, attr, None)
+
+            prompt_len = model_inputs["input_ids"].shape[1]
+            decoded = self.processor.batch_decode(
+                sequences[:, prompt_len:],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            outs.extend(list(decoded))
+
+            del decoded
+            del sequences
+            del generated
+            del model_inputs
+            del raw_inputs
+
+            if aggressive_cleanup:
+                gc.collect()
+                empty_device_cache()
+                if debug_memory:
+                    log_gpu_memory("Qwen3 ASR sub-batch cleanup")
+
+        return outs
+
+    qwen_model._infer_asr_transformers = types.MethodType(_infer_asr_transformers_low_mem, qwen_model)
+    qwen_model._vcs_low_memory_patch = True
+
+
+class _Qwen3ASRWrapper:
+    """Thin compatibility wrapper with OOM retry and aggressive cache cleanup."""
+
+    def __init__(
+        self,
+        model,
+        *,
+        max_inference_batch_size: int,
+        aggressive_cleanup: bool,
+        oom_retry: bool,
+        debug_memory: bool = False,
+    ):
+        self.model = model
+        self.max_inference_batch_size = max(1, int(max_inference_batch_size))
+        self.aggressive_cleanup = bool(aggressive_cleanup)
+        self.oom_retry = bool(oom_retry)
+        self.debug_memory = bool(debug_memory)
+
+    def _compact_device_cache(self, force_gc: bool = False):
+        if force_gc:
+            gc.collect()
+        empty_device_cache()
+
+    def _clear_generation_state(self):
+        core_model = getattr(self.model, "model", None)
+        if core_model is None:
+            return
+        for obj in (core_model, getattr(core_model, "thinker", None)):
+            if obj is None:
+                continue
+            if hasattr(obj, "_cache"):
+                obj._cache = None
+            if hasattr(obj, "rope_deltas"):
+                obj.rope_deltas = None
+
+    def transcribe(self, audio_path, **kwargs):
+        """Transcribe audio file. Returns dict with 'text' and 'language' keys."""
+        import logging
+
+        language = kwargs.get("language", None)
+
+        # Suppress "temperature not valid" warning from transformers generate()
+        gen_logger = logging.getLogger("transformers.generation.utils")
+        prev_level = gen_logger.level
+        gen_logger.setLevel(logging.ERROR)
+
+        original_batch_size = max(
+            1,
+            int(getattr(self.model, "max_inference_batch_size", self.max_inference_batch_size)),
+        )
+        self.model.max_inference_batch_size = original_batch_size
+
+        if self.debug_memory:
+            log_gpu_memory("Qwen3 ASR before transcribe")
+
+        results = None
+        try:
+            try:
+                results = self.model.transcribe(audio=audio_path, language=language)
+            except Exception as e:
+                should_retry = (
+                    self.oom_retry
+                    and torch.cuda.is_available()
+                    and _is_oom_error(e)
+                    and original_batch_size > 1
+                )
+                if not should_retry:
+                    raise
+
+                retry_batch_size = max(1, original_batch_size // 2)
+                print(
+                    "Qwen3 ASR hit OOM. Retrying with reduced inference batch size "
+                    f"({original_batch_size} -> {retry_batch_size})..."
+                )
+                self._clear_generation_state()
+                self._compact_device_cache(force_gc=True)
+                self.model.max_inference_batch_size = retry_batch_size
+                results = self.model.transcribe(audio=audio_path, language=language)
+        finally:
+            self.model.max_inference_batch_size = original_batch_size
+            self._clear_generation_state()
+            if self.aggressive_cleanup:
+                self._compact_device_cache(force_gc=True)
+            if self.debug_memory:
+                log_gpu_memory("Qwen3 ASR after transcribe")
+            gen_logger.setLevel(prev_level)
+
+        text = results[0].text if results else ""
+        detected_language = results[0].language if results else None
+        return {"text": text, "language": detected_language}
 
 
 class ASRManager:
@@ -205,6 +374,13 @@ class ASRManager:
             from qwen_asr import Qwen3ASRModel
             device = get_device()
             dtype = get_dtype(device)
+            max_inference_batch_size = max(
+                1,
+                int(self.user_config.get("qwen_asr_max_inference_batch_size", 8)),
+            )
+            aggressive_cleanup = bool(self.user_config.get("qwen_asr_aggressive_cleanup", True))
+            oom_retry = bool(self.user_config.get("qwen_asr_oom_retry", True))
+            debug_memory = bool(self.user_config.get("qwen_asr_debug_memory", False))
 
             offline_mode = self.user_config.get("offline_mode", False)
             model_to_load = resolve_model_source(
@@ -213,6 +389,9 @@ class ASRManager:
                 settings_download_name=f"Qwen3-ASR-{model_size}",
                 auto_download_when_online=True,
             )
+
+            if debug_memory:
+                log_gpu_memory("Qwen3 ASR before load")
 
             # Try loading with attention fallback
             mechanisms = get_attention_implementation(
@@ -225,7 +404,7 @@ class ASRManager:
                     kwargs = dict(
                         dtype=dtype,
                         device_map=device,
-                        max_inference_batch_size=32,
+                        max_inference_batch_size=max_inference_batch_size,
                         max_new_tokens=512,
                     )
                     # Only pass attn_implementation for non-eager (eager is default)
@@ -245,28 +424,20 @@ class ASRManager:
                         continue
                     raise e
 
-            # Create wrapper for consistent API (returns {"text": "..."} like Whisper)
-            class Qwen3ASRWrapper:
-                def __init__(self, model):
-                    self.model = model
-
-                def transcribe(self, audio_path, **kwargs):
-                    """Transcribe audio file. Returns dict with 'text' and 'language' keys."""
-                    import logging
-                    language = kwargs.get("language", None)
-                    # Suppress "temperature not valid" warning from transformers generate()
-                    gen_logger = logging.getLogger("transformers.generation.utils")
-                    prev_level = gen_logger.level
-                    gen_logger.setLevel(logging.ERROR)
-                    try:
-                        results = self.model.transcribe(audio=audio_path, language=language)
-                    finally:
-                        gen_logger.setLevel(prev_level)
-                    text = results[0].text if results else ""
-                    detected_language = results[0].language if results else None
-                    return {"text": text, "language": detected_language}
-
-            self._qwen3_asr_model = Qwen3ASRWrapper(model)
+            _patch_qwen3_asr_low_memory_runtime(
+                model,
+                aggressive_cleanup=aggressive_cleanup,
+                debug_memory=debug_memory,
+            )
+            self._qwen3_asr_model = _Qwen3ASRWrapper(
+                model,
+                max_inference_batch_size=max_inference_batch_size,
+                aggressive_cleanup=aggressive_cleanup,
+                oom_retry=oom_retry,
+                debug_memory=debug_memory,
+            )
+            if debug_memory:
+                log_gpu_memory("Qwen3 ASR after load")
             print("Qwen3 ASR model loaded!")
 
         return self._qwen3_asr_model

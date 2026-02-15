@@ -12,6 +12,7 @@ if __name__ == "__main__":
 
 import sys
 from pathlib import Path
+import json
 import gradio as gr
 import soundfile as sf
 from datetime import datetime
@@ -22,6 +23,11 @@ from gradio_filelister import FileLister
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
 from modules.core_components.emotion_manager import process_save_emotion_result, process_delete_emotion_result
+from modules.core_components.tools.generated_output_save import (
+    get_existing_wav_stems,
+    parse_modal_submission,
+    save_generated_output,
+)
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -270,8 +276,12 @@ class VoicePresetsTool(Tool):
                     components['custom_output_audio'] = gr.Audio(
                         label="Generated Audio",
                         type="filepath",
-                        interactive=False,
+                        interactive=True,
                     )
+                    components['custom_save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
+                    components['custom_suggested_name'] = gr.State(value="")
+                    components['custom_metadata_text'] = gr.State(value="")
+                    components['custom_existing_files_json'] = gr.State(value="[]")
                     components['preset_status'] = gr.Textbox(label="Status", max_lines=5, interactive=False)
 
         return components
@@ -295,6 +305,7 @@ class VoicePresetsTool(Tool):
         input_trigger = shared_state['input_trigger']
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         get_tenant_output_dir = shared_state['get_tenant_output_dir']
+        get_tenant_paths = shared_state['get_tenant_paths']
         configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         play_completion_beep = shared_state.get('play_completion_beep')
         user_config = shared_state.get('_user_config', {})
@@ -310,10 +321,10 @@ class VoicePresetsTool(Tool):
                                           request: gr.Request = None, progress=gr.Progress()):
             """Generate audio using the CustomVoice model with premium speakers."""
             if not text_to_generate or not text_to_generate.strip():
-                return None, "❌ Please enter text to generate."
+                return None, "❌ Please enter text to generate.", gr.update(interactive=False), "", ""
 
             if not speaker:
-                return None, "❌ Please select a speaker."
+                return None, "❌ Please select a speaker.", gr.update(interactive=False), "", ""
 
             try:
                 if configure_tts_manager_for_tenant:
@@ -335,16 +346,16 @@ class VoicePresetsTool(Tool):
                     max_new_tokens=max_new_tokens
                 )
 
-                progress(0.8, desc="Saving audio...")
+                progress(0.8, desc="Saving preview...")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"custom_{speaker}_{timestamp}.wav"
+                tenant_paths = get_tenant_paths(request=request, strict=True)
+                temp_dir = tenant_paths.temp_dir
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                safe_speaker = "".join(c if c.isalnum() else "_" for c in speaker)
+                output_file = temp_dir / f"custom_{safe_speaker}_{timestamp}.wav"
 
                 sf.write(str(output_file), audio_data, sr)
 
-                # Save metadata file
-                metadata_file = output_file.with_suffix(".txt")
                 metadata = dedent(f"""\
                     Generated: {timestamp}
                     Type: Custom Voice
@@ -356,18 +367,23 @@ class VoicePresetsTool(Tool):
                     Text: {' '.join(text_to_generate.split())}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 instruct_msg = f" with style: {instruct.strip()[:30]}..." if instruct and instruct.strip() else ""
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Audio saved to: {output_file.name}\nSpeaker: {speaker}{instruct_msg}\nSeed: {seed} | {model_size}"
+                return (
+                    str(output_file),
+                    f"Ready to save | Speaker: {speaker}{instruct_msg}\nSeed: {seed} | {model_size}",
+                    gr.update(interactive=True),
+                    f"custom_{safe_speaker}",
+                    metadata_out,
+                )
 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return None, f"❌ Error generating audio: {str(e)}"
+                return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", ""
 
         def generate_with_trained_model_handler(text_to_generate, language, speaker_name, checkpoint_path, instruct, seed,
                                                 do_sample=True, temperature=0.9, top_k=50, top_p=1.0,
@@ -376,21 +392,21 @@ class VoicePresetsTool(Tool):
                                                 request: gr.Request = None, progress=gr.Progress()):
             """Generate audio using a trained custom voice model checkpoint."""
             if not text_to_generate or not text_to_generate.strip():
-                return None, "❌ Please enter text to generate."
+                return None, "❌ Please enter text to generate.", gr.update(interactive=False), "", ""
 
             # Resolve ICL voice sample from dataset if enabled
             voice_sample_path = None
             ref_text = None
             if icl_enabled:
                 if not icl_dataset or icl_dataset in ["(Select Dataset)", ""]:
-                    return None, "❌ Please select a dataset for ICL mode."
+                    return None, "❌ Please select a dataset for ICL mode.", gr.update(interactive=False), "", ""
                 if not icl_sample_name or icl_sample_name.strip() == "":
-                    return None, "❌ Please select a voice sample for ICL mode."
+                    return None, "❌ Please select a voice sample for ICL mode.", gr.update(interactive=False), "", ""
 
                 datasets_dir = get_tenant_datasets_dir(request=request, strict=True)
                 audio_path = datasets_dir / icl_dataset / icl_sample_name
                 if not audio_path.exists():
-                    return None, f"❌ Audio file not found: {icl_sample_name}"
+                    return None, f"❌ Audio file not found: {icl_sample_name}", gr.update(interactive=False), "", ""
 
                 voice_sample_path = str(audio_path)
 
@@ -403,7 +419,7 @@ class VoicePresetsTool(Tool):
                     return None, (
                         f"❌ No transcript found for '{icl_sample_name}' in dataset '{icl_dataset}'.\n\n"
                         "Make sure the sample has a matching .txt file with the transcript."
-                    )
+                    ), gr.update(interactive=False), "", ""
 
             try:
                 if configure_tts_manager_for_tenant:
@@ -431,16 +447,16 @@ class VoicePresetsTool(Tool):
                     ref_text=ref_text,
                 )
 
-                progress(0.8, desc="Saving audio...")
+                progress(0.8, desc="Saving preview...")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"trained_{speaker_name}_{timestamp}.wav"
+                tenant_paths = get_tenant_paths(request=request, strict=True)
+                temp_dir = tenant_paths.temp_dir
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                safe_speaker = "".join(c if c.isalnum() else "_" for c in speaker_name)
+                output_file = temp_dir / f"trained_{safe_speaker}_{timestamp}.wav"
 
                 sf.write(str(output_file), audio_data, sr)
 
-                # Save metadata file
-                metadata_file = output_file.with_suffix(".txt")
                 icl_active = icl_enabled and voice_sample_path is not None
                 metadata = dedent(f"""\
                     Generated: {timestamp}
@@ -456,19 +472,24 @@ class VoicePresetsTool(Tool):
                     Text: {' '.join(text_to_generate.split())}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 instruct_msg = f" with style: {instruct.strip()[:30]}..." if instruct and instruct.strip() and not icl_enabled else ""
                 icl_msg = f" | ICL: {icl_dataset}/{icl_sample_name}" if icl_enabled and voice_sample_path else ""
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Audio saved: {output_file.name}\nSpeaker: {speaker_name}{instruct_msg}{icl_msg}\nSeed: {seed} | Trained Model"
+                return (
+                    str(output_file),
+                    f"Ready to save | Speaker: {speaker_name}{instruct_msg}{icl_msg}\nSeed: {seed} | Trained Model",
+                    gr.update(interactive=True),
+                    f"trained_{safe_speaker}",
+                    metadata_out,
+                )
 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return None, f"❌ Error generating audio: {str(e)}"
+                return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", ""
 
         def extract_speaker_name(selection):
             """Extract speaker name from dropdown selection."""
@@ -519,7 +540,7 @@ class VoicePresetsTool(Tool):
             if voice_type == "Qwen Speakers":
                 speaker = extract_speaker_name(premium_speaker)
                 if not speaker:
-                    return None, "❌ Please select a premium speaker"
+                    return None, "❌ Please select a premium speaker", gr.update(interactive=False), "", ""
 
                 return generate_custom_voice_handler(
                     text, lang, speaker, instruct, seed,
@@ -529,7 +550,7 @@ class VoicePresetsTool(Tool):
                 )
             else:
                 if not trained_model or trained_model in ["(No trained models found)", "(Select Model)"]:
-                    return None, "❌ Please select a trained model or train one first"
+                    return None, "❌ Please select a trained model or train one first", gr.update(interactive=False), "", ""
 
                 models = get_trained_models(request=request, strict=True)
                 model_path = None
@@ -541,7 +562,7 @@ class VoicePresetsTool(Tool):
                         break
 
                 if not model_path:
-                    return None, f"❌ Model not found: {trained_model}"
+                    return None, f"❌ Model not found: {trained_model}", gr.update(interactive=False), "", ""
 
                 return generate_with_trained_model_handler(
                     text, lang, speaker_name, model_path, instruct, seed,
@@ -732,8 +753,71 @@ class VoicePresetsTool(Tool):
                 components['custom_repetition_penalty'], components['custom_max_new_tokens'],
                 components['icl_enabled'], components['icl_dataset_dropdown'], components['icl_voice_lister']
             ],
-            outputs=[components['custom_output_audio'], components['preset_status']]
+            outputs=[
+                components['custom_output_audio'],
+                components['preset_status'],
+                components['custom_save_btn'],
+                components['custom_suggested_name'],
+                components['custom_metadata_text'],
+            ]
         )
+
+        save_vpreset_modal_js = show_input_modal_js(
+            title="Save Voice Preset Output",
+            message="Enter a filename for this generated audio:",
+            placeholder="e.g., preset_take_1",
+            context="save_vpreset_"
+        )
+
+        def get_vpreset_existing_files(request: gr.Request):
+            output_dir = get_tenant_output_dir(request=request, strict=True)
+            return json.dumps(get_existing_wav_stems(output_dir))
+
+        save_vpreset_js = f"""
+        (existingFilesJson, suggestedName) => {{
+            try {{
+                window.inputModalExistingFiles = JSON.parse(existingFilesJson || '[]');
+            }} catch(e) {{
+                window.inputModalExistingFiles = [];
+            }}
+            const openModal = {save_vpreset_modal_js};
+            openModal(suggestedName);
+        }}
+        """
+
+        components['custom_save_btn'].click(
+            fn=get_vpreset_existing_files,
+            inputs=[],
+            outputs=[components['custom_existing_files_json']],
+        ).then(
+            fn=None,
+            inputs=[components['custom_existing_files_json'], components['custom_suggested_name']],
+            js=save_vpreset_js
+        )
+
+        def handle_vpreset_save_input(input_value, audio_value, metadata_text, request: gr.Request):
+            matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_vpreset_")
+            if not matched:
+                return gr.update(), gr.update()
+            if cancelled:
+                return gr.update(), gr.update()
+            if not chosen_name or not chosen_name.strip():
+                return "❌ Please enter a filename.", gr.update()
+            if not audio_value:
+                return "❌ No generated audio to save.", gr.update(interactive=False)
+
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+                output_path = save_generated_output(
+                    audio_value=audio_value,
+                    output_dir=output_dir,
+                    raw_name=chosen_name,
+                    metadata_text=metadata_text,
+                    default_sample_rate=24000,
+                )
+                return f"Saved: {output_path.name}", gr.update(interactive=False)
+            except Exception as e:
+                return f"❌ Save failed: {str(e)}", gr.update()
 
         def delete_custom_emotion_wrapper(confirm_value, emotion_name):
             """Only process if context matches custom_emotion_."""
@@ -755,6 +839,12 @@ class VoicePresetsTool(Tool):
             handle_custom_emotion_input,
             inputs=[input_trigger, components['custom_emotion_intensity'], components['custom_temperature'], components['custom_repetition_penalty'], components['custom_top_p']],
             outputs=[components['custom_emotion_preset'], components['preset_status']]
+        )
+
+        input_trigger.change(
+            handle_vpreset_save_input,
+            inputs=[input_trigger, components['custom_output_audio'], components['custom_metadata_text']],
+            outputs=[components['preset_status'], components['custom_save_btn']]
         )
 
         # Refresh emotion dropdowns when tab is selected

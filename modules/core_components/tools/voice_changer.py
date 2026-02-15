@@ -17,13 +17,18 @@ if __name__ == "__main__":
 
 import gradio as gr
 import soundfile as sf
-import shutil
+import json
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
+from modules.core_components.tools.generated_output_save import (
+    get_existing_wav_stems,
+    parse_modal_submission,
+    save_generated_output,
+)
 from gradio_filelister import FileLister
 
 
@@ -103,7 +108,7 @@ class VoiceChangerTool(Tool):
                     components['output_audio'] = gr.Audio(
                         label="Converted Audio",
                         type="filepath",
-                        interactive=False,
+                        interactive=True,
                     )
 
                     with gr.Row():
@@ -119,6 +124,7 @@ class VoiceChangerTool(Tool):
                     components['temp_output_path'] = gr.State(value=None)
                     components['suggested_name'] = gr.State(value="")
                     components['metadata_text'] = gr.State(value="")
+                    components['existing_files_json'] = gr.State(value="[]")
 
         return components
 
@@ -129,7 +135,7 @@ class VoiceChangerTool(Tool):
         get_sample_choices = shared_state['get_sample_choices']
         get_available_samples = shared_state['get_available_samples']
         load_sample_details = shared_state['load_sample_details']
-        OUTPUT_DIR = shared_state['OUTPUT_DIR']
+        get_tenant_output_dir = shared_state['get_tenant_output_dir']
         TEMP_DIR = shared_state['TEMP_DIR']
         play_completion_beep = shared_state.get('play_completion_beep')
         show_input_modal_js = shared_state['show_input_modal_js']
@@ -272,63 +278,65 @@ class VoiceChangerTool(Tool):
             context="save_vc_"
         )
 
-        components['save_btn'].click(
-            fn=None,
-            inputs=[components['suggested_name']],
-            outputs=None,
-            js=f"""
-            (suggestedName) => {{
-                const openModal = {save_vc_modal_js};
-                openModal(suggestedName);
+        def get_vc_existing_files(request: gr.Request):
+            output_dir = get_tenant_output_dir(request=request, strict=True)
+            return json.dumps(get_existing_wav_stems(output_dir))
+
+        save_vc_js = f"""
+        (existingFilesJson, suggestedName) => {{
+            try {{
+                window.inputModalExistingFiles = JSON.parse(existingFilesJson || '[]');
+            }} catch(e) {{
+                window.inputModalExistingFiles = [];
             }}
-            """
+            const openModal = {save_vc_modal_js};
+            openModal(suggestedName);
+        }}
+        """
+
+        components['save_btn'].click(
+            fn=get_vc_existing_files,
+            inputs=[],
+            outputs=[components['existing_files_json']],
+        ).then(
+            fn=None,
+            inputs=[components['existing_files_json'], components['suggested_name']],
+            js=save_vc_js
         )
 
-        def handle_vc_input_modal(input_value, temp_path, metadata_text):
+        def handle_vc_input_modal(input_value, edited_audio, temp_path, metadata_text, request: gr.Request):
             """Process save modal submission for Voice Changer."""
-            if not input_value or not input_value.startswith("save_vc_"):
+            matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_vc_")
+            if not matched:
                 return gr.update(), gr.update()
-
-            # Check for cancel
-            raw = input_value[len("save_vc_"):]
-            parts = raw.rsplit("_", 1)
-            if len(parts) >= 2 and parts[0] == "cancel":
+            if cancelled:
                 return gr.update(), gr.update()
+            if not chosen_name or not chosen_name.strip():
+                return "❌ Please enter a filename.", gr.update()
 
-            chosen_name = parts[0] if len(parts) > 1 else raw
+            audio_to_save = edited_audio
+            if not audio_to_save and temp_path:
+                audio_to_save = temp_path
+            if not audio_to_save:
+                return "❌ No audio to save. Please convert again.", gr.update(interactive=False)
 
-            # Clean filename
-            clean_name = "".join(
-                c if c.isalnum() or c in "-_ " else "" for c in chosen_name
-            ).strip().replace(" ", "_")
-
-            if not clean_name:
-                clean_name = "voice_changer"
-
-            if not temp_path or not Path(temp_path).exists():
-                return gr.update(interactive=False), "❌ Temp file not found. Please convert again."
-
-            # Copy to output folder
-            output_path = OUTPUT_DIR / f"{clean_name}.wav"
-            # Avoid overwriting
-            counter = 1
-            while output_path.exists():
-                output_path = OUTPUT_DIR / f"{clean_name}_{counter}.wav"
-                counter += 1
-
-            shutil.copy2(temp_path, output_path)
-
-            # Save metadata
-            if metadata_text:
-                meta_path = output_path.with_suffix(".txt")
-                meta_path.write_text(metadata_text, encoding="utf-8")
-
-            return gr.update(interactive=False), f"Saved as {output_path.name}"
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+                output_path = save_generated_output(
+                    audio_value=audio_to_save,
+                    output_dir=output_dir,
+                    raw_name=chosen_name,
+                    metadata_text=metadata_text,
+                    default_sample_rate=24000,
+                )
+                return f"Saved as {output_path.name}", gr.update(interactive=False)
+            except Exception as e:
+                return f"❌ Save failed: {str(e)}", gr.update()
 
         input_trigger.change(
             handle_vc_input_modal,
-            inputs=[input_trigger, components['temp_output_path'], components['metadata_text']],
-            outputs=[components['save_btn'], components['convert_status']]
+            inputs=[input_trigger, components['output_audio'], components['temp_output_path'], components['metadata_text']],
+            outputs=[components['convert_status'], components['save_btn']]
         )
 
 

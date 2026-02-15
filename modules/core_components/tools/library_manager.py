@@ -188,15 +188,15 @@ class LibraryManagerTool(Tool):
                             )
                             components["batch_transcribe_btn"] = gr.Button("Batch Transcribe", variant="secondary")
 
-                            with gr.Accordion("Auto-Split Selected File", open=False):
+                            with gr.Accordion("Auto-Split Selected File(s)", open=False):
                                 components["dataset_split_target_folder"] = gr.Dropdown(
                                     choices=["(Select Dataset)"] + get_dataset_folders(),
                                     value="(Select Dataset)",
                                     label="Target Dataset Folder",
                                 )
                                 components["dataset_split_prefix"] = gr.Textbox(
-                                    label="Clip Prefix",
-                                    placeholder="e.g. interview",
+                                    label="Clip Prefix (optional)",
+                                    placeholder="Leave empty to use source filename stem",
                                 )
                                 components["dataset_split_transcribe_model"] = gr.Dropdown(
                                     choices=visible_asr_options,
@@ -239,7 +239,7 @@ class LibraryManagerTool(Tool):
                                         step=0.5,
                                         label="Discard clips under (s)",
                                     )
-                                components["dataset_auto_split_btn"] = gr.Button("Auto-Split Selected File", variant="secondary")
+                                components["dataset_auto_split_btn"] = gr.Button("Auto-Split Selected File(s)", variant="secondary")
 
                 with gr.TabItem("Processing Studio", id="library_processing"):
                     gr.Markdown("Context-driven pipeline. Source is loaded from Samples or Datasets. Pipeline always recomputes from the original file.")
@@ -310,6 +310,7 @@ class LibraryManagerTool(Tool):
             components["proc_original_audio_path"] = gr.Textbox(visible=False)
             components["proc_source_kind"] = gr.Textbox(visible=False)
             components["proc_source_dataset_folder_state"] = gr.Textbox(visible=False)
+            components["dataset_split_prefix_auto_state"] = gr.State("")
 
         return components
 
@@ -766,23 +767,24 @@ class LibraryManagerTool(Tool):
                 lang_option = language if language and language != "Auto-detect" else None
                 asr_result = model.transcribe(audio_path, language=lang_option)
                 full_text = (asr_result.get("text") or "").strip()
-
-                aligner = asr_manager.get_qwen3_forced_aligner()
-                align_results = aligner.align(
-                    audio=audio_path,
-                    text=full_text,
-                    language=lang_option or asr_result.get("language"),
-                )
-                raw_ts = align_results[0] if align_results else []
-                for item in raw_ts:
-                    word_timestamps.append(
-                        WordTimestampLike(
-                            text=getattr(item, "text", ""),
-                            start_time=float(getattr(item, "start_time", 0.0)),
-                            end_time=float(getattr(item, "end_time", 0.0)),
-                        )
+                try:
+                    aligner = asr_manager.get_qwen3_forced_aligner()
+                    align_results = aligner.align(
+                        audio=audio_path,
+                        text=full_text,
+                        language=lang_option or asr_result.get("language"),
                     )
-                asr_manager.unload_forced_aligner()
+                    raw_ts = align_results[0] if align_results else []
+                    for item in raw_ts:
+                        word_timestamps.append(
+                            WordTimestampLike(
+                                text=getattr(item, "text", ""),
+                                start_time=float(getattr(item, "start_time", 0.0)),
+                                end_time=float(getattr(item, "end_time", 0.0)),
+                            )
+                        )
+                finally:
+                    asr_manager.unload_forced_aligner()
 
             if not full_text or not word_timestamps:
                 return "Could not generate aligned word timestamps for auto-split"
@@ -880,16 +882,42 @@ class LibraryManagerTool(Tool):
             audio_path, transcript, info = load_sample_details(clean, request=request, strict=True)
             return audio_path, transcript, info, "Saved"
 
-        def _on_dataset_select(folder, lister_value, request: gr.Request):
+        def _on_dataset_select(folder, lister_value, current_prefix, auto_prefix_state, request: gr.Request):
             selected = (lister_value or {}).get("selected", [])
-            if len(selected) != 1 or not folder or folder == "(Select Dataset)":
-                return None, "", ""
-            file_path = get_tenant_datasets_dir(request=request, strict=True) / folder / selected[0]
+            current_prefix = (current_prefix or "").strip()
+            auto_prefix_state = auto_prefix_state or ""
+
+            if not folder or folder == "(Select Dataset)" or not selected:
+                should_update_prefix = (not current_prefix) or (current_prefix == auto_prefix_state)
+                prefix_update = gr.update(value="") if should_update_prefix else gr.update()
+                auto_state_update = ""
+                return None, "", "", prefix_update, auto_state_update
+
+            if len(selected) != 1:
+                should_update_prefix = (not current_prefix) or (current_prefix == auto_prefix_state)
+                prefix_update = gr.update(value="") if should_update_prefix else gr.update()
+                auto_state_update = "" if should_update_prefix else auto_prefix_state
+                return None, "", "", prefix_update, auto_state_update
+
+            file_name = selected[0]
+            file_path = get_tenant_datasets_dir(request=request, strict=True) / folder / file_name
             transcript = ""
             txt_path = file_path.with_suffix(".txt")
             if txt_path.exists():
                 transcript = txt_path.read_text(encoding="utf-8")
-            return str(file_path) if file_path.exists() else None, transcript, "Saved"
+
+            suggested_prefix = _clean_name(Path(file_name).stem) or "clip"
+            should_update_prefix = (not current_prefix) or (current_prefix == auto_prefix_state)
+            prefix_update = gr.update(value=suggested_prefix) if should_update_prefix else gr.update()
+            auto_state_update = suggested_prefix if should_update_prefix else auto_prefix_state
+
+            return (
+                str(file_path) if file_path.exists() else None,
+                transcript,
+                "Saved",
+                prefix_update,
+                auto_state_update,
+            )
 
         def _on_open_sample_processing(lister_value, request: gr.Request):
             selected = (lister_value or {}).get("selected", [])
@@ -1193,34 +1221,64 @@ class LibraryManagerTool(Tool):
             silence_trim,
             discard_under,
             request: gr.Request,
+            progress=gr.Progress(),
         ):
             selected = (lister_value or {}).get("selected", [])
-            if len(selected) != 1:
-                msg = "Select exactly one dataset file first"
+            if not selected:
+                msg = "Select at least one dataset file first"
                 return msg, msg, gr.update(), _usage_banner(request)
             if not folder or folder == "(Select Dataset)":
                 msg = "Select dataset folder first"
                 return msg, msg, gr.update(), _usage_banner(request)
             target = target_folder if target_folder and target_folder != "(Select Dataset)" else folder
-            if not clip_prefix or not clip_prefix.strip():
-                msg = "Enter a clip prefix"
-                return msg, msg, gr.update(), _usage_banner(request)
+            fixed_prefix = _clean_name(clip_prefix or "")
 
-            audio_path = get_tenant_datasets_dir(request=request, strict=True) / folder / selected[0]
-            status = _auto_split_to_dataset(
-                audio_path=str(audio_path),
-                dataset_folder=target,
-                clip_prefix=clip_prefix,
-                transcribe_model=transcribe_model,
-                language=language,
-                split_min=split_min,
-                split_max=split_max,
-                silence_trim=silence_trim,
-                discard_under=discard_under,
-                request=request,
-            )
+            dataset_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
+            total = len(selected)
+            success = 0
+            details: list[str] = []
+
+            for idx, filename in enumerate(selected, start=1):
+                progress((idx - 1) / max(total, 1), desc=f"Auto-split {idx}/{total}: {filename}")
+                audio_path = dataset_dir / filename
+                if not audio_path.exists():
+                    details.append(f"{filename}: file not found")
+                    continue
+
+                file_prefix = fixed_prefix or (_clean_name(Path(filename).stem) or "clip")
+                status = _auto_split_to_dataset(
+                    audio_path=str(audio_path),
+                    dataset_folder=target,
+                    clip_prefix=file_prefix,
+                    transcribe_model=transcribe_model,
+                    language=language,
+                    split_min=split_min,
+                    split_max=split_max,
+                    silence_trim=silence_trim,
+                    discard_under=discard_under,
+                    request=request,
+                    progress=progress,
+                )
+                details.append(f"{filename} [{file_prefix}]: {status}")
+                if status.startswith("Auto-split complete"):
+                    success += 1
+
+            failed = total - success
+            if total == 1:
+                summary = details[0] if details else "Auto-split did not run"
+            else:
+                mode_hint = (
+                    f"fixed prefix '{fixed_prefix}'" if fixed_prefix else "per-file source filename prefixes"
+                )
+                summary = f"Batch auto-split complete: {success} succeeded, {failed} failed ({mode_hint})."
+                if details:
+                    preview = " | ".join(details[:3])
+                    if len(details) > 3:
+                        preview += f" | (+{len(details) - 3} more)"
+                    summary = f"{summary} {preview}"
+
             files_update = get_dataset_files(folder, request=request, strict=True)
-            return status, status, files_update, _usage_banner(request)
+            return summary, summary, files_update, _usage_banner(request)
 
         def _on_dataset_folder_change(folder, request: gr.Request):
             return (
@@ -1229,6 +1287,8 @@ class LibraryManagerTool(Tool):
                 "",
                 "Saved",
                 gr.update(value=folder if folder and folder != "(Select Dataset)" else "(Select Dataset)"),
+                gr.update(value=""),
+                "",
             )
 
         def _on_refresh_samples(request: gr.Request):
@@ -1598,6 +1658,8 @@ class LibraryManagerTool(Tool):
                 components["dataset_transcript"],
                 components["dataset_transcript_status"],
                 components["dataset_split_target_folder"],
+                components["dataset_split_prefix"],
+                components["dataset_split_prefix_auto_state"],
             ],
         )
 
@@ -1609,8 +1671,19 @@ class LibraryManagerTool(Tool):
 
         components["dataset_lister"].change(
             _on_dataset_select,
-            inputs=[components["dataset_folder_dropdown"], components["dataset_lister"]],
-            outputs=[components["dataset_preview"], components["dataset_transcript"], components["dataset_transcript_status"]],
+            inputs=[
+                components["dataset_folder_dropdown"],
+                components["dataset_lister"],
+                components["dataset_split_prefix"],
+                components["dataset_split_prefix_auto_state"],
+            ],
+            outputs=[
+                components["dataset_preview"],
+                components["dataset_transcript"],
+                components["dataset_transcript_status"],
+                components["dataset_split_prefix"],
+                components["dataset_split_prefix_auto_state"],
+            ],
         )
 
         components["dataset_transcript"].change(

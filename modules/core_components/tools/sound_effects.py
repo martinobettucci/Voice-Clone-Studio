@@ -13,7 +13,7 @@ if __name__ == "__main__":
 
 import gradio as gr
 import soundfile as sf
-import shutil
+import json
 import random
 import time
 from pathlib import Path
@@ -21,6 +21,11 @@ from pathlib import Path
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.foley_manager import get_foley_manager
 from modules.core_components.constants import MMAUDIO_GENERATION_DEFAULTS
+from modules.core_components.tools.generated_output_save import (
+    get_existing_wav_stems,
+    parse_modal_submission,
+    save_generated_output,
+)
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -179,7 +184,7 @@ class SoundEffectsTool(Tool):
                     components['sfx_output_audio'] = gr.Audio(
                         label="Generated Audio",
                         type="filepath",
-                        interactive=False,
+                        interactive=True,
                     )
 
                     # Save button
@@ -208,6 +213,7 @@ class SoundEffectsTool(Tool):
 
         OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
         TEMP_DIR = shared_state.get('TEMP_DIR')
+        get_tenant_output_dir = shared_state.get('get_tenant_output_dir')
         play_completion_beep = shared_state.get('play_completion_beep')
         save_preference = shared_state.get('save_preference')
         show_input_modal_js = shared_state['show_input_modal_js']
@@ -477,11 +483,10 @@ class SoundEffectsTool(Tool):
             context="save_sfx_"
         )
 
-        def get_sfx_existing_files():
+        def get_sfx_existing_files(request: gr.Request):
             """Return JSON list of existing WAV file stems in output dir for overwrite detection."""
-            import json as json_mod
-            names = [f.stem for f in OUTPUT_DIR.glob("*.wav")]
-            return json_mod.dumps(names)
+            output_dir = get_tenant_output_dir(request=request, strict=True)
+            return json.dumps(get_existing_wav_stems(output_dir))
 
         save_sfx_js = f"""
         (existingFilesJson, suggestedName) => {{
@@ -506,49 +511,31 @@ class SoundEffectsTool(Tool):
         )
 
         # --- Input modal handler: save file from temp to output ---
-        def handle_sfx_input_modal(input_value, audio_path, metadata_text):
+        def handle_sfx_input_modal(input_value, audio_value, metadata_text, request: gr.Request):
             """Process input modal result for saving sound effects."""
             no_update = gr.update(), gr.update()
 
-            if not input_value or not input_value.startswith("save_sfx_"):
+            matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_sfx_")
+            if not matched:
                 return no_update
-
-            parts = input_value.split("_", 3)
-            # parts: ['save', 'sfx', 'cancel'] or ['save', 'sfx', '<user_name>', '<uuid>']
-            if len(parts) >= 3 and parts[2] == "cancel":
+            if cancelled:
                 return no_update
-
-            # Extract user-chosen name (everything between 'save_sfx_' and last '_uuid')
-            raw_name = input_value[len("save_sfx_"):]
-            # Remove trailing UUID (last segment after _)
-            name_parts = raw_name.rsplit("_", 1)
-            chosen_name = name_parts[0] if len(name_parts) > 1 else raw_name
 
             if not chosen_name.strip():
                 return "Error: No filename provided", gr.update()
 
-            if not audio_path:
+            if not audio_value:
                 return "Error: No audio to save", gr.update()
 
-            # Clean filename
-            clean_name = "".join(c if c.isalnum() or c in "-_ " else "" for c in chosen_name).strip()
-            clean_name = clean_name.replace(" ", "_")
-            if not clean_name:
-                return "Error: Invalid filename", gr.update()
-
             try:
-                source_path = Path(audio_path)
-                if not source_path.exists():
-                    return "Error: Audio file not found", gr.update()
-
-                output_path = OUTPUT_DIR / f"{clean_name}.wav"
-                shutil.copy2(str(source_path), str(output_path))
-
-                # Save metadata
-                if metadata_text:
-                    metadata_path = output_path.with_suffix(".txt")
-                    metadata_out = '\n'.join(line.lstrip() for line in metadata_text.lstrip().splitlines())
-                    metadata_path.write_text(metadata_out, encoding="utf-8")
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+                output_path = save_generated_output(
+                    audio_value=audio_value,
+                    output_dir=output_dir,
+                    raw_name=chosen_name,
+                    metadata_text=metadata_text,
+                    default_sample_rate=44100,
+                )
 
                 return f"Saved: {output_path.name}", gr.update(interactive=False)
 

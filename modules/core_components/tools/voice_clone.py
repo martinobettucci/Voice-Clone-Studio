@@ -16,6 +16,7 @@ import gradio as gr
 import soundfile as sf
 import torch
 import random
+import json
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
@@ -27,6 +28,11 @@ from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
     wire_prompt_apply_listener,
+)
+from modules.core_components.tools.generated_output_save import (
+    get_existing_wav_stems,
+    parse_modal_submission,
+    save_generated_output,
 )
 from gradio_filelister import FileLister
 
@@ -253,8 +259,12 @@ class VoiceCloneTool(Tool):
                     components['output_audio'] = gr.Audio(
                         label="Generated Audio",
                         type="filepath",
-                        interactive=False,
+                        interactive=True,
                     )
+                    components['save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
+                    components['suggested_name'] = gr.State(value="")
+                    components['metadata_text'] = gr.State(value="")
+                    components['existing_files_json'] = gr.State(value="[]")
 
                     components['clone_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=5)
 
@@ -281,6 +291,7 @@ class VoiceCloneTool(Tool):
         input_trigger = shared_state['input_trigger']
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         get_tenant_output_dir = shared_state['get_tenant_output_dir']
+        get_tenant_paths = shared_state['get_tenant_paths']
         play_completion_beep = shared_state.get('play_completion_beep')
 
         # Get TTS manager (singleton)
@@ -309,10 +320,10 @@ class VoiceCloneTool(Tool):
                                    progress=gr.Progress()):
             """Generate audio using voice cloning - supports Qwen, VibeVoice, and LuxTTS engines."""
             if not sample_name:
-                return None, "Please select a voice sample first."
+                return None, "Please select a voice sample first.", gr.update(interactive=False), "", ""
 
             if not text_to_generate or not text_to_generate.strip():
-                return None, "Please enter text to generate."
+                return None, "Please enter text to generate.", gr.update(interactive=False), "", ""
 
             # Parse model selection to determine engine and size
             if "LuxTTS" in model_selection:
@@ -348,7 +359,7 @@ class VoiceCloneTool(Tool):
                     break
 
             if not sample:
-                return None, f"❌ Sample '{sample_name}' not found."
+                return None, f"❌ Sample '{sample_name}' not found.", gr.update(interactive=False), "", ""
 
             # Check that sample has a transcript (required for all engines)
             sample_ref_text = sample.get("ref_text") or sample.get("meta", {}).get("Text", "")
@@ -357,7 +368,7 @@ class VoiceCloneTool(Tool):
                     f"❌ No transcript found for sample '{sample_name}'.\n\n"
                     "Please transcribe this sample first in the **Library Manager** tab "
                     "(using Whisper or VibeVoice ASR), then try again."
-                )
+                ), gr.update(interactive=False), "", ""
 
             try:
                 # Set the seed for reproducibility
@@ -489,18 +500,17 @@ class VoiceCloneTool(Tool):
                     wavs = [audio_data]
                     cache_status = "no caching (Chatterbox)"
 
-                progress(0.8, desc="Saving audio...")
-                # Generate unique filename
+                progress(0.8, desc="Saving preview...")
+                # Generate preview filename in tenant temp directory
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 safe_name = "".join(c if c.isalnum() else "_" for c in sample_name)
-                OUTPUT_DIR = get_tenant_output_dir(request=request, strict=True)
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                output_file = OUTPUT_DIR / f"{safe_name}_{timestamp}.wav"
+                tenant_paths = get_tenant_paths(request=request, strict=True)
+                temp_dir = tenant_paths.temp_dir
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                output_file = temp_dir / f"voice_clone_{safe_name}_{timestamp}.wav"
 
                 sf.write(str(output_file), wavs[0], sr)
 
-                # Save metadata file
-                metadata_file = output_file.with_suffix(".txt")
                 metadata = dedent(f"""\
                     Generated: {timestamp}
                     Sample: {sample_name}
@@ -510,17 +520,22 @@ class VoiceCloneTool(Tool):
                     Text: {' '.join(text_to_generate.split())}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-                metadata_file.write_text(metadata_out, encoding="utf-8")
 
                 progress(1.0, desc="Done!")
                 if play_completion_beep:
                     play_completion_beep()
-                return str(output_file), f"Generated using {engine_display}. {cache_status}\n{seed_msg}"
+                return (
+                    str(output_file),
+                    f"Generated using {engine_display}. {cache_status}\n{seed_msg}\nReady to save.",
+                    gr.update(interactive=True),
+                    f"{safe_name}_{engine_display.lower().replace(' ', '_').replace('-', '_')}",
+                    metadata_out,
+                )
 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return None, f"❌ Error generating audio: {str(e)}"
+                return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", ""
 
         def load_sample_from_lister(lister_value, request: gr.Request):
             """Load audio, text, and info for the selected sample from FileLister."""
@@ -666,7 +681,76 @@ class VoiceCloneTool(Tool):
                     components['cb_exaggeration'], components['cb_cfg_weight'], components['cb_temperature'],
                     components['cb_repetition_penalty'], components['cb_top_p'], components['cb_language_dropdown']],
 
-            outputs=[components['output_audio'], components['clone_status']]
+            outputs=[
+                components['output_audio'],
+                components['clone_status'],
+                components['save_btn'],
+                components['suggested_name'],
+                components['metadata_text'],
+            ]
+        )
+
+        save_clone_modal_js = show_input_modal_js(
+            title="Save Voice Clone Output",
+            message="Enter a filename for this generated audio:",
+            placeholder="e.g., my_clone_line",
+            context="save_vc_clone_"
+        )
+
+        def get_clone_existing_files(request: gr.Request):
+            output_dir = get_tenant_output_dir(request=request, strict=True)
+            return json.dumps(get_existing_wav_stems(output_dir))
+
+        save_clone_js = f"""
+        (existingFilesJson, suggestedName) => {{
+            try {{
+                window.inputModalExistingFiles = JSON.parse(existingFilesJson || '[]');
+            }} catch(e) {{
+                window.inputModalExistingFiles = [];
+            }}
+            const openModal = {save_clone_modal_js};
+            openModal(suggestedName);
+        }}
+        """
+
+        components['save_btn'].click(
+            fn=get_clone_existing_files,
+            inputs=[],
+            outputs=[components['existing_files_json']],
+        ).then(
+            fn=None,
+            inputs=[components['existing_files_json'], components['suggested_name']],
+            js=save_clone_js,
+        )
+
+        def handle_clone_save_input(input_value, audio_value, metadata_text, request: gr.Request):
+            matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_vc_clone_")
+            if not matched:
+                return gr.update(), gr.update()
+            if cancelled:
+                return gr.update(), gr.update()
+            if not chosen_name or not chosen_name.strip():
+                return "❌ Please enter a filename.", gr.update()
+            if not audio_value:
+                return "❌ No generated audio to save.", gr.update(interactive=False)
+
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+                output_path = save_generated_output(
+                    audio_value=audio_value,
+                    output_dir=output_dir,
+                    raw_name=chosen_name,
+                    metadata_text=metadata_text,
+                    default_sample_rate=24000,
+                )
+                return f"Saved: {output_path.name}", gr.update(interactive=False)
+            except Exception as e:
+                return f"❌ Save failed: {str(e)}", gr.update()
+
+        input_trigger.change(
+            handle_clone_save_input,
+            inputs=[input_trigger, components['output_audio'], components['metadata_text']],
+            outputs=[components['clone_status'], components['save_btn']]
         )
 
         # Toggle language visibility based on model selection
