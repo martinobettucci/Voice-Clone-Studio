@@ -64,6 +64,7 @@ from modules.core_components.ai_models.model_utils import (
     get_trained_models,
     configure_runtime_reproducibility,
 )
+from modules.core_components.runtime import get_memory_governor
 
 # Modular tools
 from modules.core_components.tools import (
@@ -240,6 +241,12 @@ def create_ui():
     custom_css = TRIGGER_HIDE_CSS
 
     with gr.Blocks(title="Voice Clone Studio") as app:
+        memory_governor = get_memory_governor(_user_config)
+
+        def _memory_status_text():
+            snapshot = memory_governor.snapshot()
+            return f"Memory: {memory_governor.format_snapshot(snapshot)}"
+
         # Modal HTML
         gr.HTML(CONFIRMATION_MODAL_HTML)
         gr.HTML(INPUT_MODAL_HTML)
@@ -259,7 +266,9 @@ def create_ui():
 
             with gr.Column(scale=1, min_width=180):
                 unload_all_btn = gr.Button("Clear VRAM", size="sm", variant="secondary")
+                refresh_memory_btn = gr.Button("Refresh Memory", size="sm", variant="secondary")
                 unload_status = gr.Markdown(" ", visible=True)
+                memory_status = gr.Markdown(_memory_status_text(), visible=True)
 
         # ============================================================
         # BUILD SHARED STATE - everything tools need
@@ -328,9 +337,24 @@ def create_ui():
             on_unload_all,
             outputs=[unload_status]
         ).then(
+            fn=_memory_status_text,
+            outputs=[memory_status],
+        ).then(
             fn=clear_status,
             inputs=[],
             outputs=[unload_status],
+            show_progress="hidden"
+        )
+
+        refresh_memory_btn.click(
+            fn=_memory_status_text,
+            outputs=[memory_status],
+            show_progress="hidden"
+        )
+
+        app.load(
+            fn=_memory_status_text,
+            outputs=[memory_status],
             show_progress="hidden"
         )
 

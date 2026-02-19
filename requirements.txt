@@ -17,6 +17,7 @@ gradio
 gradio_filelister @ file:wheel/gradio_filelister-0.4.0-py3-none-any.whl
 diffusers
 markdown
+psutil
 
 # MMAudio Sound Effects dependencies (torchvision installed with PyTorch in setup script)
 open_clip_torch

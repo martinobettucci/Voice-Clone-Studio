@@ -9,14 +9,25 @@ import gc
 import os
 import sys
 import torch
+import threading
 from contextlib import contextmanager
 from pathlib import Path
+from functools import wraps
 
 from .model_utils import (
     get_device, get_dtype, check_model_available_locally,
     download_model_from_huggingface,
     empty_device_cache, run_pre_load_hooks
 )
+
+
+def _with_manager_lock(func):
+    """Serialize Foley model load/unload mutations within one manager instance."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self._manager_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
 
 
 # MMAudio model configurations
@@ -65,6 +76,7 @@ class FoleyManager:
         """
         self.user_config = user_config or {}
         self.models_dir = models_dir or Path("models")
+        self._manager_lock = threading.RLock()
 
         # MMAudio weight directories
         self._weights_dir = self.models_dir / "mmaudio" / "weights"
@@ -246,6 +258,7 @@ class FoleyManager:
                 "This filename is not auto-downloadable. Please place it manually in the models folder."
             ) from e
 
+    @_with_manager_lock
     def download_model_files(self, display_name="Large v2 (44kHz)", progress_callback=None):
         """Download/validate required MMAudio files without loading the model into memory."""
         cfg = self._get_model_config(display_name)
@@ -274,6 +287,7 @@ class FoleyManager:
             "synchformer": synchformer_path,
         }
 
+    @_with_manager_lock
     def load_model(self, display_name="Large v2 (44kHz)", progress_callback=None):
         """
         Load an MMAudio model. Unloads previous model if different.
@@ -666,6 +680,7 @@ class FoleyManager:
             print(f"FPS conversion failed ({e}), using original video")
             return video_path
 
+    @_with_manager_lock
     def unload_all(self):
         """Unload all MMAudio models and free VRAM."""
         if self._net is not None:

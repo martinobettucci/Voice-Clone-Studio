@@ -26,11 +26,16 @@ from modules.core_components.tools.generated_output_save import (
     parse_modal_submission,
     save_generated_output,
 )
+from modules.core_components.tools.output_audio_pipeline import (
+    OutputAudioPipelineConfig,
+    apply_generation_output_pipeline,
+)
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
     wire_prompt_apply_listener,
 )
+from modules.core_components.runtime import MemoryAdmissionError
 
 
 class SoundEffectsTool(Tool):
@@ -51,6 +56,7 @@ class SoundEffectsTool(Tool):
 
         _user_config = shared_state.get('_user_config', {})
         OUTPUT_DIR = shared_state.get('OUTPUT_DIR')
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         # Get foley manager to populate model choices
         foley_manager = get_foley_manager(
@@ -186,6 +192,25 @@ class SoundEffectsTool(Tool):
                         type="filepath",
                         interactive=True,
                     )
+                    with gr.Row():
+                        components['sfx_output_enable_denoise'] = gr.Checkbox(
+                            label="Enable Denoise",
+                            value=False,
+                            visible=deepfilter_available,
+                        )
+                        components['sfx_output_enable_normalize'] = gr.Checkbox(
+                            label="Enable Normalize",
+                            value=False,
+                        )
+                        components['sfx_output_enable_mono'] = gr.Checkbox(
+                            label="Enable Mono",
+                            value=False,
+                        )
+                        components['sfx_output_apply_pipeline_btn'] = gr.Button(
+                            "Apply Pipeline",
+                            variant="secondary",
+                            size="sm",
+                        )
 
                     # Save button
                     components['sfx_save_btn'] = gr.Button(
@@ -220,6 +245,11 @@ class SoundEffectsTool(Tool):
         input_trigger = shared_state['input_trigger']
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         _user_config = shared_state.get('_user_config', {})
+        run_heavy_job = shared_state.get('run_heavy_job')
+        normalize_audio = shared_state['normalize_audio']
+        convert_to_mono = shared_state['convert_to_mono']
+        clean_audio = shared_state['clean_audio']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         foley_manager = get_foley_manager(
             user_config=_user_config,
@@ -294,6 +324,7 @@ class SoundEffectsTool(Tool):
         # Generation handler
         def generate_sfx(mode, prompt, negative_prompt, video, model_size,
                          duration, seed, steps, cfg_strength,
+                         request: gr.Request = None,
                          progress=gr.Progress()):
             """Generate a sound effect."""
             if mode == "Text to Audio" and (not prompt or not prompt.strip()):
@@ -302,11 +333,11 @@ class SoundEffectsTool(Tool):
             if mode == "Video to Audio" and not video:
                 return None, None, "Error: Please upload a video file.", "", "", gr.update(interactive=False), gr.update(), gr.update()
 
-            try:
+            def _generate_impl():
                 # Handle seed
-                seed = int(seed) if seed is not None else -1
-                if seed < 0:
-                    seed = random.randint(0, 2147483647)
+                resolved_seed = int(seed) if seed is not None else -1
+                if resolved_seed < 0:
+                    resolved_seed = random.randint(0, 2147483647)
 
                 progress(0.05, desc="Loading MMAudio model...")
 
@@ -326,7 +357,7 @@ class SoundEffectsTool(Tool):
                         prompt=prompt.strip() if prompt else "",
                         negative_prompt=negative_prompt.strip() if negative_prompt else "",
                         duration=9999.0,
-                        seed=seed,
+                        seed=resolved_seed,
                         num_steps=int(steps),
                         cfg_strength=cfg_strength,
                         progress_callback=lambda frac, desc: progress(0.5 + frac * 0.4, desc=desc)
@@ -337,7 +368,7 @@ class SoundEffectsTool(Tool):
                         prompt=prompt.strip(),
                         negative_prompt=negative_prompt.strip() if negative_prompt else "",
                         duration=duration,
-                        seed=seed,
+                        seed=resolved_seed,
                         num_steps=int(steps),
                         cfg_strength=cfg_strength,
                         progress_callback=lambda frac, desc: progress(0.5 + frac * 0.4, desc=desc)
@@ -386,7 +417,7 @@ class SoundEffectsTool(Tool):
                     f"Duration: {actual_duration}s",
                     f"Steps: {int(steps)}",
                     f"CFG Strength: {cfg_strength}",
-                    f"Seed: {seed}",
+                    f"Seed: {resolved_seed}",
                     f"Sample Rate: {sr} Hz",
                     "Engine: MMAudio"
                 ])
@@ -419,7 +450,7 @@ class SoundEffectsTool(Tool):
                 progress(1.0, desc="Done!")
                 play_completion_beep()
 
-                status = f"Ready to save | Seed: {seed} | {actual_duration}s @ {sr}Hz"
+                status = f"Ready to save | Seed: {resolved_seed} | {actual_duration}s @ {sr}Hz"
 
                 # In video mode, auto-switch preview to Result
                 if combined_video_path:
@@ -445,6 +476,12 @@ class SoundEffectsTool(Tool):
                     gr.update(),
                 )
 
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("sound_effects_generate", _generate_impl, request=request)
+                return _generate_impl()
+            except MemoryAdmissionError as exc:
+                return None, None, f"⚠ Memory safety guard rejected request: {str(exc)}", "", "", gr.update(interactive=False), gr.update(), gr.update()
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -473,6 +510,35 @@ class SoundEffectsTool(Tool):
                 components['sfx_video_toggle'],
                 components['sfx_video_input'],
             ]
+        )
+
+        def apply_sfx_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+            pipeline = OutputAudioPipelineConfig(
+                enable_denoise=bool(enable_denoise),
+                enable_normalize=bool(enable_normalize),
+                enable_mono=bool(enable_mono),
+            )
+            updated_audio, status = apply_generation_output_pipeline(
+                audio_value,
+                pipeline,
+                deepfilter_available=deepfilter_available,
+                denoise_step=lambda path: clean_audio(path),
+                normalize_step=lambda path: normalize_audio(path, request=request),
+                mono_step=lambda path: convert_to_mono(path, request=request),
+            )
+            if not updated_audio:
+                return gr.update(), status
+            return gr.update(value=updated_audio), status
+
+        components['sfx_output_apply_pipeline_btn'].click(
+            apply_sfx_output_pipeline,
+            inputs=[
+                components['sfx_output_audio'],
+                components['sfx_output_enable_denoise'],
+                components['sfx_output_enable_normalize'],
+                components['sfx_output_enable_mono'],
+            ],
+            outputs=[components['sfx_output_audio'], components['sfx_status']],
         )
 
         # --- Save button: open input modal with suggested filename ---

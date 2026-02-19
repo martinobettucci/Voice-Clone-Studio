@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import shutil
 from pathlib import Path
 from typing import Any
@@ -119,3 +120,37 @@ def save_generated_output(
         output_path.with_suffix(".txt").write_text(metadata_out, encoding="utf-8")
 
     return output_path
+
+
+def convert_audio_file_to_mp3(source_path: Path, output_path: Path | None = None) -> Path:
+    """Convert an existing audio file to MP3 using ffmpeg."""
+    src = Path(source_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Audio file not found: {src}")
+
+    dst = Path(output_path) if output_path else src.with_suffix(".mp3")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        str(dst),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise FileNotFoundError("ffmpeg not found. Please install ffmpeg.") from e
+
+    if result.returncode != 0 or not dst.exists():
+        err = (result.stderr or result.stdout or "Unknown ffmpeg error").strip()
+        err_line = err.splitlines()[-1][:200] if err else "Unknown ffmpeg error"
+        raise RuntimeError(f"Failed to convert to MP3: {err_line}")
+
+    return dst

@@ -418,6 +418,12 @@ def load_config():
         "qwen_asr_oom_retry": True,
         "deterministic_mode": False,
         "offline_mode": False,
+        "memory_max_rss_pct": 70.0,
+        "memory_min_available_mb": 2048,
+        "memory_max_gpu_reserved_pct": 90.0,
+        "heavy_job_timeout_s": 7200,
+        "voice_prompt_memory_cache_limit": 8,
+        "luxtts_prompt_memory_cache_limit": 8,
         "browser_notifications": True,
         "samples_folder": "samples",
         "output_folder": "output",
@@ -958,6 +964,7 @@ def build_shared_state(
         train_model as train_model_util,
         download_model_from_huggingface as download_model_util
     )
+    from modules.core_components.runtime import get_memory_governor
 
     # Import audio utilities BEFORE building shared_state
     from modules.core_components.audio_utils import (
@@ -1049,6 +1056,29 @@ def build_shared_state(
 
         return result
 
+    memory_governor = get_memory_governor(user_config)
+
+    def get_memory_snapshot():
+        memory_governor.update_config(user_config)
+        return memory_governor.snapshot()
+
+    def run_heavy_job(job_name, fn, request=None, timeout_s=None):
+        memory_governor.update_config(user_config)
+        tenant_id = None
+        if request is not None:
+            try:
+                tenant_paths = resolve_tenant_paths(request=request, required=False, config=user_config)
+                if tenant_paths is not None:
+                    tenant_id = tenant_paths.tenant_id
+            except TenantResolutionError:
+                tenant_id = None
+        return memory_governor.run_heavy(
+            job_name=job_name,
+            fn=fn,
+            tenant_id=tenant_id,
+            timeout_s=timeout_s,
+        )
+
     shared_state = {
         # Config & Emotions
         'user_config': user_config,
@@ -1065,6 +1095,8 @@ def build_shared_state(
         'TENANT_MEDIA_QUOTA_GB': int(user_config.get("tenant_media_quota_gb", 5)),
         'tenant_service': get_tenant_service(user_config),
         'ALLOW_CONFIG_API': is_config_api_enabled(),
+        'get_memory_snapshot': get_memory_snapshot,
+        'run_heavy_job': run_heavy_job,
 
         # Constants
         'LANGUAGES': constants.get('LANGUAGES', []),

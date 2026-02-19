@@ -26,6 +26,10 @@ from modules.core_components.tools.generated_output_save import (
     persist_audio_to_wav,
     sanitize_output_name,
 )
+from modules.core_components.tools.output_audio_pipeline import (
+    OutputAudioPipelineConfig,
+    apply_generation_output_pipeline,
+)
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -53,6 +57,7 @@ class VoiceDesignTool(Tool):
         LANGUAGES = shared_state.get('LANGUAGES', ['Auto'])
         _user_config = shared_state.get('_user_config', {})
         create_qwen_advanced_params = shared_state.get('create_qwen_advanced_params')
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         with gr.TabItem("Voice Design", id="tab_voice_design"):
             gr.Markdown("Create new voices from natural language descriptions")
@@ -111,6 +116,25 @@ class VoiceDesignTool(Tool):
                         type="filepath",
                         interactive=True,
                     )
+                    with gr.Row():
+                        components['design_output_enable_denoise'] = gr.Checkbox(
+                            label="Enable Denoise",
+                            value=False,
+                            visible=deepfilter_available,
+                        )
+                        components['design_output_enable_normalize'] = gr.Checkbox(
+                            label="Enable Normalize",
+                            value=False,
+                        )
+                        components['design_output_enable_mono'] = gr.Checkbox(
+                            label="Enable Mono",
+                            value=False,
+                        )
+                        components['design_output_apply_pipeline_btn'] = gr.Button(
+                            "Apply Pipeline",
+                            variant="secondary",
+                            size="sm",
+                        )
 
                     components['design_save_btn'] = gr.Button("Save Sample", variant="primary", interactive=False)
                     components['design_existing_files_json'] = gr.State(value="[]")
@@ -130,6 +154,10 @@ class VoiceDesignTool(Tool):
         get_tenant_paths = shared_state.get('get_tenant_paths')
         configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         play_completion_beep = shared_state.get('play_completion_beep')
+        normalize_audio = shared_state['normalize_audio']
+        convert_to_mono = shared_state['convert_to_mono']
+        clean_audio = shared_state['clean_audio']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager()
@@ -244,6 +272,35 @@ class VoiceDesignTool(Tool):
                     components['do_sample'], components['temperature'], components['top_k'],
                     components['top_p'], components['repetition_penalty'], components['max_new_tokens']],
             outputs=[components['design_output_audio'], components['design_status'], components['design_save_btn']]
+        )
+
+        def apply_design_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+            pipeline = OutputAudioPipelineConfig(
+                enable_denoise=bool(enable_denoise),
+                enable_normalize=bool(enable_normalize),
+                enable_mono=bool(enable_mono),
+            )
+            updated_audio, status = apply_generation_output_pipeline(
+                audio_value,
+                pipeline,
+                deepfilter_available=deepfilter_available,
+                denoise_step=lambda path: clean_audio(path),
+                normalize_step=lambda path: normalize_audio(path, request=request),
+                mono_step=lambda path: convert_to_mono(path, request=request),
+            )
+            if not updated_audio:
+                return gr.update(), status
+            return gr.update(value=updated_audio), status
+
+        components['design_output_apply_pipeline_btn'].click(
+            apply_design_output_pipeline,
+            inputs=[
+                components['design_output_audio'],
+                components['design_output_enable_denoise'],
+                components['design_output_enable_normalize'],
+                components['design_output_enable_mono'],
+            ],
+            outputs=[components['design_output_audio'], components['design_status']],
         )
 
         if components.get('prompt_assistant'):

@@ -128,12 +128,16 @@ def wire_prompt_assistant_events(
 
     def generate_and_apply(mode, instruction, preset_name, custom_system, selected_target, *current_values):
         target_id = _resolve_target(selected_target)
+        current_map = dict(zip(target_ids, current_values))
+        existing_text = str(current_map.get(target_id, "") or "")
         generated_text, error = prompt_hub.generate_for_target(
             user_config=user_config,
             target_id=target_id,
             instruction=str(instruction or ""),
             preset_override=str(preset_name or ""),
             custom_system_override=str(custom_system or ""),
+            existing_text=existing_text,
+            apply_mode=mode,
         )
         if error:
             return _blank_updates(error)

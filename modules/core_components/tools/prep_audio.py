@@ -20,6 +20,7 @@ import soundfile as sf
 from pathlib import Path
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.asr_manager import get_asr_manager
+from modules.core_components.runtime import MemoryAdmissionError
 from gradio_filelister import FileLister
 
 # --- Console colors (ANSI) ---
@@ -56,6 +57,7 @@ class PrepSamplesTool(Tool):
         get_sample_choices = shared_state['get_sample_choices']
         get_dataset_folders = shared_state['get_dataset_folders']
         get_dataset_files = shared_state['get_dataset_files']
+        run_heavy_job = shared_state.get('run_heavy_job')
         _user_config = shared_state['_user_config']
         LANGUAGES = shared_state['LANGUAGES']
         ASR_ENGINES = shared_state.get('ASR_ENGINES', {})
@@ -547,62 +549,76 @@ class PrepSamplesTool(Tool):
 
         # ===== Transcribe (shared) =====
 
-        def transcribe_audio_handler(audio_file, whisper_language, transcribe_model, progress=gr.Progress()):
+        def transcribe_audio_handler(
+            audio_file,
+            whisper_language,
+            transcribe_model,
+            request: gr.Request = None,
+            progress=gr.Progress(),
+        ):
             """Transcribe audio using Whisper, Qwen3 ASR, or VibeVoice ASR."""
             if audio_file is None:
                 return "Please load an audio file first.", ""
+            def _transcribe_impl():
+                try:
+                    engine, size = parse_asr_model(transcribe_model)
+                    if engine == "Qwen3 ASR":
+                        progress(0.2, desc=f"Loading Qwen3 ASR ({size})...")
+                        model = asr_manager.get_qwen3_asr(size=size)
+                        progress(0.4, desc="Transcribing...")
+                        options = {}
+                        if whisper_language and whisper_language != "Auto-detect":
+                            options["language"] = whisper_language
+                        result = model.transcribe(audio_file, **options)
+                    elif engine == "VibeVoice ASR":
+                        progress(0.2, desc="Loading VibeVoice ASR...")
+                        model = asr_manager.get_vibevoice_asr()
+                        progress(0.4, desc="Transcribing...")
+                        result = model.transcribe(audio_file)
+                    else:
+                        if not asr_manager.whisper_available:
+                            return "Whisper not available. Use VibeVoice ASR instead.", ""
+                        progress(0.2, desc=f"Loading Whisper ({size or 'Medium'})...")
+                        model = asr_manager.get_whisper(size=size or "Medium")
+                        progress(0.4, desc="Transcribing...")
+                        options = {}
+                        if whisper_language and whisper_language != "Auto-detect":
+                            lang_code = {
+                                "English": "en", "Chinese": "zh", "Japanese": "ja",
+                                "Korean": "ko", "German": "de", "French": "fr",
+                                "Russian": "ru", "Portuguese": "pt", "Spanish": "es",
+                                "Italian": "it"
+                            }.get(whisper_language, None)
+                            if lang_code:
+                                options["language"] = lang_code
+                        result = model.transcribe(audio_file, **options)
+
+                    progress(1.0, desc="Done!")
+                    print(f"\n{_CYAN}--- Transcription ({engine}) ---{_RESET}")
+                    print(f"{_DIM}{result['text']}{_RESET}")
+                    transcription = result["text"].strip()
+
+                    if engine == "VibeVoice ASR":
+                        transcription = re.sub(r'\[.*?\]\s*:', '', transcription)
+                        transcription = re.sub(r'\[.*?\]', '', transcription)
+                        transcription = ' '.join(transcription.split())
+
+                    if play_completion_beep:
+                        play_completion_beep()
+
+                    return transcription, "Transcription complete"
+
+                except Exception as e:
+                    import traceback
+                    print(f"{_RED}Error in transcribe:\n{traceback.format_exc()}{_RESET}")
+                    return f"Error transcribing: {str(e)}", ""
+
             try:
-                engine, size = parse_asr_model(transcribe_model)
-                if engine == "Qwen3 ASR":
-                    progress(0.2, desc=f"Loading Qwen3 ASR ({size})...")
-                    model = asr_manager.get_qwen3_asr(size=size)
-                    progress(0.4, desc="Transcribing...")
-                    options = {}
-                    if whisper_language and whisper_language != "Auto-detect":
-                        options["language"] = whisper_language
-                    result = model.transcribe(audio_file, **options)
-                elif engine == "VibeVoice ASR":
-                    progress(0.2, desc="Loading VibeVoice ASR...")
-                    model = asr_manager.get_vibevoice_asr()
-                    progress(0.4, desc="Transcribing...")
-                    result = model.transcribe(audio_file)
-                else:
-                    if not asr_manager.whisper_available:
-                        return "Whisper not available. Use VibeVoice ASR instead.", ""
-                    progress(0.2, desc=f"Loading Whisper ({size or 'Medium'})...")
-                    model = asr_manager.get_whisper(size=size or "Medium")
-                    progress(0.4, desc="Transcribing...")
-                    options = {}
-                    if whisper_language and whisper_language != "Auto-detect":
-                        lang_code = {
-                            "English": "en", "Chinese": "zh", "Japanese": "ja",
-                            "Korean": "ko", "German": "de", "French": "fr",
-                            "Russian": "ru", "Portuguese": "pt", "Spanish": "es",
-                            "Italian": "it"
-                        }.get(whisper_language, None)
-                        if lang_code:
-                            options["language"] = lang_code
-                    result = model.transcribe(audio_file, **options)
-
-                progress(1.0, desc="Done!")
-                print(f"\n{_CYAN}--- Transcription ({engine}) ---{_RESET}")
-                print(f"{_DIM}{result['text']}{_RESET}")
-                transcription = result["text"].strip()
-
-                if engine == "VibeVoice ASR":
-                    transcription = re.sub(r'\[.*?\]\s*:', '', transcription)
-                    transcription = re.sub(r'\[.*?\]', '', transcription)
-                    transcription = ' '.join(transcription.split())
-
-                if play_completion_beep:
-                    play_completion_beep()
-
-                return transcription, "Transcription complete"
-
-            except Exception as e:
-                import traceback
-                print(f"{_RED}Error in transcribe:\n{traceback.format_exc()}{_RESET}")
-                return f"Error transcribing: {str(e)}", ""
+                if run_heavy_job:
+                    return run_heavy_job("prep_audio_transcribe", _transcribe_impl, request=request)
+                return _transcribe_impl()
+            except MemoryAdmissionError as exc:
+                return f"⚠ Memory safety guard rejected request: {str(exc)}", ""
 
         # ===== Save handlers =====
         def _do_save_sample(clean_name, audio, transcription, request: gr.Request):
@@ -747,7 +763,7 @@ class PrepSamplesTool(Tool):
                         return "Invalid clip name", gr.update(), gr.update(), gr.update()
 
                     engine, asr_size = parse_asr_model(transcribe_model)
-                    status, files = auto_split_audio_handler(
+                    status, files = auto_split_audio_guarded(
                         clip_prefix, audio, folder, language, engine, asr_size or "Large",
                         split_min, split_max, silence_trim, discard_under, request=request
                     )
@@ -1417,6 +1433,63 @@ class PrepSamplesTool(Tool):
                     pass
                 return f"Error: {str(e)}", gr.update()
 
+        def batch_transcribe_guarded(folder, replace_existing, language, transcribe_model, request: gr.Request, progress=gr.Progress()):
+            """Run batch transcription through global heavy-job governor."""
+            def _run():
+                return batch_transcribe_handler(
+                    folder,
+                    replace_existing,
+                    language,
+                    transcribe_model,
+                    request=request,
+                    progress=progress,
+                )
+
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("prep_audio_batch_transcribe", _run, request=request)
+                return _run()
+            except MemoryAdmissionError as exc:
+                return f"⚠ Memory safety guard rejected request: {str(exc)}"
+
+        def auto_split_audio_guarded(
+            clip_prefix,
+            audio_file,
+            folder,
+            language,
+            engine,
+            asr_size,
+            split_min=4.0,
+            split_max=20.0,
+            silence_trim=1.0,
+            discard_under=1.0,
+            request: gr.Request = None,
+            progress=gr.Progress(),
+        ):
+            """Run auto-split through global heavy-job governor."""
+            def _run():
+                return auto_split_audio_handler(
+                    clip_prefix,
+                    audio_file,
+                    folder,
+                    language,
+                    engine,
+                    asr_size,
+                    split_min=split_min,
+                    split_max=split_max,
+                    silence_trim=silence_trim,
+                    discard_under=discard_under,
+                    request=request,
+                    progress=progress,
+                )
+
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("prep_audio_auto_split", _run, request=request)
+                return _run()
+            except MemoryAdmissionError as exc:
+                return f"⚠ Memory safety guard rejected request: {str(exc)}", gr.update()
+
         # ====================================================
         # Wire up events
         # ====================================================
@@ -1719,7 +1792,7 @@ class PrepSamplesTool(Tool):
 
         # --- Batch transcribe (dataset mode only) ---
         components['batch_transcribe_btn'].click(
-            batch_transcribe_handler,
+            batch_transcribe_guarded,
             inputs=[components['finetune_folder_dropdown'],
                     components['batch_replace_existing'],
                     components['whisper_language'], components['transcribe_model']],

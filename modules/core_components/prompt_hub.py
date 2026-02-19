@@ -383,13 +383,44 @@ def discover_available_models(user_config: Dict[str, object], use_local_ollama: 
         return [], f"Failed to query models: {e}"
 
 
-def _build_target_instruction(target_id: str, instruction: str) -> str:
-    """Build user message with target-specific template."""
+def _normalize_apply_mode(apply_mode: Optional[str]) -> str:
+    """Normalize apply mode to append/replace."""
+    return "append" if str(apply_mode or "").strip().lower() == "append" else "replace"
+
+
+def _build_existing_context_preamble(base_prompt: str, existing_text: str, apply_mode: str) -> str:
+    """Build fallback preamble when template does not include {existing}."""
+    action = "continue" if apply_mode == "append" else "replace"
+    return (
+        f"Previous existing content was: {existing_text}\n\n"
+        f"To {action} the content, follow these instructions: {base_prompt}"
+    )
+
+
+def _build_target_instruction(
+    target_id: str,
+    instruction: str,
+    existing_text: Optional[str] = None,
+    apply_mode: Optional[str] = None,
+) -> str:
+    """Build user message with target-specific template and optional existing context."""
     cfg = get_target_config(target_id)
     if not cfg:
         return instruction
+
     template = cfg.get("template", "{instruction}")
-    return template.format(instruction=instruction.strip())
+    instruction_clean = instruction.strip()
+    existing_clean = (existing_text or "").strip()
+    mode = _normalize_apply_mode(apply_mode)
+
+    if "{existing}" in template:
+        return template.format(instruction=instruction_clean, existing=existing_clean)
+
+    base_prompt = template.format(instruction=instruction_clean, existing=existing_clean)
+    if not existing_clean:
+        return base_prompt
+
+    return _build_existing_context_preamble(base_prompt, existing_clean, mode)
 
 
 def generate_for_target(
@@ -398,6 +429,8 @@ def generate_for_target(
     instruction: str,
     preset_override: Optional[str] = None,
     custom_system_override: Optional[str] = None,
+    existing_text: Optional[str] = None,
+    apply_mode: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Generate text tailored for target field using global endpoint settings.
 
@@ -426,7 +459,15 @@ def generate_for_target(
         "model": model,
         "messages": [
             {"role": "system", "content": effective_system},
-            {"role": "user", "content": _build_target_instruction(target_id, instruction)},
+            {
+                "role": "user",
+                "content": _build_target_instruction(
+                    target_id,
+                    instruction,
+                    existing_text=existing_text,
+                    apply_mode=apply_mode,
+                ),
+            },
         ],
         "stream": False,
         "temperature": 0.8,

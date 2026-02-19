@@ -8,6 +8,7 @@ import gradio as gr
 from textwrap import dedent
 from gradio_filelister import FileLister
 from modules.core_components.tool_base import Tool, ToolConfig
+from modules.core_components.runtime import MemoryAdmissionError
 
 
 class TrainModelTool(Tool):
@@ -47,6 +48,7 @@ class TrainModelTool(Tool):
 
                     components['refresh_train_folder_btn'] = gr.Button("Refresh Datasets", size="sm", visible=False)
 
+                    gr.Markdown("Reference Audio (speaker identity anchor)")
                     components['ref_audio_lister'] = FileLister(
                         value=[],
                         height=150,
@@ -61,6 +63,17 @@ class TrainModelTool(Tool):
                         elem_id="train-ref-audio-preview"
                     )
 
+                    ref_audio_help = dedent("""\
+                        **Why this is required**
+                        - Training still uses **all** audio + transcript pairs in your dataset.
+                        - The selected reference clip is reused as a **speaker identity anchor** (`ref_audio`) for each sample.
+                        - Pick a clean 3-10s clip from the same speaker for best consistency.
+                    """)
+                    gr.HTML(
+                        value=format_help_html(ref_audio_help),
+                        container=True,
+                        padding=True)
+
                     components['start_training_btn'] = gr.Button("Start Training", variant="primary", size="lg")
 
                     train_quick_guide = dedent("""\
@@ -68,7 +81,7 @@ class TrainModelTool(Tool):
                         1. Create/prepare dataset in Library Manager
                         2. Select dataset folder
                         3. Enter speaker name
-                        4. Choose reference audio from dataset
+                        4. Choose one clean reference audio (identity anchor, not the only training sample)
                         5. Configure parameters & start training (defaults work well for most cases)
 
                         *See Help Guide tab -> Train Model for detailed instructions*
@@ -136,6 +149,7 @@ class TrainModelTool(Tool):
         get_tenant_datasets_dir = shared_state['get_tenant_datasets_dir']
         input_trigger = shared_state['input_trigger']
         show_input_modal_js = shared_state['show_input_modal_js']
+        run_heavy_job = shared_state.get('run_heavy_job')
 
         def get_selected_ref_filename(lister_value):
             """Extract selected filename from FileLister value."""
@@ -263,10 +277,17 @@ class TrainModelTool(Tool):
             parts = input_value.split("_")
             if len(parts) >= 3:
                 speaker_name = "_".join(parts[2:-1])
-                return train_model(
-                    folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval,
-                    progress, request=request
-                )
+                def _run():
+                    return train_model(
+                        folder, speaker_name, ref_audio, batch_size, lr, epochs, save_interval,
+                        progress, request=request
+                    )
+                try:
+                    if run_heavy_job:
+                        return run_heavy_job("train_model", _run, request=request)
+                    return _run()
+                except MemoryAdmissionError as exc:
+                    return f"⚠ Memory safety guard rejected request: {str(exc)}"
 
             return gr.update()
 

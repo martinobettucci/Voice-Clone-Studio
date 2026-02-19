@@ -5,8 +5,10 @@ Centralized management for all ASR models (Whisper, VibeVoice ASR, etc.)
 """
 
 import torch
+import threading
 from pathlib import Path
 from typing import Dict, Optional
+from functools import wraps
 
 import gc
 import types
@@ -18,6 +20,15 @@ from .model_utils import (
     empty_device_cache, log_gpu_memory,
     run_pre_load_hooks
 )
+
+
+def _with_manager_lock(func):
+    """Serialize model load/unload mutations within one manager instance."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self._manager_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
 
 
 def _is_oom_error(exc: Exception) -> bool:
@@ -199,6 +210,7 @@ class ASRManager:
             user_config: User configuration dict
         """
         self.user_config = user_config or {}
+        self._manager_lock = threading.RLock()
 
         # Model cache
         self._whisper_model = None
@@ -286,6 +298,7 @@ class ASRManager:
 
         raise RuntimeError(f"Failed to load model: {str(last_error)}")
 
+    @_with_manager_lock
     def get_whisper(self, size="medium"):
         """Load Whisper ASR model.
 
@@ -351,6 +364,7 @@ class ASRManager:
 
         return self._whisper_model
 
+    @_with_manager_lock
     def get_qwen3_asr(self, size="Small"):
         """Load Qwen3 ASR model.
 
@@ -442,6 +456,7 @@ class ASRManager:
 
         return self._qwen3_asr_model
 
+    @_with_manager_lock
     def get_qwen3_forced_aligner(self):
         """Load Qwen3 ForcedAligner for word-level timestamps.
 
@@ -480,6 +495,7 @@ class ASRManager:
 
         return self._qwen3_aligner_model
 
+    @_with_manager_lock
     def unload_forced_aligner(self):
         """Unload forced aligner to free VRAM."""
         if self._qwen3_aligner_model is not None:
@@ -488,6 +504,7 @@ class ASRManager:
             empty_device_cache()
             print("Qwen3 ForcedAligner unloaded")
 
+    @_with_manager_lock
     def get_vibevoice_asr(self):
         """Load VibeVoice ASR model."""
         self._check_and_unload_if_different("vibevoice_asr")
@@ -648,6 +665,7 @@ class ASRManager:
 
         return self._vibevoice_asr_model
 
+    @_with_manager_lock
     def unload_all(self):
         """Unload all ASR models to free VRAM."""
         freed = []

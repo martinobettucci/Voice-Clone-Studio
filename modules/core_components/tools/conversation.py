@@ -36,6 +36,11 @@ from modules.core_components.tools.generated_output_save import (
     parse_modal_submission,
     save_generated_output,
 )
+from modules.core_components.tools.output_audio_pipeline import (
+    OutputAudioPipelineConfig,
+    apply_generation_output_pipeline,
+)
+from modules.core_components.runtime import MemoryAdmissionError
 
 
 class ConversationTool(Tool):
@@ -102,6 +107,7 @@ class ConversationTool(Tool):
         is_qwen_custom = initial_conv_model == "Qwen Speakers"
         is_luxtts = initial_conv_model == "LuxTTS"
         is_chatterbox = initial_conv_model == "Chatterbox"
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         with gr.TabItem("Conversation", id="tab_conversation") as conv_tab:
             components['conv_tab'] = conv_tab
@@ -444,6 +450,25 @@ class ConversationTool(Tool):
                         type="filepath",
                         interactive=True,
                     )
+                    with gr.Row():
+                        components['conv_output_enable_denoise'] = gr.Checkbox(
+                            label="Enable Denoise",
+                            value=False,
+                            visible=deepfilter_available,
+                        )
+                        components['conv_output_enable_normalize'] = gr.Checkbox(
+                            label="Enable Normalize",
+                            value=False,
+                        )
+                        components['conv_output_enable_mono'] = gr.Checkbox(
+                            label="Enable Mono",
+                            value=False,
+                        )
+                        components['conv_output_apply_pipeline_btn'] = gr.Button(
+                            "Apply Pipeline",
+                            variant="secondary",
+                            size="sm",
+                        )
                     components['conv_save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
                     components['conv_suggested_name'] = gr.State(value="")
                     components['conv_metadata_text'] = gr.State(value="")
@@ -555,6 +580,11 @@ class ConversationTool(Tool):
         get_or_create_voice_prompt = shared_state.get('get_or_create_voice_prompt')
         _user_config = shared_state.get('_user_config', {})
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
+        run_heavy_job = shared_state.get('run_heavy_job')
+        normalize_audio = shared_state['normalize_audio']
+        convert_to_mono = shared_state['convert_to_mono']
+        clean_audio = shared_state['clean_audio']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager(_user_config)
@@ -626,15 +656,111 @@ class ConversationTool(Tool):
         def _error_result(message: str):
             return None, message, "", ""
 
-        def _save_preview(audio_data, sr, filename_prefix: str, status_text: str, metadata_text: str, request: gr.Request):
+        def _create_preview_path(filename_prefix: str, request: gr.Request):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             tenant_paths = get_tenant_paths(request=request, strict=True)
             temp_dir = tenant_paths.temp_dir
             temp_dir.mkdir(parents=True, exist_ok=True)
             safe_prefix = "".join(c if c.isalnum() or c in "_-" else "_" for c in filename_prefix)
-            preview_file = temp_dir / f"{safe_prefix}_{timestamp}.wav"
-            sf.write(str(preview_file), audio_data, sr)
-            return str(preview_file), status_text, safe_prefix, metadata_text
+            return temp_dir / f"{safe_prefix}_{timestamp}.wav", safe_prefix
+
+        def _coerce_mono_float32(audio_data):
+            if isinstance(audio_data, torch.Tensor):
+                arr = audio_data.detach().cpu().numpy()
+            else:
+                arr = np.asarray(audio_data)
+            arr = np.squeeze(arr)
+            if arr.ndim == 0:
+                arr = arr.reshape(1)
+            elif arr.ndim > 1:
+                arr = arr.reshape(-1)
+            if arr.dtype != np.float32:
+                arr = arr.astype(np.float32, copy=False)
+            return arr
+
+        def _split_segments_with_pauses(text_with_breaks: str, pause_pattern):
+            """Split text containing [break=x] markers into (segment, pause_after) pairs."""
+            parts = pause_pattern.split(text_with_breaks)
+            segments = []
+            for j in range(0, len(parts), 2):
+                segment_text = parts[j].strip()
+                if not segment_text:
+                    continue
+                segment_text = pause_pattern.sub("", segment_text).strip()
+                if not segment_text:
+                    continue
+
+                segment_pause = 0.0
+                if j + 1 < len(parts):
+                    try:
+                        segment_pause = float(parts[j + 1])
+                    except ValueError:
+                        segment_pause = 0.0
+                segments.append((segment_text, segment_pause))
+            return segments
+
+        class _StreamingPreviewWriter:
+            """Incrementally write generated segments to disk to avoid large in-memory concatenations."""
+
+            def __init__(self, filename_prefix: str, request: gr.Request):
+                self.path, self.safe_prefix = _create_preview_path(filename_prefix, request=request)
+                self._file = None
+                self.sample_rate = None
+                self.total_samples = 0
+
+            def _ensure_file(self, sr: int):
+                sr = int(sr)
+                if self._file is None:
+                    self.sample_rate = sr
+                    self._file = sf.SoundFile(
+                        str(self.path),
+                        mode="w",
+                        samplerate=sr,
+                        channels=1,
+                        subtype="PCM_16",
+                    )
+                elif sr != self.sample_rate:
+                    raise ValueError(f"Mismatched sample rates while stitching ({self.sample_rate} vs {sr})")
+
+            def add_silence(self, seconds: float):
+                if self._file is None or self.sample_rate is None:
+                    return
+                samples = int(max(0.0, float(seconds)) * self.sample_rate)
+                if samples <= 0:
+                    return
+                chunk_size = self.sample_rate
+                while samples > 0:
+                    n = min(samples, chunk_size)
+                    self._file.write(np.zeros(n, dtype=np.float32))
+                    self.total_samples += n
+                    samples -= n
+
+            def write_segment(self, audio_data, sr: int, pause_after: float = 0.0):
+                arr = _coerce_mono_float32(audio_data)
+                self._ensure_file(sr)
+                self._file.write(arr)
+                self.total_samples += int(arr.shape[0])
+                if pause_after > 0:
+                    self.add_silence(pause_after)
+
+            def finalize(self):
+                if self._file is not None:
+                    self._file.close()
+                    self._file = None
+                if self.sample_rate is None or self.total_samples <= 0:
+                    raise RuntimeError("No audio segments generated.")
+                duration = self.total_samples / self.sample_rate
+                return str(self.path), self.safe_prefix, self.sample_rate, duration
+
+            def cleanup(self):
+                if self._file is not None:
+                    self._file.close()
+                    self._file = None
+                try:
+                    if self.path.exists():
+                        self.path.unlink()
+                except Exception:
+                    pass
 
         def generate_conversation_handler(conversation_data, pause_linebreak, pause_period, pause_comma,
                                           pause_question, pause_hyphen, language, seed, model_size,
@@ -681,81 +807,68 @@ class ConversationTool(Tool):
                 progress(0.1, desc=f"Loading CustomVoice model ({model_size})...")
                 model = tts_manager.get_qwen3_custom_voice(model_size)
 
-                # Generate all lines with pause control
-                all_segments = []
-                sr = None
+                # Generate all lines with pause control using streaming stitcher
+                segment_count = 0
                 pause_pattern = re.compile(r'\[break=([\d\.]+)\]')
+                writer = _StreamingPreviewWriter("conversation_qwen3", request=request)
 
-                for i, (speaker, text) in enumerate(lines):
-                    progress_val = 0.1 + (0.8 * i / len(lines))
-                    clean_text, style_instruct = extract_style_instructions(text)
+                try:
+                    for i, (speaker, text) in enumerate(lines):
+                        progress_val = 0.1 + (0.8 * i / len(lines))
+                        clean_text, style_instruct = extract_style_instructions(text)
 
-                    # Insert pause markers
-                    if pause_period > 0:
-                        clean_text = re.sub(r'\.(?!\d)', f'. [break={pause_period}]', clean_text)
-                    if pause_comma > 0:
-                        clean_text = re.sub(r',(?!\d)', f', [break={pause_comma}]', clean_text)
-                    if pause_question > 0:
-                        clean_text = re.sub(r'\?(?!\d)', f'? [break={pause_question}]', clean_text)
-                    if pause_hyphen > 0:
-                        clean_text = re.sub(r'-(?!\d)', f'- [break={pause_hyphen}]', clean_text)
+                        # Insert pause markers
+                        if pause_period > 0:
+                            clean_text = re.sub(r'\.(?!\d)', f'. [break={pause_period}]', clean_text)
+                        if pause_comma > 0:
+                            clean_text = re.sub(r',(?!\d)', f', [break={pause_comma}]', clean_text)
+                        if pause_question > 0:
+                            clean_text = re.sub(r'\?(?!\d)', f'? [break={pause_question}]', clean_text)
+                        if pause_hyphen > 0:
+                            clean_text = re.sub(r'-(?!\d)', f'- [break={pause_hyphen}]', clean_text)
 
-                    parts = pause_pattern.split(clean_text)
-
-                    if style_instruct:
-                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} [{style_instruct[:15]}...]")
-                    else:
-                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker})")
-
-                    # Generate segments
-                    for j in range(0, len(parts), 2):
-                        segment_text = parts[j].strip()
-                        if not segment_text:
-                            continue
-                        segment_text = pause_pattern.sub('', segment_text).strip()
-                        if not segment_text:
+                        line_segments = _split_segments_with_pauses(clean_text, pause_pattern)
+                        if not line_segments:
                             continue
 
-                        kwargs = {
-                            "text": segment_text,
-                            "language": language if language != "Auto" else "Auto",
-                            "speaker": speaker,
-                            "do_sample": do_sample,
-                            "temperature": temperature,
-                            "top_k": top_k,
-                            "top_p": top_p,
-                            "repetition_penalty": repetition_penalty,
-                            "max_new_tokens": max_new_tokens
-                        }
                         if style_instruct:
-                            kwargs["instruct"] = style_instruct
+                            progress(progress_val, desc=f"Line {i + 1}/{len(lines)} [{style_instruct[:15]}...]")
+                        else:
+                            progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker})")
 
-                        wavs, sr = model.generate_custom_voice(**kwargs)
+                        # Generate and stream segments
+                        for j, (segment_text, segment_pause) in enumerate(line_segments):
+                            kwargs = {
+                                "text": segment_text,
+                                "language": language if language != "Auto" else "Auto",
+                                "speaker": speaker,
+                                "do_sample": do_sample,
+                                "temperature": temperature,
+                                "top_k": top_k,
+                                "top_p": top_p,
+                                "repetition_penalty": repetition_penalty,
+                                "max_new_tokens": max_new_tokens
+                            }
+                            if style_instruct:
+                                kwargs["instruct"] = style_instruct
 
-                        segment_pause = 0.0
-                        if j + 1 < len(parts):
-                            try:
-                                segment_pause = float(parts[j + 1])
-                            except ValueError:
-                                pass
+                            wavs, sr = model.generate_custom_voice(**kwargs)
 
-                        all_segments.append((wavs[0], segment_pause))
+                            pause_after = float(segment_pause)
+                            if j == len(line_segments) - 1 and i < len(lines) - 1:
+                                pause_after += float(pause_linebreak)
 
-                    # Add linebreak pause
-                    if i < len(lines) - 1 and all_segments:
-                        last_wav, last_pause = all_segments[-1]
-                        all_segments[-1] = (last_wav, last_pause + pause_linebreak)
+                            writer.write_segment(wavs[0], sr, pause_after=pause_after)
+                            segment_count += 1
 
-                # Concatenate
-                progress(0.9, desc="Stitching conversation...")
-                conversation_audio = []
-                for wav, pause_duration in all_segments:
-                    conversation_audio.append(wav)
-                    if pause_duration > 0:
-                        pause_samples = int(sr * pause_duration)
-                        conversation_audio.append(np.zeros(pause_samples))
+                    if segment_count <= 0:
+                        return _error_result("❌ No audio segments generated.")
 
-                final_audio = np.concatenate(conversation_audio)
+                    progress(0.9, desc="Stitching conversation...")
+                    preview_path, safe_prefix, sr, duration = writer.finalize()
+                except Exception:
+                    writer.cleanup()
+                    raise
 
                 speakers_used = list(set(s for s, _ in lines))
                 metadata = dedent(f"""\
@@ -772,7 +885,7 @@ class ConversationTool(Tool):
                       - Hyphen: {pause_hyphen}s
                     Speakers: {', '.join(speakers_used)}
                     Lines: {len(lines)}
-                    Segments: {len(all_segments)}
+                    Segments: {segment_count}
 
                     --- Script ---
                     {conversation_data.strip()}
@@ -781,11 +894,10 @@ class ConversationTool(Tool):
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
                 progress(1.0, desc="Done!")
-                duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
                 status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | {model_size}"
-                return _save_preview(final_audio, sr, "conversation_qwen3", status, metadata_out, request=request)
+                return preview_path, status, safe_prefix, metadata_out
 
             except Exception as e:
                 return _error_result(f"❌ Error generating conversation: {str(e)}")
@@ -840,98 +952,83 @@ class ConversationTool(Tool):
                 progress(0.1, desc=f"Loading Base model ({model_size})...")
                 model = tts_manager.get_qwen3_base(model_size)
 
-                # Generate all segments
-                all_segments = []
-                sr = None
+                # Generate all segments using streaming stitcher
+                segment_count = 0
                 pause_pattern = re.compile(r'\[break=([\d\.]+)\]')
+                writer = _StreamingPreviewWriter("conversation_qwen_base", request=request)
+                try:
+                    for i, (speaker_key, voice_sample_path, ref_text, text) in enumerate(lines):
+                        progress_val = 0.1 + (0.8 * i / len(lines))
+                        clean_text, detected_emotion = extract_style_instructions(text)
 
-                for i, (speaker_key, voice_sample_path, ref_text, text) in enumerate(lines):
-                    progress_val = 0.1 + (0.8 * i / len(lines))
-                    clean_text, detected_emotion = extract_style_instructions(text)
+                        # Apply emotion adjustments
+                        emotion_key = detected_emotion.lower().replace(" ", "_").replace(",", "").strip() if detected_emotion else None
+                        line_temp = temperature
+                        line_top_p = top_p
+                        line_rep_pen = repetition_penalty
 
-                    # Apply emotion adjustments
-                    emotion_key = detected_emotion.lower().replace(" ", "_").replace(",", "").strip() if detected_emotion else None
-                    line_temp = temperature
-                    line_top_p = top_p
-                    line_rep_pen = repetition_penalty
+                        if emotion_key and emotion_key in _active_emotions:
+                            adjustments = _active_emotions[emotion_key]
+                            line_temp = max(0.1, min(2.0, temperature + (adjustments["temp"] * emotion_intensity)))
+                            line_top_p = max(0.0, min(1.0, top_p + (adjustments["top_p"] * emotion_intensity)))
+                            line_rep_pen = max(1.0, min(2.0, repetition_penalty + (adjustments["penalty"] * emotion_intensity)))
+                            progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key}) [{emotion_key}]")
+                        else:
+                            progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
 
-                    if emotion_key and emotion_key in _active_emotions:
-                        adjustments = _active_emotions[emotion_key]
-                        line_temp = max(0.1, min(2.0, temperature + (adjustments["temp"] * emotion_intensity)))
-                        line_top_p = max(0.0, min(1.0, top_p + (adjustments["top_p"] * emotion_intensity)))
-                        line_rep_pen = max(1.0, min(2.0, repetition_penalty + (adjustments["penalty"] * emotion_intensity)))
-                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key}) [{emotion_key}]")
-                    else:
-                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
+                        text = clean_text
 
-                    text = clean_text
+                        # Insert pause markers
+                        if pause_period > 0:
+                            text = re.sub(r'\.(?!\d)', f'. [break={pause_period}]', text)
+                        if pause_comma > 0:
+                            text = re.sub(r',(?!\d)', f', [break={pause_comma}]', text)
+                        if pause_question > 0:
+                            text = re.sub(r'\?(?!\d)', f'? [break={pause_question}]', text)
+                        if pause_hyphen > 0:
+                            text = re.sub(r'-(?!\d)', f'- [break={pause_hyphen}]', text)
 
-                    # Insert pause markers
-                    if pause_period > 0:
-                        text = re.sub(r'\.(?!\d)', f'. [break={pause_period}]', text)
-                    if pause_comma > 0:
-                        text = re.sub(r',(?!\d)', f', [break={pause_comma}]', text)
-                    if pause_question > 0:
-                        text = re.sub(r'\?(?!\d)', f'? [break={pause_question}]', text)
-                    if pause_hyphen > 0:
-                        text = re.sub(r'-(?!\d)', f'- [break={pause_hyphen}]', text)
-
-                    parts = pause_pattern.split(text)
-
-                    # Get voice prompt (cached if available)
-                    voice_prompt = None
-                    if get_or_create_voice_prompt:
-                        voice_prompt = get_or_create_voice_prompt(
-                            model, speaker_key, voice_sample_path, ref_text, model_size, request=request
-                        )
-
-                    # Generate segments
-                    for j in range(0, len(parts), 2):
-                        segment_text = parts[j].strip()
-                        if not segment_text:
-                            continue
-                        segment_text = pause_pattern.sub('', segment_text).strip()
-                        if not segment_text:
+                        line_segments = _split_segments_with_pauses(text, pause_pattern)
+                        if not line_segments:
                             continue
 
-                        wavs, sr = model.generate_voice_clone(
-                            text=segment_text,
-                            language=language if language != "Auto" else "auto",
-                            ref_audio=voice_sample_path,
-                            ref_text=ref_text,
-                            voice_prompt=voice_prompt,
-                            do_sample=do_sample,
-                            temperature=line_temp,
-                            top_k=top_k,
-                            top_p=line_top_p,
-                            repetition_penalty=line_rep_pen,
-                            max_new_tokens=max_new_tokens
-                        )
+                        # Get voice prompt (cached if available)
+                        voice_prompt = None
+                        if get_or_create_voice_prompt:
+                            voice_prompt = get_or_create_voice_prompt(
+                                model, speaker_key, voice_sample_path, ref_text, model_size, request=request
+                            )
 
-                        segment_pause = 0.0
-                        if j + 1 < len(parts):
-                            try:
-                                segment_pause = float(parts[j + 1])
-                            except ValueError:
-                                pass
+                        for j, (segment_text, segment_pause) in enumerate(line_segments):
+                            wavs, sr = model.generate_voice_clone(
+                                text=segment_text,
+                                language=language if language != "Auto" else "auto",
+                                ref_audio=voice_sample_path,
+                                ref_text=ref_text,
+                                voice_prompt=voice_prompt,
+                                do_sample=do_sample,
+                                temperature=line_temp,
+                                top_k=top_k,
+                                top_p=line_top_p,
+                                repetition_penalty=line_rep_pen,
+                                max_new_tokens=max_new_tokens
+                            )
 
-                        all_segments.append((wavs[0], segment_pause))
+                            pause_after = float(segment_pause)
+                            if j == len(line_segments) - 1 and i < len(lines) - 1:
+                                pause_after += float(pause_linebreak)
 
-                    # Add linebreak pause
-                    if i < len(lines) - 1 and all_segments:
-                        last_wav, last_pause = all_segments[-1]
-                        all_segments[-1] = (last_wav, last_pause + pause_linebreak)
+                            writer.write_segment(wavs[0], sr, pause_after=pause_after)
+                            segment_count += 1
 
-                # Concatenate
-                progress(0.9, desc="Stitching conversation...")
-                conversation_audio = []
-                for wav, pause_duration in all_segments:
-                    conversation_audio.append(wav)
-                    if pause_duration > 0:
-                        pause_samples = int(sr * pause_duration)
-                        conversation_audio.append(np.zeros(pause_samples))
+                    if segment_count <= 0:
+                        return _error_result("❌ No audio segments generated.")
 
-                final_audio = np.concatenate(conversation_audio)
+                    progress(0.9, desc="Stitching conversation...")
+                    preview_path, safe_prefix, sr, duration = writer.finalize()
+                except Exception:
+                    writer.cleanup()
+                    raise
 
                 speakers_used = list(set(k for k, _, _, _ in lines))
                 metadata = dedent(f"""\
@@ -948,7 +1045,7 @@ class ConversationTool(Tool):
                       - Hyphen: {pause_hyphen}s
                     Speakers: {', '.join(speakers_used)}
                     Lines: {len(lines)}
-                    Segments: {len(all_segments)}
+                    Segments: {segment_count}
 
                     --- Script ---
                     {conversation_data.strip()}
@@ -956,11 +1053,10 @@ class ConversationTool(Tool):
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
                 progress(1.0, desc="Done!")
-                duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
                 status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | Base {model_size}"
-                return _save_preview(final_audio, sr, "conversation_qwen_base", status, metadata_out, request=request)
+                return preview_path, status, safe_prefix, metadata_out
 
             except Exception as e:
                 import traceback
@@ -1107,37 +1203,56 @@ class ConversationTool(Tool):
                 sr = 24000
 
                 sentences_per_chunk = int(sentences_per_chunk) if sentences_per_chunk else 0
+                writer = _StreamingPreviewWriter("conversation_vibevoice", request=request)
+                chunk_count = 0
 
-                # Chunked generation: process N lines at a time to prevent
-                # quality degradation (screaming/rushing) on long conversations.
-                if sentences_per_chunk > 0 and len(formatted_lines) > sentences_per_chunk:
-                    import numpy as np
-                    chunks = []
-                    for i in range(0, len(formatted_lines), sentences_per_chunk):
-                        chunks.append(formatted_lines[i:i + sentences_per_chunk])
+                try:
+                    # Chunked generation: process N lines at a time to prevent
+                    # quality degradation (screaming/rushing) on long conversations.
+                    if sentences_per_chunk > 0 and len(formatted_lines) > sentences_per_chunk:
+                        chunks = []
+                        for i in range(0, len(formatted_lines), sentences_per_chunk):
+                            chunks.append(formatted_lines[i:i + sentences_per_chunk])
 
-                    print(f"VibeVoice conversation chunking: {len(chunks)} chunks of ~{sentences_per_chunk} line(s)")
-                    audio_segments = []
+                        print(f"VibeVoice conversation chunking: {len(chunks)} chunks of ~{sentences_per_chunk} line(s)")
 
-                    for idx, chunk_lines in enumerate(chunks):
-                        chunk_script = '\n'.join(chunk_lines)
-                        progress_val = 0.5 + (0.4 * idx / len(chunks))
-                        progress(progress_val, desc=f"Generating chunk {idx + 1}/{len(chunks)}...")
+                        for idx, chunk_lines in enumerate(chunks):
+                            chunk_script = '\n'.join(chunk_lines)
+                            progress_val = 0.5 + (0.4 * idx / len(chunks))
+                            progress(progress_val, desc=f"Generating chunk {idx + 1}/{len(chunks)}...")
 
-                        chunk_inputs = processor(
-                            text=[chunk_script],
-                            voice_samples=[voice_samples],
-                            padding=True,
-                            return_tensors="pt",
-                            return_attention_mask=True,
-                        )
+                            chunk_inputs = processor(
+                                text=[chunk_script],
+                                voice_samples=[voice_samples],
+                                padding=True,
+                                return_tensors="pt",
+                                return_attention_mask=True,
+                            )
 
-                        for k, v in chunk_inputs.items():
-                            if torch.is_tensor(v):
-                                chunk_inputs[k] = v.to(device)
+                            for k, v in chunk_inputs.items():
+                                if torch.is_tensor(v):
+                                    chunk_inputs[k] = v.to(device)
 
+                            outputs = model.generate(
+                                **chunk_inputs,
+                                max_new_tokens=None,
+                                cfg_scale=cfg_scale,
+                                tokenizer=processor.tokenizer,
+                                generation_config=gen_config,
+                                verbose=False,
+                            )
+
+                            if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
+                                audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
+                                writer.write_segment(audio_tensor.squeeze(), sr, pause_after=0.0)
+                                chunk_count += 1
+                                print(f"  Chunk {idx + 1}/{len(chunks)} done ({len(chunk_lines)} lines)")
+                            else:
+                                print(f"  Chunk {idx + 1}/{len(chunks)} produced no audio, skipping")
+                    else:
+                        # Standard single-pass generation
                         outputs = model.generate(
-                            **chunk_inputs,
+                            **inputs,
                             max_new_tokens=None,
                             cfg_scale=cfg_scale,
                             tokenizer=processor.tokenizer,
@@ -1147,59 +1262,39 @@ class ConversationTool(Tool):
 
                         if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
                             audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
-                            audio_segments.append(audio_tensor.squeeze().numpy())
-                            print(f"  Chunk {idx + 1}/{len(chunks)} done ({len(chunk_lines)} lines)")
-                        else:
-                            print(f"  Chunk {idx + 1}/{len(chunks)} produced no audio, skipping")
+                            writer.write_segment(audio_tensor.squeeze(), sr, pause_after=0.0)
+                            chunk_count = 1
 
-                    if not audio_segments:
-                        return _error_result("❌ VibeVoice failed to generate audio for any chunk")
+                    if chunk_count <= 0:
+                        return _error_result("❌ VibeVoice failed to generate audio.")
 
-                    generated_audio = np.concatenate(audio_segments)
+                    progress(0.9, desc="Saving preview...")
+                    preview_path, safe_prefix, sr, duration = writer.finalize()
+                except Exception:
+                    writer.cleanup()
+                    raise
 
-                else:
-                    # Standard single-pass generation
-                    outputs = model.generate(
-                        **inputs,
-                        max_new_tokens=None,
-                        cfg_scale=cfg_scale,
-                        tokenizer=processor.tokenizer,
-                        generation_config=gen_config,
-                        verbose=False,
-                    )
+                chunk_info = f"Lines per Chunk: {sentences_per_chunk}" if sentences_per_chunk > 0 else "Chunking: Off"
+                metadata = dedent(f"""\
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
+                    Type: VibeVoice Conversation
+                    Model: VibeVoice-{model_size}
+                    Seed: {seed}
+                    CFG Scale: {cfg_scale}
+                    {chunk_info}
+                    Lines: {len(lines)}
+                    Speakers: {len(available_samples)}
 
-                    if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
-                        audio_tensor = outputs.speech_outputs[0].cpu().to(torch.float32)
-                        generated_audio = audio_tensor.squeeze().numpy()
-                    else:
-                        return _error_result("❌ No audio generated")
+                    --- Script ---
+                    {script_text.strip()}
+                    """)
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
-                progress(0.9, desc="Saving preview...")
-
-                if generated_audio is not None:
-                    duration = len(generated_audio) / sr
-                    chunk_info = f"Lines per Chunk: {sentences_per_chunk}" if sentences_per_chunk > 0 else "Chunking: Off"
-                    metadata = dedent(f"""\
-                        Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
-                        Type: VibeVoice Conversation
-                        Model: VibeVoice-{model_size}
-                        Seed: {seed}
-                        CFG Scale: {cfg_scale}
-                        {chunk_info}
-                        Lines: {len(lines)}
-                        Speakers: {len(available_samples)}
-
-                        --- Script ---
-                        {script_text.strip()}
-                        """)
-                    metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
-
-                    progress(1.0, desc="Done!")
-                    if play_completion_beep:
-                        play_completion_beep()
-                    status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | VibeVoice"
-                    return _save_preview(generated_audio, sr, "conversation_vibevoice", status, metadata_out, request=request)
-                return _error_result("❌ No audio generated.")
+                progress(1.0, desc="Done!")
+                if play_completion_beep:
+                    play_completion_beep()
+                status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | VibeVoice"
+                return preview_path, status, safe_prefix, metadata_out
 
             except Exception as e:
                 import traceback
@@ -1267,56 +1362,51 @@ class ConversationTool(Tool):
                 progress(0.05, desc="Loading LuxTTS model...")
                 tts_manager.get_luxtts()
 
-                # Generate all segments
-                all_segments = []
-                sr = 48000  # LuxTTS outputs at 48kHz
+                # Generate all segments using streaming stitcher
+                segment_count = 0
+                writer = _StreamingPreviewWriter("conversation_luxtts", request=request)
+                try:
+                    for i, (speaker_key, wav_path, sample_name, text, ref_text) in enumerate(lines):
+                        progress_val = 0.1 + (0.8 * i / len(lines))
 
-                for i, (speaker_key, wav_path, sample_name, text, ref_text) in enumerate(lines):
-                    progress_val = 0.1 + (0.8 * i / len(lines))
+                        # Strip any (style) markers — LuxTTS doesn't support them
+                        clean_text, _ = extract_style_instructions(text)
+                        if not clean_text.strip():
+                            continue
 
-                    # Strip any (style) markers — LuxTTS doesn't support them
-                    clean_text, _ = extract_style_instructions(text)
-                    if not clean_text.strip():
-                        continue
+                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
 
-                    progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
+                        audio_data, audio_sr, _was_cached = tts_manager.generate_voice_clone_luxtts(
+                            text=clean_text,
+                            voice_sample_path=wav_path,
+                            sample_name=sample_name,
+                            num_steps=num_steps,
+                            t_shift=t_shift,
+                            speed=speed,
+                            return_smooth=return_smooth,
+                            rms=rms,
+                            ref_duration=ref_duration,
+                            guidance_scale=guidance_scale,
+                            seed=seed,
+                            ref_text=ref_text or None,
+                        )
 
-                    audio_data, audio_sr, was_cached = tts_manager.generate_voice_clone_luxtts(
-                        text=clean_text,
-                        voice_sample_path=wav_path,
-                        sample_name=sample_name,
-                        num_steps=num_steps,
-                        t_shift=t_shift,
-                        speed=speed,
-                        return_smooth=return_smooth,
-                        rms=rms,
-                        ref_duration=ref_duration,
-                        guidance_scale=guidance_scale,
-                        seed=seed,
-                        ref_text=ref_text or None,
-                    )
-                    sr = audio_sr  # Should be 48000
+                        # Add segment with linebreak pause after (except last line)
+                        line_pause = pause_linebreak if i < len(lines) - 1 else 0.0
+                        writer.write_segment(audio_data, audio_sr, pause_after=line_pause)
+                        segment_count += 1
 
-                    # Add segment with linebreak pause after (except last line)
-                    line_pause = pause_linebreak if i < len(lines) - 1 else 0.0
-                    all_segments.append((audio_data, line_pause))
+                    if segment_count <= 0:
+                        return _error_result("Error: No audio segments generated.")
 
-                if not all_segments:
-                    return _error_result("Error: No audio segments generated.")
+                    # Add short tail silence so the last utterance doesn't clip
+                    writer.add_silence(0.15)
 
-                # Concatenate
-                progress(0.9, desc="Stitching conversation...")
-                conversation_audio = []
-                for wav, pause_duration in all_segments:
-                    conversation_audio.append(wav)
-                    if pause_duration > 0:
-                        pause_samples = int(sr * pause_duration)
-                        conversation_audio.append(np.zeros(pause_samples))
-
-                # Add short tail silence so the last utterance doesn't clip
-                conversation_audio.append(np.zeros(int(sr * 0.15)))
-
-                final_audio = np.concatenate(conversation_audio)
+                    progress(0.9, desc="Stitching conversation...")
+                    preview_path, safe_prefix, sr, duration = writer.finalize()
+                except Exception:
+                    writer.cleanup()
+                    raise
 
                 speakers_used = list(set(k for k, _, _, _, _ in lines))
                 metadata = dedent(f"""\
@@ -1330,7 +1420,7 @@ class ConversationTool(Tool):
                     Return Smooth: {return_smooth}
                     Speakers: {', '.join(speakers_used)}
                     Lines: {len(lines)}
-                    Segments: {len(all_segments)}
+                    Segments: {segment_count}
 
                     --- Script ---
                     {conversation_data.strip()}
@@ -1338,11 +1428,10 @@ class ConversationTool(Tool):
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
                 progress(1.0, desc="Done!")
-                duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
                 status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | LuxTTS"
-                return _save_preview(final_audio, sr, "conversation_luxtts", status, metadata_out, request=request)
+                return preview_path, status, safe_prefix, metadata_out
 
             except Exception as e:
                 import traceback
@@ -1416,66 +1505,60 @@ class ConversationTool(Tool):
                     progress(0.05, desc="Loading Chatterbox TTS...")
                     tts_manager.get_chatterbox_tts()
 
-                # Generate all segments
-                all_segments = []
-                sr = 24000
+                # Generate all segments using streaming stitcher
+                segment_count = 0
+                writer = _StreamingPreviewWriter("conversation_chatterbox", request=request)
+                try:
+                    for i, (speaker_key, wav_path, sample_name, text) in enumerate(lines):
+                        progress_val = 0.1 + (0.8 * i / len(lines))
 
-                for i, (speaker_key, wav_path, sample_name, text) in enumerate(lines):
-                    progress_val = 0.1 + (0.8 * i / len(lines))
+                        # Strip any (style) markers
+                        clean_text, _ = extract_style_instructions(text)
+                        if not clean_text.strip():
+                            continue
 
-                    # Strip any (style) markers
-                    clean_text, _ = extract_style_instructions(text)
-                    if not clean_text.strip():
-                        continue
+                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
 
-                    progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
+                        if use_multilingual:
+                            audio_data, audio_sr = tts_manager.generate_voice_clone_chatterbox_multilingual(
+                                text=clean_text,
+                                language_code=lang_code,
+                                voice_sample_path=wav_path,
+                                seed=seed,
+                                exaggeration=exaggeration,
+                                cfg_weight=cfg_weight,
+                                temperature=temperature,
+                                repetition_penalty=repetition_penalty,
+                                top_p=top_p,
+                            )
+                        else:
+                            audio_data, audio_sr = tts_manager.generate_voice_clone_chatterbox(
+                                text=clean_text,
+                                voice_sample_path=wav_path,
+                                seed=seed,
+                                exaggeration=exaggeration,
+                                cfg_weight=cfg_weight,
+                                temperature=temperature,
+                                repetition_penalty=repetition_penalty,
+                                top_p=top_p,
+                            )
 
-                    if use_multilingual:
-                        audio_data, audio_sr = tts_manager.generate_voice_clone_chatterbox_multilingual(
-                            text=clean_text,
-                            language_code=lang_code,
-                            voice_sample_path=wav_path,
-                            seed=seed,
-                            exaggeration=exaggeration,
-                            cfg_weight=cfg_weight,
-                            temperature=temperature,
-                            repetition_penalty=repetition_penalty,
-                            top_p=top_p,
-                        )
-                    else:
-                        audio_data, audio_sr = tts_manager.generate_voice_clone_chatterbox(
-                            text=clean_text,
-                            voice_sample_path=wav_path,
-                            seed=seed,
-                            exaggeration=exaggeration,
-                            cfg_weight=cfg_weight,
-                            temperature=temperature,
-                            repetition_penalty=repetition_penalty,
-                            top_p=top_p,
-                        )
+                        # Add segment with linebreak pause after (except last line)
+                        line_pause = pause_linebreak if i < len(lines) - 1 else 0.0
+                        writer.write_segment(audio_data, audio_sr, pause_after=line_pause)
+                        segment_count += 1
 
-                    sr = audio_sr  # Should be 24000
+                    if segment_count <= 0:
+                        return _error_result("Error: No audio segments generated.")
 
-                    # Add segment with linebreak pause after (except last line)
-                    line_pause = pause_linebreak if i < len(lines) - 1 else 0.0
-                    all_segments.append((audio_data, line_pause))
+                    # Add short tail silence
+                    writer.add_silence(0.15)
 
-                if not all_segments:
-                    return _error_result("Error: No audio segments generated.")
-
-                # Concatenate
-                progress(0.9, desc="Stitching conversation...")
-                conversation_audio = []
-                for wav, pause_duration in all_segments:
-                    conversation_audio.append(wav)
-                    if pause_duration > 0:
-                        pause_samples = int(sr * pause_duration)
-                        conversation_audio.append(np.zeros(pause_samples))
-
-                # Add short tail silence
-                conversation_audio.append(np.zeros(int(sr * 0.15)))
-
-                final_audio = np.concatenate(conversation_audio)
+                    progress(0.9, desc="Stitching conversation...")
+                    preview_path, safe_prefix, sr, duration = writer.finalize()
+                except Exception:
+                    writer.cleanup()
+                    raise
 
                 speakers_used = list(set(k for k, _, _, _ in lines))
                 metadata = dedent(f"""\
@@ -1490,7 +1573,7 @@ class ConversationTool(Tool):
                     Temperature: {temperature} | Repetition Penalty: {repetition_penalty} | Top-p: {top_p}
                     Speakers: {', '.join(speakers_used)}
                     Lines: {len(lines)}
-                    Segments: {len(all_segments)}
+                    Segments: {segment_count}
 
                     --- Script ---
                     {conversation_data.strip()}
@@ -1498,11 +1581,10 @@ class ConversationTool(Tool):
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
                 progress(1.0, desc="Done!")
-                duration = len(final_audio) / sr
                 if play_completion_beep:
                     play_completion_beep()
                 status = f"Ready to save | {len(lines)} lines | {duration:.1f}s | Seed: {seed} | Chatterbox {model_label}"
-                return _save_preview(final_audio, sr, "conversation_chatterbox", status, metadata_out, request=request)
+                return preview_path, status, safe_prefix, metadata_out
 
             except Exception as e:
                 import traceback
@@ -1541,54 +1623,68 @@ class ConversationTool(Tool):
             progress=gr.Progress()
         ):
             """Route to appropriate generation function based on model type."""
-            voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8, request=request)
+            def _generate_impl():
+                voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8, request=request)
 
-            if model_type == "Qwen Speakers":
-                qwen_size = "1.7B" if qwen_custom_model_size == "Large" else "0.6B"
-                result = generate_conversation_handler(script, qwen_custom_pause_linebreak, qwen_custom_pause_period,
-                                                       qwen_custom_pause_comma, qwen_custom_pause_question,
-                                                       qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size,
-                                                       qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
-                                                       qwen_repetition_penalty, qwen_max_new_tokens, request, progress)
-            elif model_type == "Qwen Base":
-                qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
-                result = generate_conversation_base_handler(script, voice_samples, qwen_base_pause_linebreak,
-                                                            qwen_base_pause_period, qwen_base_pause_comma,
-                                                            qwen_base_pause_question, qwen_base_pause_hyphen,
-                                                            qwen_lang, qwen_seed, qwen_size,
-                                                            qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
-                                                            qwen_repetition_penalty, qwen_max_new_tokens,
-                                                            emotion_intensity, request, progress)
-            elif model_type == "LuxTTS":
-                result = generate_luxtts_conversation_handler(script, voice_samples, lux_pause_linebreak,
-                                                              seed, lux_num_steps, lux_t_shift, lux_speed,
-                                                              lux_guidance_scale, lux_rms, lux_ref_duration,
-                                                              lux_return_smooth, request, progress)
-            elif model_type == "Chatterbox":
-                result = generate_chatterbox_conversation_handler(script, voice_samples, cb_pause_linebreak,
-                                                                  qwen_lang, seed,
-                                                                  cb_exaggeration, cb_cfg_weight, cb_temperature,
-                                                                  cb_repetition_penalty, cb_top_p, request, progress)
-            else:  # VibeVoice
-                if vv_model_size == "Small":
-                    vv_size = "1.5B"
-                elif vv_model_size == "Large (4-bit)":
-                    vv_size = "Large (4-bit)"
-                else:
-                    vv_size = "Large"
-                result = generate_vibevoice_longform_handler(script, voice_samples, vv_size, vv_cfg, seed,
-                                                             vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
-                                                             vv_top_p, vv_repetition_penalty,
-                                                             vv_sentences_per_chunk, request, progress)
+                if model_type == "Qwen Speakers":
+                    qwen_size = "1.7B" if qwen_custom_model_size == "Large" else "0.6B"
+                    result = generate_conversation_handler(script, qwen_custom_pause_linebreak, qwen_custom_pause_period,
+                                                           qwen_custom_pause_comma, qwen_custom_pause_question,
+                                                           qwen_custom_pause_hyphen, qwen_lang, qwen_seed, qwen_size,
+                                                           qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
+                                                           qwen_repetition_penalty, qwen_max_new_tokens, request, progress)
+                elif model_type == "Qwen Base":
+                    qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
+                    result = generate_conversation_base_handler(script, voice_samples, qwen_base_pause_linebreak,
+                                                                qwen_base_pause_period, qwen_base_pause_comma,
+                                                                qwen_base_pause_question, qwen_base_pause_hyphen,
+                                                                qwen_lang, qwen_seed, qwen_size,
+                                                                qwen_do_sample, qwen_temperature, qwen_top_k, qwen_top_p,
+                                                                qwen_repetition_penalty, qwen_max_new_tokens,
+                                                                emotion_intensity, request, progress)
+                elif model_type == "LuxTTS":
+                    result = generate_luxtts_conversation_handler(script, voice_samples, lux_pause_linebreak,
+                                                                  seed, lux_num_steps, lux_t_shift, lux_speed,
+                                                                  lux_guidance_scale, lux_rms, lux_ref_duration,
+                                                                  lux_return_smooth, request, progress)
+                elif model_type == "Chatterbox":
+                    result = generate_chatterbox_conversation_handler(script, voice_samples, cb_pause_linebreak,
+                                                                      qwen_lang, seed,
+                                                                      cb_exaggeration, cb_cfg_weight, cb_temperature,
+                                                                      cb_repetition_penalty, cb_top_p, request, progress)
+                else:  # VibeVoice
+                    if vv_model_size == "Small":
+                        vv_size = "1.5B"
+                    elif vv_model_size == "Large (4-bit)":
+                        vv_size = "Large (4-bit)"
+                    else:
+                        vv_size = "Large"
+                    result = generate_vibevoice_longform_handler(script, voice_samples, vv_size, vv_cfg, seed,
+                                                                 vv_num_steps, vv_do_sample, vv_temperature, vv_top_k,
+                                                                 vv_top_p, vv_repetition_penalty,
+                                                                 vv_sentences_per_chunk, request, progress)
 
-            audio_value, status, suggested_name, metadata_text = result
-            return (
-                audio_value,
-                status,
-                gr.update(interactive=bool(audio_value)),
-                suggested_name,
-                metadata_text,
-            )
+                audio_value, status, suggested_name, metadata_text = result
+                return (
+                    audio_value,
+                    status,
+                    gr.update(interactive=bool(audio_value)),
+                    suggested_name,
+                    metadata_text,
+                )
+
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("conversation_generate", _generate_impl, request=request)
+                return _generate_impl()
+            except MemoryAdmissionError as exc:
+                return (
+                    None,
+                    f"⚠ Memory safety guard rejected request: {str(exc)}",
+                    gr.update(interactive=False),
+                    "",
+                    "",
+                )
 
         # Event handlers
         if components.get('prompt_assistant'):
@@ -1648,6 +1744,35 @@ class ConversationTool(Tool):
                 components['conv_suggested_name'],
                 components['conv_metadata_text'],
             ]
+        )
+
+        def apply_conversation_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+            pipeline = OutputAudioPipelineConfig(
+                enable_denoise=bool(enable_denoise),
+                enable_normalize=bool(enable_normalize),
+                enable_mono=bool(enable_mono),
+            )
+            updated_audio, status = apply_generation_output_pipeline(
+                audio_value,
+                pipeline,
+                deepfilter_available=deepfilter_available,
+                denoise_step=lambda path: clean_audio(path),
+                normalize_step=lambda path: normalize_audio(path, request=request),
+                mono_step=lambda path: convert_to_mono(path, request=request),
+            )
+            if not updated_audio:
+                return gr.update(), status
+            return gr.update(value=updated_audio), status
+
+        components['conv_output_apply_pipeline_btn'].click(
+            apply_conversation_output_pipeline,
+            inputs=[
+                components['conv_output_audio'],
+                components['conv_output_enable_denoise'],
+                components['conv_output_enable_normalize'],
+                components['conv_output_enable_mono'],
+            ],
+            outputs=[components['conv_output_audio'], components['conv_status']],
         )
 
         save_conv_modal_js = show_input_modal_js(

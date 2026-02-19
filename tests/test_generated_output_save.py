@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import pytest
 import soundfile as sf
 
 from modules.core_components.tools.generated_output_save import (
+    convert_audio_file_to_mp3,
     parse_modal_submission,
     sanitize_output_name,
     save_generated_output,
@@ -63,3 +65,54 @@ def test_save_generated_output_from_tuple_and_filepath(tmp_path: Path):
     data2, sr2 = sf.read(out2)
     assert sr2 == 24000
     assert len(data2) == 3
+
+
+def test_convert_audio_file_to_mp3_success(tmp_path: Path, monkeypatch):
+    src = tmp_path / "input.wav"
+    src.write_bytes(b"wav")
+
+    def fake_run(cmd, capture_output, text):
+        assert cmd[0] == "ffmpeg"
+        out_path = Path(cmd[-1])
+        out_path.write_bytes(b"mp3")
+
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr("modules.core_components.tools.generated_output_save.subprocess.run", fake_run)
+    out = convert_audio_file_to_mp3(src)
+    assert out.exists()
+    assert out.suffix == ".mp3"
+
+
+def test_convert_audio_file_to_mp3_missing_ffmpeg(tmp_path: Path, monkeypatch):
+    src = tmp_path / "input.wav"
+    src.write_bytes(b"wav")
+
+    def fake_run(_cmd, _capture_output, _text):
+        raise FileNotFoundError("ffmpeg")
+
+    monkeypatch.setattr("modules.core_components.tools.generated_output_save.subprocess.run", fake_run)
+    with pytest.raises(FileNotFoundError, match="ffmpeg not found"):
+        convert_audio_file_to_mp3(src)
+
+
+def test_convert_audio_file_to_mp3_ffmpeg_failure(tmp_path: Path, monkeypatch):
+    src = tmp_path / "input.wav"
+    src.write_bytes(b"wav")
+
+    def fake_run(_cmd, _capture_output, _text):
+        class Result:
+            returncode = 1
+            stderr = "encode failed"
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr("modules.core_components.tools.generated_output_save.subprocess.run", fake_run)
+    with pytest.raises(RuntimeError, match="Failed to convert to MP3"):
+        convert_audio_file_to_mp3(src)

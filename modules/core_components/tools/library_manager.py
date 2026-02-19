@@ -31,6 +31,7 @@ from modules.core_components.tenant_storage import (
     sanitize_filename,
 )
 from modules.core_components.tool_base import Tool, ToolConfig
+from modules.core_components.runtime import MemoryAdmissionError
 
 
 class LibraryManagerTool(Tool):
@@ -341,6 +342,7 @@ class LibraryManagerTool(Tool):
         _user_config = shared_state["_user_config"]
         play_completion_beep = shared_state.get("play_completion_beep")
         deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
+        run_heavy_job = shared_state.get("run_heavy_job")
 
         asr_manager = get_asr_manager()
 
@@ -1044,8 +1046,17 @@ class LibraryManagerTool(Tool):
                 return gr.update(), "No source loaded"
             return gr.update(visible=True, value=original_audio), "Reset to original source"
 
-        def _on_proc_transcribe_click(audio, model, lang):
-            return _run_transcribe(audio, model, lang)
+        def _on_proc_transcribe_click(audio, model, lang, request: gr.Request):
+            try:
+                if run_heavy_job:
+                    return run_heavy_job(
+                        "library_manager_transcribe_single",
+                        lambda: _run_transcribe(audio, model, lang),
+                        request=request,
+                    )
+                return _run_transcribe(audio, model, lang)
+            except MemoryAdmissionError as exc:
+                return f"⚠ Memory safety guard rejected request: {str(exc)}", "Error"
 
         def _on_upload_samples(upload_files, request: gr.Request):
             paths = get_tenant_paths(request=request, strict=True)
@@ -1183,31 +1194,39 @@ class LibraryManagerTool(Tool):
                 return f"Error saving transcript for {selected[0]}: {str(e)}", "Error"
 
         def _on_batch_transcribe(folder, replace_existing, language, transcribe_model, request: gr.Request, progress=gr.Progress()):
-            if not folder or folder == "(Select Dataset)":
-                return "Select a dataset first"
-            base_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
-            files = sorted(list(base_dir.glob("*.wav")) + list(base_dir.glob("*.mp3")))
-            if not files:
-                return f"No files in {folder}"
+            def _run_impl():
+                if not folder or folder == "(Select Dataset)":
+                    return "Select a dataset first"
+                base_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
+                files = sorted(list(base_dir.glob("*.wav")) + list(base_dir.glob("*.mp3")))
+                if not files:
+                    return f"No files in {folder}"
 
-            done = 0
-            skipped = 0
-            failed = 0
-            for idx, audio_file in enumerate(files):
-                txt_path = audio_file.with_suffix(".txt")
-                if txt_path.exists() and not replace_existing:
-                    skipped += 1
-                    continue
-                progress((idx + 1) / max(len(files), 1), desc=f"{idx + 1}/{len(files)} {audio_file.name}")
-                try:
-                    text, _status = _run_transcribe(str(audio_file), transcribe_model, language)
-                    txt_path.write_text((text or "").strip(), encoding="utf-8")
-                    done += 1
-                except Exception:
-                    failed += 1
-            if play_completion_beep:
-                play_completion_beep()
-            return f"Batch transcribe complete: {done} done, {skipped} skipped, {failed} failed"
+                done = 0
+                skipped = 0
+                failed = 0
+                for idx, audio_file in enumerate(files):
+                    txt_path = audio_file.with_suffix(".txt")
+                    if txt_path.exists() and not replace_existing:
+                        skipped += 1
+                        continue
+                    progress((idx + 1) / max(len(files), 1), desc=f"{idx + 1}/{len(files)} {audio_file.name}")
+                    try:
+                        text, _status = _run_transcribe(str(audio_file), transcribe_model, language)
+                        txt_path.write_text((text or "").strip(), encoding="utf-8")
+                        done += 1
+                    except Exception:
+                        failed += 1
+                if play_completion_beep:
+                    play_completion_beep()
+                return f"Batch transcribe complete: {done} done, {skipped} skipped, {failed} failed"
+
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("library_manager_transcribe_batch", _run_impl, request=request)
+                return _run_impl()
+            except MemoryAdmissionError as exc:
+                return f"⚠ Memory safety guard rejected request: {str(exc)}"
 
         def _on_dataset_auto_split(
             folder,
@@ -1223,62 +1242,71 @@ class LibraryManagerTool(Tool):
             request: gr.Request,
             progress=gr.Progress(),
         ):
-            selected = (lister_value or {}).get("selected", [])
-            if not selected:
-                msg = "Select at least one dataset file first"
+            def _run_impl():
+                selected = (lister_value or {}).get("selected", [])
+                if not selected:
+                    msg = "Select at least one dataset file first"
+                    return msg, msg, gr.update(), _usage_banner(request)
+                if not folder or folder == "(Select Dataset)":
+                    msg = "Select dataset folder first"
+                    return msg, msg, gr.update(), _usage_banner(request)
+                target = target_folder if target_folder and target_folder != "(Select Dataset)" else folder
+                fixed_prefix = _clean_name(clip_prefix or "")
+
+                dataset_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
+                total = len(selected)
+                success = 0
+                details: list[str] = []
+
+                for idx, filename in enumerate(selected, start=1):
+                    progress((idx - 1) / max(total, 1), desc=f"Auto-split {idx}/{total}: {filename}")
+                    audio_path = dataset_dir / filename
+                    if not audio_path.exists():
+                        details.append(f"{filename}: file not found")
+                        continue
+
+                    file_prefix = fixed_prefix or (_clean_name(Path(filename).stem) or "clip")
+                    status = _auto_split_to_dataset(
+                        audio_path=str(audio_path),
+                        dataset_folder=target,
+                        clip_prefix=file_prefix,
+                        transcribe_model=transcribe_model,
+                        language=language,
+                        split_min=split_min,
+                        split_max=split_max,
+                        silence_trim=silence_trim,
+                        discard_under=discard_under,
+                        request=request,
+                        progress=progress,
+                    )
+                    details.append(f"{filename} [{file_prefix}]: {status}")
+                    if status.startswith("Auto-split complete"):
+                        success += 1
+
+                failed = total - success
+                if total == 1:
+                    summary = details[0] if details else "Auto-split did not run"
+                else:
+                    mode_hint = (
+                        f"fixed prefix '{fixed_prefix}'" if fixed_prefix else "per-file source filename prefixes"
+                    )
+                    summary = f"Batch auto-split complete: {success} succeeded, {failed} failed ({mode_hint})."
+                    if details:
+                        preview = " | ".join(details[:3])
+                        if len(details) > 3:
+                            preview += f" | (+{len(details) - 3} more)"
+                        summary = f"{summary} {preview}"
+
+                files_update = get_dataset_files(folder, request=request, strict=True)
+                return summary, summary, files_update, _usage_banner(request)
+
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("library_manager_auto_split", _run_impl, request=request)
+                return _run_impl()
+            except MemoryAdmissionError as exc:
+                msg = f"⚠ Memory safety guard rejected request: {str(exc)}"
                 return msg, msg, gr.update(), _usage_banner(request)
-            if not folder or folder == "(Select Dataset)":
-                msg = "Select dataset folder first"
-                return msg, msg, gr.update(), _usage_banner(request)
-            target = target_folder if target_folder and target_folder != "(Select Dataset)" else folder
-            fixed_prefix = _clean_name(clip_prefix or "")
-
-            dataset_dir = get_tenant_datasets_dir(request=request, strict=True) / folder
-            total = len(selected)
-            success = 0
-            details: list[str] = []
-
-            for idx, filename in enumerate(selected, start=1):
-                progress((idx - 1) / max(total, 1), desc=f"Auto-split {idx}/{total}: {filename}")
-                audio_path = dataset_dir / filename
-                if not audio_path.exists():
-                    details.append(f"{filename}: file not found")
-                    continue
-
-                file_prefix = fixed_prefix or (_clean_name(Path(filename).stem) or "clip")
-                status = _auto_split_to_dataset(
-                    audio_path=str(audio_path),
-                    dataset_folder=target,
-                    clip_prefix=file_prefix,
-                    transcribe_model=transcribe_model,
-                    language=language,
-                    split_min=split_min,
-                    split_max=split_max,
-                    silence_trim=silence_trim,
-                    discard_under=discard_under,
-                    request=request,
-                    progress=progress,
-                )
-                details.append(f"{filename} [{file_prefix}]: {status}")
-                if status.startswith("Auto-split complete"):
-                    success += 1
-
-            failed = total - success
-            if total == 1:
-                summary = details[0] if details else "Auto-split did not run"
-            else:
-                mode_hint = (
-                    f"fixed prefix '{fixed_prefix}'" if fixed_prefix else "per-file source filename prefixes"
-                )
-                summary = f"Batch auto-split complete: {success} succeeded, {failed} failed ({mode_hint})."
-                if details:
-                    preview = " | ".join(details[:3])
-                    if len(details) > 3:
-                        preview += f" | (+{len(details) - 3} more)"
-                    summary = f"{summary} {preview}"
-
-            files_update = get_dataset_files(folder, request=request, strict=True)
-            return summary, summary, files_update, _usage_banner(request)
 
         def _on_dataset_folder_change(folder, request: gr.Request):
             return (

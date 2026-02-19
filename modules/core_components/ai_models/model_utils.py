@@ -11,6 +11,11 @@ import torch
 import numpy as np
 from pathlib import Path
 
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 
 def get_device():
     """Get the best available device (CUDA > MPS > CPU)."""
@@ -393,6 +398,53 @@ def log_gpu_memory(label=""):
         print(f"GPU Memory{label_str}: MPS device active (detailed stats not available)")
 
 
+def estimate_training_memory_preflight(
+    num_samples: int,
+    total_audio_bytes: int,
+    batch_size: int,
+    user_config=None,
+):
+    """Estimate training memory risk from dataset size and runtime memory state."""
+    user_config = user_config or {}
+    safe_batch = max(1, int(batch_size))
+    safe_samples = max(1, int(num_samples))
+    avg_audio_mb = (max(0, int(total_audio_bytes)) / safe_samples) / (1024 ** 2)
+
+    # Conservative heuristics:
+    # - tokenizer/encode step scales with batch size and average clip size
+    # - training step has a fixed baseline even for tiny datasets
+    estimated_prepare_peak_mb = int(max(512.0, 256.0 + (safe_batch * max(24.0, avg_audio_mb * 8.0))))
+    estimated_training_overhead_mb = int(max(2048.0, safe_batch * 384.0))
+    estimated_total_peak_mb = estimated_prepare_peak_mb + estimated_training_overhead_mb
+
+    baseline_floor_mb = int(user_config.get("memory_min_available_mb", 2048))
+    recommended_available_mb = int(max(baseline_floor_mb, estimated_total_peak_mb * 1.25))
+
+    available_mb = None
+    block_reason = None
+    if psutil is not None:
+        try:
+            available_mb = int(psutil.virtual_memory().available / (1024 ** 2))
+        except Exception:
+            available_mb = None
+
+    if available_mb is not None and available_mb < recommended_available_mb:
+        block_reason = (
+            "Training preflight rejected this run due to low available RAM "
+            f"({available_mb} MB < recommended {recommended_available_mb} MB)."
+        )
+
+    return {
+        "avg_audio_mb": avg_audio_mb,
+        "estimated_prepare_peak_mb": estimated_prepare_peak_mb,
+        "estimated_training_overhead_mb": estimated_training_overhead_mb,
+        "estimated_total_peak_mb": estimated_total_peak_mb,
+        "recommended_available_mb": recommended_available_mb,
+        "available_mb": available_mb,
+        "block_reason": block_reason,
+    }
+
+
 def get_trained_models(models_dir=None):
     """
     Find trained model checkpoints in the models directory.
@@ -507,6 +559,7 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
 
     issues = []
     valid_files = []
+    total_audio_bytes = 0
     converted_count = 0
     total = len(audio_files)
 
@@ -514,6 +567,14 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
     status_log.append("=" * 60)
     status_log.append("STEP 1/3: DATASET VALIDATION")
     status_log.append("=" * 60)
+    max_status_lines = 2000
+
+    def append_stream_log(line: str):
+        """Keep status text bounded during long-running subprocess output."""
+        status_log.append(line)
+        overflow = len(status_log) - max_status_lines
+        if overflow > 0:
+            del status_log[:overflow]
 
     for i, audio_path in enumerate(audio_files):
         progress(0.0 + (0.2 * (i + 1) / total), desc=f"Validating {audio_path.name}...")
@@ -564,6 +625,10 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
                 continue
 
         valid_files.append(audio_path.name)
+        try:
+            total_audio_bytes += audio_path.stat().st_size
+        except Exception:
+            pass
 
     if not valid_files:
         return "Error: No valid training samples found\n" + "\n".join(issues[:10])
@@ -577,6 +642,33 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
             status_log.append(f"   {issue}")
         if len(issues) > 5:
             status_log.append(f"   ... and {len(issues) - 5} more")
+
+    # Preflight estimate before expensive tokenizer/training launches.
+    preflight = estimate_training_memory_preflight(
+        num_samples=len(valid_files),
+        total_audio_bytes=total_audio_bytes,
+        batch_size=int(batch_size),
+        user_config=user_config,
+    )
+    status_log.append("")
+    status_log.append("Memory preflight:")
+    status_log.append(
+        f"  Avg sample size: {preflight['avg_audio_mb']:.2f} MB | "
+        f"Estimated prepare peak: {preflight['estimated_prepare_peak_mb']} MB | "
+        f"Estimated total peak: {preflight['estimated_total_peak_mb']} MB"
+    )
+    if preflight["available_mb"] is not None:
+        status_log.append(
+            f"  Available RAM: {preflight['available_mb']} MB | "
+            f"Recommended minimum: {preflight['recommended_available_mb']} MB"
+        )
+    else:
+        status_log.append(
+            f"  Recommended minimum available RAM: {preflight['recommended_available_mb']} MB"
+        )
+    if preflight["block_reason"]:
+        status_log.append(f"[X] {preflight['block_reason']}")
+        return "\n".join(status_log)
 
     # Ensure reference audio is correct format
     progress(0.2, desc="Preparing reference audio...")
@@ -598,25 +690,23 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
     # Generate train_raw.jsonl
     progress(0.25, desc="Generating train_raw.jsonl...")
     train_raw_path = base_dir / "train_raw.jsonl"
-    jsonl_entries = []
-
-    for filename in valid_files:
-        audio_path_entry = base_dir / filename
-        txt_path = audio_path_entry.with_suffix(".txt")
-        transcript = txt_path.read_text(encoding="utf-8").strip()
-
-        entry = {
-            "audio": str(audio_path_entry.absolute()),
-            "text": transcript,
-            "ref_audio": str(ref_audio_path.absolute())
-        }
-        jsonl_entries.append(entry)
+    entry_count = 0
 
     try:
         with open(train_raw_path, 'w', encoding='utf-8') as f:
-            for entry in jsonl_entries:
+            for filename in valid_files:
+                audio_path_entry = base_dir / filename
+                txt_path = audio_path_entry.with_suffix(".txt")
+                transcript = txt_path.read_text(encoding="utf-8").strip()
+
+                entry = {
+                    "audio": str(audio_path_entry.absolute()),
+                    "text": transcript,
+                    "ref_audio": str(ref_audio_path.absolute())
+                }
                 f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-        status_log.append(f"Generated train_raw.jsonl with {len(jsonl_entries)} entries")
+                entry_count += 1
+        status_log.append(f"Generated train_raw.jsonl with {entry_count} entries")
     except Exception as e:
         return f"Error: Failed to write train_raw.jsonl: {str(e)}"
 
@@ -680,7 +770,7 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
         for line in result.stdout:
             line = line.strip()
             if line:
-                status_log.append(f"  {line}")
+                append_stream_log(f"  {line}")
 
         result.wait()
 
@@ -792,7 +882,7 @@ def train_model(folder, speaker_name, ref_audio_filename, batch_size,
         for line in result.stdout:
             line = line.strip()
             if line:
-                status_log.append(f"  {line}")
+                append_stream_log(f"  {line}")
 
                 if "Epoch" in line and "Step" in line:
                     try:

@@ -7,8 +7,11 @@ Centralized management for all TTS models (Qwen3, VibeVoice, etc.)
 import torch
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, Tuple, Optional
+from collections import OrderedDict
+from functools import wraps
 
 import gc
 
@@ -33,6 +36,15 @@ for _logger_name in [
     logging.getLogger(_logger_name).setLevel(logging.ERROR)
 
 
+def _with_manager_lock(func):
+    """Serialize model lifecycle mutations within one manager instance."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self._manager_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
+
+
 class TTSManager:
     """Manages all TTS models with lazy loading and VRAM optimization."""
 
@@ -46,6 +58,7 @@ class TTSManager:
         """
         self.user_config = user_config or {}
         self.samples_dir = samples_dir or Path("samples")
+        self._manager_lock = threading.RLock()
 
         # Model cache
         self._qwen3_base_model = None
@@ -63,9 +76,38 @@ class TTSManager:
         self._chatterbox_mtl_model = None
 
         # Prompt cache
-        self._voice_prompt_cache = {}
-        self._luxtts_prompt_cache = {}
+        self._voice_prompt_cache = OrderedDict()
+        self._luxtts_prompt_cache = OrderedDict()
+        self._voice_prompt_cache_limit = int(self.user_config.get("voice_prompt_memory_cache_limit", 8))
+        self._luxtts_prompt_cache_limit = int(self.user_config.get("luxtts_prompt_memory_cache_limit", 8))
         self._last_loaded_model = None
+
+    @staticmethod
+    def _hash_file_md5(path: str, chunk_size: int = 1024 * 1024) -> str:
+        hasher = hashlib.md5()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _lru_get(cache: OrderedDict, key):
+        if key not in cache:
+            return None
+        value = cache.pop(key)
+        cache[key] = value
+        return value
+
+    @staticmethod
+    def _lru_put(cache: OrderedDict, key, value, limit: int):
+        cache[key] = value
+        cache.move_to_end(key)
+        safe_limit = max(1, int(limit))
+        while len(cache) > safe_limit:
+            cache.popitem(last=False)
 
     def _check_and_unload_if_different(self, model_id):
         """If switching to a different model, unload all. Stops external servers on first/new load."""
@@ -126,6 +168,7 @@ class TTSManager:
 
         raise RuntimeError(f"Failed to load model: {str(last_error)}")
 
+    @_with_manager_lock
     def get_qwen3_base(self, size: str = "1.7B"):
         """Load Qwen3 Base TTS model."""
         model_id = f"qwen3_base_{size}"
@@ -149,6 +192,7 @@ class TTSManager:
 
         return self._qwen3_base_model
 
+    @_with_manager_lock
     def get_qwen3_voice_design(self):
         """Load Qwen3 VoiceDesign model (1.7B only)."""
         self._check_and_unload_if_different("qwen3_voice_design")
@@ -169,6 +213,7 @@ class TTSManager:
 
         return self._qwen3_voice_design_model
 
+    @_with_manager_lock
     def get_qwen3_custom_voice(self, size: str = "1.7B"):
         """Load Qwen3 CustomVoice model."""
         model_id = f"qwen3_custom_voice_{size}"
@@ -192,6 +237,7 @@ class TTSManager:
 
         return self._qwen3_custom_voice_model
 
+    @_with_manager_lock
     def get_vibevoice_tts(self, size: str = "1.5B"):
         """Load VibeVoice TTS model."""
         model_id = f"vibevoice_tts_{size}"
@@ -243,6 +289,7 @@ class TTSManager:
 
         return self._vibevoice_tts_model
 
+    @_with_manager_lock
     def get_luxtts(self):
         """Load LuxTTS model (lazy import to avoid slowing app startup)."""
         self._check_and_unload_if_different("luxtts")
@@ -296,6 +343,7 @@ class TTSManager:
 
         return self._luxtts_model
 
+    @_with_manager_lock
     def unload_all(self):
         """Unload all TTS models to free VRAM."""
         freed = []
@@ -525,124 +573,130 @@ class TTSManager:
         )
 
         model = None
-        for attn in mechanisms:
-            try:
-                model = Qwen3TTSModel.from_pretrained(
-                    checkpoint_path,
-                    device_map=device,
-                    torch_dtype=dtype,
-                    attn_implementation=attn,
-                    low_cpu_mem_usage=user_config.get("low_cpu_mem_usage", False)
+        try:
+            for attn in mechanisms:
+                try:
+                    model = Qwen3TTSModel.from_pretrained(
+                        checkpoint_path,
+                        device_map=device,
+                        torch_dtype=dtype,
+                        attn_implementation=attn,
+                        low_cpu_mem_usage=user_config.get("low_cpu_mem_usage", False)
+                    )
+                    print(f"Trained model loaded with {attn}")
+                    break
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    is_attn_error = any(
+                        kw in error_msg for kw in ["flash", "attention", "sdpa", "not supported"]
+                    )
+                    if is_attn_error:
+                        print(f"  {attn} not available for trained model, trying next...")
+                        continue
+                    raise
+
+            if model is None:
+                raise RuntimeError("Failed to load trained model with any attention mechanism")
+
+            if icl_mode and voice_sample_path and ref_text:
+                # ICL mode: use generate_voice_clone with reference audio
+                # Ensure model type allows voice cloning (patch legacy "custom_voice" models)
+                if hasattr(model, 'model') and hasattr(model.model, 'tts_model_type'):
+                    if model.model.tts_model_type != "base":
+                        print(f"Patching tts_model_type from '{model.model.tts_model_type}' to 'base' for ICL inference")
+                        model.model.tts_model_type = "base"
+
+                # Training drops speaker_encoder weights from checkpoints to save space.
+                # ICL needs it to compute speaker embeddings from reference audio.
+                # Borrow speaker_encoder from the base model of matching size.
+                if model.model.speaker_encoder is None:
+                    import json as json_mod
+                    config_path = Path(checkpoint_path) / "config.json"
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        ckpt_config = json_mod.load(f)
+                    base_size = "1.7B" if ckpt_config.get("tts_model_size") == "1b7" else "0.6B"
+                    base_name = f"Qwen/Qwen3-TTS-12Hz-{base_size}-Base"
+                    print(f"Speaker encoder missing - borrowing from {base_size} base model...")
+
+                    # Try local first, then HuggingFace
+                    local_path = check_model_available_locally(base_name)
+                    base_to_load = str(local_path) if local_path else base_name
+
+                    base_model = Qwen3TTSModel.from_pretrained(
+                        base_to_load,
+                        device_map=device,
+                        torch_dtype=dtype,
+                    )
+                    model.model.speaker_encoder = base_model.model.speaker_encoder
+                    model.model.speaker_encoder_sample_rate = base_model.model.speaker_encoder_sample_rate
+                    del base_model
+                    empty_device_cache()
+                    print("Speaker encoder transplanted successfully")
+
+                # Create voice clone prompt with ICL (not x-vector only)
+                prompt_items = model.create_voice_clone_prompt(
+                    ref_audio=str(voice_sample_path),
+                    ref_text=ref_text,
+                    x_vector_only_mode=False,
                 )
-                print(f"Trained model loaded with {attn}")
-                break
-            except Exception as e:
-                error_msg = str(e).lower()
-                is_attn_error = any(
-                    kw in error_msg for kw in ["flash", "attention", "sdpa", "not supported"]
+
+                # Build generation kwargs
+                gen_kwargs = {
+                    'max_new_tokens': int(max_new_tokens),
+                }
+                if do_sample:
+                    gen_kwargs['do_sample'] = True
+                    gen_kwargs['temperature'] = temperature
+                    if top_k > 0:
+                        gen_kwargs['top_k'] = int(top_k)
+                    if top_p < 1.0:
+                        gen_kwargs['top_p'] = top_p
+                    if repetition_penalty != 1.0:
+                        gen_kwargs['repetition_penalty'] = repetition_penalty
+
+                wavs, sr = model.generate_voice_clone(
+                    text=text.strip(),
+                    language=language if language != "Auto" else "Auto",
+                    voice_clone_prompt=prompt_items,
+                    **gen_kwargs
                 )
-                if is_attn_error:
-                    print(f"  {attn} not available for trained model, trying next...")
-                    continue
-                raise
+            else:
+                # Speaker embedding mode: use generate_custom_voice
+                # Ensure model type allows custom voice (patch "base" models)
+                if hasattr(model, 'model') and hasattr(model.model, 'tts_model_type'):
+                    if model.model.tts_model_type != "custom_voice":
+                        print(f"Patching tts_model_type from '{model.model.tts_model_type}' to 'custom_voice' for speaker embedding inference")
+                        model.model.tts_model_type = "custom_voice"
 
-        if model is None:
-            raise RuntimeError("Failed to load trained model with any attention mechanism")
+                kwargs = {
+                    "text": text.strip(),
+                    "language": language if language != "Auto" else "Auto",
+                    "speaker": speaker_name,
+                    "do_sample": do_sample,
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                    "repetition_penalty": repetition_penalty,
+                    "max_new_tokens": max_new_tokens
+                }
+                if instruct and instruct.strip():
+                    kwargs["instruct"] = instruct.strip()
 
-        if icl_mode and voice_sample_path and ref_text:
-            # ICL mode: use generate_voice_clone with reference audio
-            # Ensure model type allows voice cloning (patch legacy "custom_voice" models)
-            if hasattr(model, 'model') and hasattr(model.model, 'tts_model_type'):
-                if model.model.tts_model_type != "base":
-                    print(f"Patching tts_model_type from '{model.model.tts_model_type}' to 'base' for ICL inference")
-                    model.model.tts_model_type = "base"
+                wavs, sr = model.generate_custom_voice(**kwargs)
 
-            # Training drops speaker_encoder weights from checkpoints to save space.
-            # ICL needs it to compute speaker embeddings from reference audio.
-            # Borrow speaker_encoder from the base model of matching size.
-            if model.model.speaker_encoder is None:
-                import json as json_mod
-                config_path = Path(checkpoint_path) / "config.json"
-                with open(config_path, "r", encoding="utf-8") as f:
-                    ckpt_config = json_mod.load(f)
-                base_size = "1.7B" if ckpt_config.get("tts_model_size") == "1b7" else "0.6B"
-                base_name = f"Qwen/Qwen3-TTS-12Hz-{base_size}-Base"
-                print(f"Speaker encoder missing - borrowing from {base_size} base model...")
+            # Convert to numpy if needed
+            audio_data = wavs[0]
+            if hasattr(audio_data, "cpu"):
+                audio_data = audio_data.cpu().numpy()
+            elif hasattr(audio_data, "numpy"):
+                audio_data = audio_data.numpy()
 
-                # Try local first, then HuggingFace
-                local_path = check_model_available_locally(base_name)
-                base_to_load = str(local_path) if local_path else base_name
-
-                base_model = Qwen3TTSModel.from_pretrained(
-                    base_to_load,
-                    device_map=device,
-                    torch_dtype=dtype,
-                )
-                model.model.speaker_encoder = base_model.model.speaker_encoder
-                model.model.speaker_encoder_sample_rate = base_model.model.speaker_encoder_sample_rate
-                del base_model
-                empty_device_cache()
-                print("Speaker encoder transplanted successfully")
-
-            # Create voice clone prompt with ICL (not x-vector only)
-            prompt_items = model.create_voice_clone_prompt(
-                ref_audio=str(voice_sample_path),
-                ref_text=ref_text,
-                x_vector_only_mode=False,
-            )
-
-            # Build generation kwargs
-            gen_kwargs = {
-                'max_new_tokens': int(max_new_tokens),
-            }
-            if do_sample:
-                gen_kwargs['do_sample'] = True
-                gen_kwargs['temperature'] = temperature
-                if top_k > 0:
-                    gen_kwargs['top_k'] = int(top_k)
-                if top_p < 1.0:
-                    gen_kwargs['top_p'] = top_p
-                if repetition_penalty != 1.0:
-                    gen_kwargs['repetition_penalty'] = repetition_penalty
-
-            wavs, sr = model.generate_voice_clone(
-                text=text.strip(),
-                language=language if language != "Auto" else "Auto",
-                voice_clone_prompt=prompt_items,
-                **gen_kwargs
-            )
-        else:
-            # Speaker embedding mode: use generate_custom_voice
-            # Ensure model type allows custom voice (patch "base" models)
-            if hasattr(model, 'model') and hasattr(model.model, 'tts_model_type'):
-                if model.model.tts_model_type != "custom_voice":
-                    print(f"Patching tts_model_type from '{model.model.tts_model_type}' to 'custom_voice' for speaker embedding inference")
-                    model.model.tts_model_type = "custom_voice"
-
-            kwargs = {
-                "text": text.strip(),
-                "language": language if language != "Auto" else "Auto",
-                "speaker": speaker_name,
-                "do_sample": do_sample,
-                "temperature": temperature,
-                "top_k": top_k,
-                "top_p": top_p,
-                "repetition_penalty": repetition_penalty,
-                "max_new_tokens": max_new_tokens
-            }
-            if instruct and instruct.strip():
-                kwargs["instruct"] = instruct.strip()
-
-            wavs, sr = model.generate_custom_voice(**kwargs)
-
-        # Convert to numpy if needed
-        audio_data = wavs[0]
-        if hasattr(audio_data, "cpu"):
-            audio_data = audio_data.cpu().numpy()
-        elif hasattr(audio_data, "numpy"):
-            audio_data = audio_data.numpy()
-
-        return audio_data, sr
+            return audio_data, sr
+        finally:
+            if model is not None:
+                del model
+            gc.collect()
+            empty_device_cache()
 
     def generate_voice_clone_qwen(self, text: str, language: str, prompt_items, seed: int = -1,
                                   do_sample: bool = True, temperature: float = 0.9, top_k: int = 50,
@@ -946,8 +1000,7 @@ class TTSManager:
     def compute_sample_hash(self, wav_path: str, ref_text: str) -> str:
         """Compute hash of sample to detect changes."""
         hasher = hashlib.md5()
-        with open(wav_path, 'rb') as f:
-            hasher.update(f.read())
+        hasher.update(self._hash_file_md5(wav_path).encode("utf-8"))
         hasher.update(ref_text.encode('utf-8'))
         return hasher.hexdigest()
 
@@ -986,8 +1039,8 @@ class TTSManager:
         cache_key = f"{sample_name}_{model_size}"
 
         # Check memory cache first
-        if cache_key in self._voice_prompt_cache:
-            cached = self._voice_prompt_cache[cache_key]
+        cached = self._lru_get(self._voice_prompt_cache, cache_key)
+        if cached is not None:
             if cached['hash'] == expected_hash:
                 return cached['prompt']
 
@@ -1020,10 +1073,15 @@ class TTSManager:
                 prompt_items = cached_prompt.to(device) if isinstance(cached_prompt, torch.Tensor) else cached_prompt
 
             # Store in memory cache
-            self._voice_prompt_cache[cache_key] = {
+            self._lru_put(
+                self._voice_prompt_cache,
+                cache_key,
+                {
                 'prompt': prompt_items,
                 'hash': expected_hash
-            }
+                },
+                self._voice_prompt_cache_limit,
+            )
 
             return prompt_items
 
@@ -1037,10 +1095,7 @@ class TTSManager:
 
     def compute_audio_hash(self, wav_path):
         """Compute a hash of the raw audio file bytes (used for LuxTTS prompt caching)."""
-        hasher = hashlib.md5()
-        with open(wav_path, "rb") as f:
-            hasher.update(f.read())
-        return hasher.hexdigest()
+        return self._hash_file_md5(wav_path)
 
     def get_luxtts_prompt_cache_path(self, sample_name):
         """Get the path to the cached LuxTTS encoded prompt file."""
@@ -1083,8 +1138,8 @@ class TTSManager:
         cache_key = sample_name
 
         # Check memory cache
-        if cache_key in self._luxtts_prompt_cache:
-            cached = self._luxtts_prompt_cache[cache_key]
+        cached = self._lru_get(self._luxtts_prompt_cache, cache_key)
+        if cached is not None:
             if cached.get("audio_hash") == expected_audio_hash:
                 return cached["prompt"]
 
@@ -1119,10 +1174,15 @@ class TTSManager:
             else:
                 prompt = cached_prompt.to(device) if isinstance(cached_prompt, torch.Tensor) else cached_prompt
 
-            self._luxtts_prompt_cache[cache_key] = {
+            self._lru_put(
+                self._luxtts_prompt_cache,
+                cache_key,
+                {
                 "prompt": prompt,
                 "audio_hash": expected_audio_hash,
-            }
+                },
+                self._luxtts_prompt_cache_limit,
+            )
 
             return prompt
 
@@ -1201,10 +1261,15 @@ class TTSManager:
             sample_name, encoded_prompt, audio_hash, rms=rms, ref_duration=ref_duration
         )
 
-        self._luxtts_prompt_cache[sample_name] = {
-            "prompt": encoded_prompt,
-            "audio_hash": audio_hash,
-        }
+        self._lru_put(
+            self._luxtts_prompt_cache,
+            sample_name,
+            {
+                "prompt": encoded_prompt,
+                "audio_hash": audio_hash,
+            },
+            self._luxtts_prompt_cache_limit,
+        )
 
         return encoded_prompt, False
 
@@ -1299,6 +1364,7 @@ class TTSManager:
             return source_path
         return source
 
+    @_with_manager_lock
     def get_chatterbox_tts(self):
         """Load Chatterbox TTS model (English)."""
         self._check_and_unload_if_different("chatterbox_tts")
@@ -1324,6 +1390,7 @@ class TTSManager:
 
         return self._chatterbox_tts_model
 
+    @_with_manager_lock
     def get_chatterbox_multilingual(self):
         """Load Chatterbox Multilingual TTS model (23 languages)."""
         self._check_and_unload_if_different("chatterbox_mtl")
@@ -1349,6 +1416,7 @@ class TTSManager:
 
         return self._chatterbox_mtl_model
 
+    @_with_manager_lock
     def get_chatterbox_vc(self):
         """Load Chatterbox Voice Conversion model."""
         self._check_and_unload_if_different("chatterbox_vc")

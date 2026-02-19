@@ -28,11 +28,16 @@ from modules.core_components.tools.generated_output_save import (
     parse_modal_submission,
     save_generated_output,
 )
+from modules.core_components.tools.output_audio_pipeline import (
+    OutputAudioPipelineConfig,
+    apply_generation_output_pipeline,
+)
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
     wire_prompt_apply_listener,
 )
+from modules.core_components.runtime import MemoryAdmissionError
 
 
 class VoicePresetsTool(Tool):
@@ -70,6 +75,7 @@ class VoicePresetsTool(Tool):
         get_dataset_files = shared_state['get_dataset_files']
         confirm_trigger = shared_state['confirm_trigger']
         input_trigger = shared_state['input_trigger']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         with gr.TabItem("Voice Presets", id="tab_voice_presets") as voice_presets_tab:
             components['voice_presets_tab'] = voice_presets_tab
@@ -278,6 +284,25 @@ class VoicePresetsTool(Tool):
                         type="filepath",
                         interactive=True,
                     )
+                    with gr.Row():
+                        components['custom_output_enable_denoise'] = gr.Checkbox(
+                            label="Enable Denoise",
+                            value=False,
+                            visible=deepfilter_available,
+                        )
+                        components['custom_output_enable_normalize'] = gr.Checkbox(
+                            label="Enable Normalize",
+                            value=False,
+                        )
+                        components['custom_output_enable_mono'] = gr.Checkbox(
+                            label="Enable Mono",
+                            value=False,
+                        )
+                        components['custom_output_apply_pipeline_btn'] = gr.Button(
+                            "Apply Pipeline",
+                            variant="secondary",
+                            size="sm",
+                        )
                     components['custom_save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
                     components['custom_suggested_name'] = gr.State(value="")
                     components['custom_metadata_text'] = gr.State(value="")
@@ -309,6 +334,11 @@ class VoicePresetsTool(Tool):
         configure_tts_manager_for_tenant = shared_state.get('configure_tts_manager_for_tenant')
         play_completion_beep = shared_state.get('play_completion_beep')
         user_config = shared_state.get('_user_config', {})
+        run_heavy_job = shared_state.get('run_heavy_job')
+        normalize_audio = shared_state['normalize_audio']
+        convert_to_mono = shared_state['convert_to_mono']
+        clean_audio = shared_state['clean_audio']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager()
@@ -536,19 +566,19 @@ class VoicePresetsTool(Tool):
                                      request: gr.Request = None, progress=gr.Progress()):
             """Generate audio with either premium or trained voice."""
             icl_sample_name = get_selected_icl_filename(icl_lister_value) if icl_lister_value else None
+            def _generate_impl():
+                if voice_type == "Qwen Speakers":
+                    speaker = extract_speaker_name(premium_speaker)
+                    if not speaker:
+                        return None, "❌ Please select a premium speaker", gr.update(interactive=False), "", ""
 
-            if voice_type == "Qwen Speakers":
-                speaker = extract_speaker_name(premium_speaker)
-                if not speaker:
-                    return None, "❌ Please select a premium speaker", gr.update(interactive=False), "", ""
+                    return generate_custom_voice_handler(
+                        text, lang, speaker, instruct, seed,
+                        "1.7B" if model_size == "Large" else "0.6B",
+                        do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens, request,
+                        progress
+                    )
 
-                return generate_custom_voice_handler(
-                    text, lang, speaker, instruct, seed,
-                    "1.7B" if model_size == "Large" else "0.6B",
-                    do_sample, temperature, top_k, top_p, repetition_penalty, max_new_tokens, request,
-                    progress
-                )
-            else:
                 if not trained_model or trained_model in ["(No trained models found)", "(Select Model)"]:
                     return None, "❌ Please select a trained model or train one first", gr.update(interactive=False), "", ""
 
@@ -570,6 +600,13 @@ class VoicePresetsTool(Tool):
                     icl_enabled, icl_dataset, icl_sample_name, request,
                     progress
                 )
+
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("voice_presets_generate", _generate_impl, request=request)
+                return _generate_impl()
+            except MemoryAdmissionError as exc:
+                return None, f"⚠ Memory safety guard rejected request: {str(exc)}", gr.update(interactive=False), "", ""
 
         # Only wire events for components that exist (not None)
         if components.get('voice_type_radio') is not None:
@@ -760,6 +797,35 @@ class VoicePresetsTool(Tool):
                 components['custom_suggested_name'],
                 components['custom_metadata_text'],
             ]
+        )
+
+        def apply_preset_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+            pipeline = OutputAudioPipelineConfig(
+                enable_denoise=bool(enable_denoise),
+                enable_normalize=bool(enable_normalize),
+                enable_mono=bool(enable_mono),
+            )
+            updated_audio, status = apply_generation_output_pipeline(
+                audio_value,
+                pipeline,
+                deepfilter_available=deepfilter_available,
+                denoise_step=lambda path: clean_audio(path),
+                normalize_step=lambda path: normalize_audio(path, request=request),
+                mono_step=lambda path: convert_to_mono(path, request=request),
+            )
+            if not updated_audio:
+                return gr.update(), status
+            return gr.update(value=updated_audio), status
+
+        components['custom_output_apply_pipeline_btn'].click(
+            apply_preset_output_pipeline,
+            inputs=[
+                components['custom_output_audio'],
+                components['custom_output_enable_denoise'],
+                components['custom_output_enable_normalize'],
+                components['custom_output_enable_mono'],
+            ],
+            outputs=[components['custom_output_audio'], components['preset_status']],
         )
 
         save_vpreset_modal_js = show_input_modal_js(

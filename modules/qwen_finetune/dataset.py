@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from pathlib import Path
 from typing import Any, List, Tuple, Union
 
 import librosa
@@ -31,17 +33,49 @@ AudioLike = Union[
 MaybeList = Union[Any, List[Any]]
 
 class TTSDataset(Dataset):
-    def __init__(self, data_list, processor, config:Qwen3TTSConfig, lag_num = -1):
-        self.data_list = data_list
+    def __init__(self, data_source, processor, config:Qwen3TTSConfig, lag_num = -1):
+        self.data_list = None
+        self.jsonl_path = None
+        self.line_offsets = None
+
+        if isinstance(data_source, (str, Path)):
+            self.jsonl_path = str(data_source)
+            self.line_offsets = self._index_jsonl(self.jsonl_path)
+        else:
+            self.data_list = data_source
+
         self.processor = processor
         self.lag_num = lag_num
         self.config = config
 
     def __len__(self):
-        return len(self.data_list)
-    
+        if self.data_list is not None:
+            return len(self.data_list)
+        return len(self.line_offsets)
+
+    def _index_jsonl(self, jsonl_path: str) -> List[int]:
+        offsets = []
+        with open(jsonl_path, "rb") as f:
+            while True:
+                offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                if line.strip():
+                    offsets.append(offset)
+        return offsets
+
+    def _load_item(self, idx: int) -> dict:
+        if self.data_list is not None:
+            return self.data_list[idx]
+
+        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+            f.seek(self.line_offsets[idx])
+            line = f.readline()
+
+        return json.loads(line)
+
     def _load_audio_to_np(self, x: str) -> Tuple[np.ndarray, int]:
-        
         audio, sr = librosa.load(x, sr=None, mono=True)
 
         if audio.ndim > 1:
@@ -118,12 +152,10 @@ class TTSDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        item = self.data_list[idx]
+        item = self._load_item(idx)
 
-        audio_path  = item["audio"]
         text        = item["text"]
         audio_codes = item["audio_codes"]
-        language        = item.get('language','Auto')
         ref_audio_path  = item['ref_audio']
 
         text = self._build_assistant_text(text)

@@ -29,6 +29,10 @@ from modules.core_components.tools.generated_output_save import (
     parse_modal_submission,
     save_generated_output,
 )
+from modules.core_components.tools.output_audio_pipeline import (
+    OutputAudioPipelineConfig,
+    apply_generation_output_pipeline,
+)
 from gradio_filelister import FileLister
 
 
@@ -49,6 +53,7 @@ class VoiceChangerTool(Tool):
         components = {}
 
         get_sample_choices = shared_state['get_sample_choices']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         with gr.TabItem("Voice Changer") as voice_changer_tab:
             components['voice_changer_tab'] = voice_changer_tab
@@ -110,6 +115,25 @@ class VoiceChangerTool(Tool):
                         type="filepath",
                         interactive=True,
                     )
+                    with gr.Row():
+                        components['output_enable_denoise'] = gr.Checkbox(
+                            label="Enable Denoise",
+                            value=False,
+                            visible=deepfilter_available,
+                        )
+                        components['output_enable_normalize'] = gr.Checkbox(
+                            label="Enable Normalize",
+                            value=False,
+                        )
+                        components['output_enable_mono'] = gr.Checkbox(
+                            label="Enable Mono",
+                            value=False,
+                        )
+                        components['output_apply_pipeline_btn'] = gr.Button(
+                            "Apply Pipeline",
+                            variant="secondary",
+                            size="sm",
+                        )
 
                     with gr.Row():
                         components['save_btn'] = gr.Button(
@@ -140,6 +164,10 @@ class VoiceChangerTool(Tool):
         play_completion_beep = shared_state.get('play_completion_beep')
         show_input_modal_js = shared_state['show_input_modal_js']
         input_trigger = shared_state['input_trigger']
+        normalize_audio = shared_state['normalize_audio']
+        convert_to_mono = shared_state['convert_to_mono']
+        clean_audio = shared_state['clean_audio']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         tts_manager = get_tts_manager()
 
@@ -249,6 +277,35 @@ class VoiceChangerTool(Tool):
                 components['metadata_text'],
                 components['convert_status'],
             ]
+        )
+
+        def apply_voice_changer_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+            pipeline = OutputAudioPipelineConfig(
+                enable_denoise=bool(enable_denoise),
+                enable_normalize=bool(enable_normalize),
+                enable_mono=bool(enable_mono),
+            )
+            updated_audio, status = apply_generation_output_pipeline(
+                audio_value,
+                pipeline,
+                deepfilter_available=deepfilter_available,
+                denoise_step=lambda path: clean_audio(path),
+                normalize_step=lambda path: normalize_audio(path, request=request),
+                mono_step=lambda path: convert_to_mono(path, request=request),
+            )
+            if not updated_audio:
+                return gr.update(), status
+            return gr.update(value=updated_audio), status
+
+        components['output_apply_pipeline_btn'].click(
+            apply_voice_changer_output_pipeline,
+            inputs=[
+                components['output_audio'],
+                components['output_enable_denoise'],
+                components['output_enable_normalize'],
+                components['output_enable_mono'],
+            ],
+            outputs=[components['output_audio'], components['convert_status']],
         )
 
         # Target voice preview + text + info

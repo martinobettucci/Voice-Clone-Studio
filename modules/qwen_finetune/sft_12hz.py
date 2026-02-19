@@ -100,9 +100,8 @@ def train():
         )
     config = AutoConfig.from_pretrained(MODEL_PATH)
 
-    train_data = open(args.train_jsonl).readlines()
-    train_data = [json.loads(line) for line in train_data]
-    dataset = TTSDataset(train_data, qwen3tts.processor, config)
+    dataset = TTSDataset(args.train_jsonl, qwen3tts.processor, config)
+    print(f"Indexed training dataset: {len(dataset)} samples from {args.train_jsonl}")
     train_dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=dataset.collate_fn)
 
     optimizer = AdamW(qwen3tts.model.parameters(), lr=args.lr, weight_decay=0.01)

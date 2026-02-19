@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 from modules.core_components.ai_models.model_utils import set_seed
+from modules.core_components.runtime import MemoryAdmissionError
 
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.ai_models.tts_manager import get_tts_manager
@@ -33,6 +34,10 @@ from modules.core_components.tools.generated_output_save import (
     get_existing_wav_stems,
     parse_modal_submission,
     save_generated_output,
+)
+from modules.core_components.tools.output_audio_pipeline import (
+    OutputAudioPipelineConfig,
+    apply_generation_output_pipeline,
 )
 from gradio_filelister import FileLister
 
@@ -63,6 +68,7 @@ class VoiceCloneTool(Tool):
         TTS_ENGINES = shared_state.get('TTS_ENGINES', {})
         _user_config = shared_state['_user_config']
         _active_emotions = shared_state['_active_emotions']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         # Filter voice clone options based on enabled engines
         engine_settings = _user_config.get("enabled_engines", {})
@@ -261,6 +267,25 @@ class VoiceCloneTool(Tool):
                         type="filepath",
                         interactive=True,
                     )
+                    with gr.Row():
+                        components['output_enable_denoise'] = gr.Checkbox(
+                            label="Enable Denoise",
+                            value=False,
+                            visible=deepfilter_available,
+                        )
+                        components['output_enable_normalize'] = gr.Checkbox(
+                            label="Enable Normalize",
+                            value=False,
+                        )
+                        components['output_enable_mono'] = gr.Checkbox(
+                            label="Enable Mono",
+                            value=False,
+                        )
+                        components['output_apply_pipeline_btn'] = gr.Button(
+                            "Apply Pipeline",
+                            variant="secondary",
+                            size="sm",
+                        )
                     components['save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
                     components['suggested_name'] = gr.State(value="")
                     components['metadata_text'] = gr.State(value="")
@@ -293,6 +318,11 @@ class VoiceCloneTool(Tool):
         get_tenant_output_dir = shared_state['get_tenant_output_dir']
         get_tenant_paths = shared_state['get_tenant_paths']
         play_completion_beep = shared_state.get('play_completion_beep')
+        run_heavy_job = shared_state.get('run_heavy_job')
+        normalize_audio = shared_state['normalize_audio']
+        convert_to_mono = shared_state['convert_to_mono']
+        clean_audio = shared_state['clean_audio']
+        deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
 
         # Get TTS manager (singleton)
         tts_manager = get_tts_manager()
@@ -370,14 +400,14 @@ class VoiceCloneTool(Tool):
                     "(using Whisper or VibeVoice ASR), then try again."
                 ), gr.update(interactive=False), "", ""
 
-            try:
+            def _generate_impl():
                 # Set the seed for reproducibility
-                seed = int(seed) if seed is not None else -1
-                if seed < 0:
-                    seed = random.randint(0, 2147483647)
+                resolved_seed = int(seed) if seed is not None else -1
+                if resolved_seed < 0:
+                    resolved_seed = random.randint(0, 2147483647)
 
-                set_seed(seed)
-                seed_msg = f"Seed: {seed}"
+                set_seed(resolved_seed)
+                seed_msg = f"Seed: {resolved_seed}"
                 if configure_tts_manager_for_tenant:
                     configure_tts_manager_for_tenant(request=request, strict=True)
 
@@ -405,7 +435,7 @@ class VoiceCloneTool(Tool):
                         text=text_to_generate,
                         language=language,
                         prompt_items=prompt_items,
-                        seed=seed,
+                        seed=resolved_seed,
                         do_sample=qwen_do_sample,
                         temperature=qwen_temperature,
                         top_k=qwen_top_k,
@@ -425,7 +455,7 @@ class VoiceCloneTool(Tool):
                     audio_data, sr = tts_manager.generate_voice_clone_vibevoice(
                         text=text_to_generate,
                         voice_sample_path=sample["wav_path"],
-                        seed=seed,
+                        seed=resolved_seed,
                         do_sample=vv_do_sample,
                         temperature=vv_temperature,
                         top_k=vv_top_k,
@@ -457,7 +487,7 @@ class VoiceCloneTool(Tool):
                         rms=float(lux_rms),
                         ref_duration=int(lux_ref_duration),
                         guidance_scale=float(lux_guidance_scale),
-                        seed=seed,
+                        seed=resolved_seed,
                         ref_text=sample.get("ref_text") or sample.get("meta", {}).get("Text"),
                         progress_callback=progress,
                     )
@@ -475,7 +505,7 @@ class VoiceCloneTool(Tool):
                             text=text_to_generate,
                             language_code=lang_code,
                             voice_sample_path=sample["wav_path"],
-                            seed=seed,
+                            seed=resolved_seed,
                             exaggeration=float(cb_exaggeration),
                             cfg_weight=float(cb_cfg_weight),
                             temperature=float(cb_temperature),
@@ -488,7 +518,7 @@ class VoiceCloneTool(Tool):
                         audio_data, sr = tts_manager.generate_voice_clone_chatterbox(
                             text=text_to_generate,
                             voice_sample_path=sample["wav_path"],
-                            seed=seed,
+                            seed=resolved_seed,
                             exaggeration=float(cb_exaggeration),
                             cfg_weight=float(cb_cfg_weight),
                             temperature=float(cb_temperature),
@@ -516,7 +546,7 @@ class VoiceCloneTool(Tool):
                     Sample: {sample_name}
                     Engine: {engine_display}
                     Language: {language}
-                    Seed: {seed}
+                    Seed: {resolved_seed}
                     Text: {' '.join(text_to_generate.split())}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
@@ -532,6 +562,12 @@ class VoiceCloneTool(Tool):
                     metadata_out,
                 )
 
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("voice_clone_generate", _generate_impl, request=request)
+                return _generate_impl()
+            except MemoryAdmissionError as exc:
+                return None, f"⚠ Memory safety guard rejected request: {str(exc)}", gr.update(interactive=False), "", ""
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -688,6 +724,35 @@ class VoiceCloneTool(Tool):
                 components['suggested_name'],
                 components['metadata_text'],
             ]
+        )
+
+        def apply_clone_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+            pipeline = OutputAudioPipelineConfig(
+                enable_denoise=bool(enable_denoise),
+                enable_normalize=bool(enable_normalize),
+                enable_mono=bool(enable_mono),
+            )
+            updated_audio, status = apply_generation_output_pipeline(
+                audio_value,
+                pipeline,
+                deepfilter_available=deepfilter_available,
+                denoise_step=lambda path: clean_audio(path),
+                normalize_step=lambda path: normalize_audio(path, request=request),
+                mono_step=lambda path: convert_to_mono(path, request=request),
+            )
+            if not updated_audio:
+                return gr.update(), status
+            return gr.update(value=updated_audio), status
+
+        components['output_apply_pipeline_btn'].click(
+            apply_clone_output_pipeline,
+            inputs=[
+                components['output_audio'],
+                components['output_enable_denoise'],
+                components['output_enable_normalize'],
+                components['output_enable_mono'],
+            ],
+            outputs=[components['output_audio'], components['clone_status']],
         )
 
         save_clone_modal_js = show_input_modal_js(

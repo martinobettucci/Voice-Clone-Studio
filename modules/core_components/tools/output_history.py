@@ -17,6 +17,7 @@ import gradio as gr
 from pathlib import Path
 from datetime import datetime
 from modules.core_components.tool_base import Tool, ToolConfig
+from modules.core_components.tools.generated_output_save import convert_audio_file_to_mp3
 from gradio_filelister import FileLister
 
 
@@ -48,6 +49,7 @@ class OutputHistoryTool(Tool):
                         interactive=True,
                     )
                     with gr.Row():
+                        components['convert_output_btn'] = gr.Button("Convert to MP3", size="sm")
                         components['delete_output_btn'] = gr.Button("Delete Selected", size="sm", variant="stop")
 
                 with gr.Column(scale=1):
@@ -64,10 +66,14 @@ class OutputHistoryTool(Tool):
                         interactive=False,
                         max_lines=15
                     )
+                    components['history_download'] = gr.File(
+                        label="Download Selected",
+                        interactive=False
+                    )
                     components['delete_status'] = gr.Textbox(
                         label="Status",
                         interactive=False,
-                        max_lines=1
+                        max_lines=2
                     )
 
         return components
@@ -85,7 +91,14 @@ class OutputHistoryTool(Tool):
             """Get list of generated output files for the FileLister widget."""
             if not output_dir or not output_dir.exists():
                 return []
-            files = sorted(output_dir.glob("*.wav"), key=lambda x: x.stat().st_mtime, reverse=True)
+            files = sorted(
+                [
+                    f for f in output_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in {".wav", ".mp3"}
+                ],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
             result = []
             for f in files:
                 try:
@@ -111,13 +124,13 @@ class OutputHistoryTool(Tool):
             Multiple or no files: clear audio + metadata.
             """
             if not lister_value:
-                return None, ""
+                return None, "", None
 
             selected = lister_value.get("selected", [])
             try:
                 output_dir = get_tenant_output_dir(request=request, strict=True)
             except Exception as e:
-                return None, f"Tenant error: {str(e)}"
+                return None, f"Tenant error: {str(e)}", None
 
             if len(selected) == 1:
                 file_path = output_dir / selected[0]
@@ -126,12 +139,12 @@ class OutputHistoryTool(Tool):
                     if metadata_file.exists():
                         try:
                             metadata = metadata_file.read_text(encoding="utf-8")
-                            return str(file_path), metadata
+                            return str(file_path), metadata, str(file_path)
                         except Exception:
                             pass
-                    return str(file_path), "No metadata available"
+                    return str(file_path), "No metadata available", str(file_path)
             # Multiple or no selection - clear
-            return None, ""
+            return None, "", None
 
         def delete_selected_files(action, lister_value, request: gr.Request):
             """Delete selected output files and their metadata."""
@@ -158,10 +171,15 @@ class OutputHistoryTool(Tool):
                 try:
                     audio_path = output_dir / filename
                     txt_path = audio_path.with_suffix(".txt")
+                    stem = audio_path.stem
 
                     if audio_path.exists():
                         audio_path.unlink()
-                    if txt_path.exists():
+
+                    # Only remove metadata when no audio variants remain for this stem.
+                    sibling_wav = output_dir / f"{stem}.wav"
+                    sibling_mp3 = output_dir / f"{stem}.mp3"
+                    if txt_path.exists() and not sibling_wav.exists() and not sibling_mp3.exists():
                         txt_path.unlink()
                     deleted_count += 1
                 except Exception as e:
@@ -175,6 +193,37 @@ class OutputHistoryTool(Tool):
                 msg = f"Deleted {deleted_count} file(s)"
 
             return msg, updated_files
+
+        def convert_selected_file_to_mp3(lister_value, request: gr.Request):
+            """Convert a selected saved output WAV file to MP3."""
+            if not lister_value or not lister_value.get("selected"):
+                return "[ERROR] No file selected", gr.update(), gr.update(), gr.update()
+
+            selected = lister_value["selected"]
+            if len(selected) != 1:
+                return "[ERROR] Select exactly one file to convert", gr.update(), gr.update(), gr.update()
+
+            filename = selected[0]
+            try:
+                output_dir = get_tenant_output_dir(request=request, strict=True)
+            except Exception as e:
+                return f"Tenant error: {str(e)}", gr.update(), gr.update(), gr.update()
+
+            source_path = output_dir / filename
+            if not source_path.exists():
+                return f"[ERROR] File not found: {filename}", gr.update(), gr.update(), gr.update()
+
+            if source_path.suffix.lower() != ".wav":
+                return "[ERROR] Only WAV outputs can be converted to MP3", gr.update(), gr.update(), gr.update()
+
+            try:
+                mp3_path = convert_audio_file_to_mp3(source_path, source_path.with_suffix(".mp3"))
+            except Exception as e:
+                return f"[ERROR] {str(e)}", gr.update(), gr.update(), gr.update()
+
+            status = f"Converted to MP3: {mp3_path.name} ({mp3_path})"
+            updated_files = get_output_files_for_lister(output_dir)
+            return status, updated_files, str(mp3_path), str(mp3_path)
 
         # Show modal on delete button click
         if show_confirmation_modal_js and confirm_trigger:
@@ -202,11 +251,22 @@ class OutputHistoryTool(Tool):
             outputs=[components['file_lister']]
         )
 
+        components['convert_output_btn'].click(
+            convert_selected_file_to_mp3,
+            inputs=[components['file_lister']],
+            outputs=[
+                components['delete_status'],
+                components['file_lister'],
+                components['history_audio'],
+                components['history_download'],
+            ]
+        )
+
         # Load audio on selection change (click = display only, no autoplay)
         components['file_lister'].change(
             on_file_selection_change,
             inputs=[components['file_lister']],
-            outputs=[components['history_audio'], components['history_metadata']]
+            outputs=[components['history_audio'], components['history_metadata'], components['history_download']]
         )
 
         # Double-click = play audio by clicking the WaveSurfer play button via JS.
