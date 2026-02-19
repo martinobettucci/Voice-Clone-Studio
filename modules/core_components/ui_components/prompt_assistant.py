@@ -22,6 +22,7 @@ def create_prompt_assistant(
 
     default_target = default_target_id if default_target_id in [c[1] for c in choices] else choices[0][1]
     default_preset = prompt_hub.get_target_default_preset(default_target)
+    default_language = prompt_hub.get_prompt_assistant_default_language(shared_state.get("_user_config", {}))
     saved_names = prompt_hub.get_prompt_names()
 
     components: Dict[str, object] = {}
@@ -55,6 +56,34 @@ def create_prompt_assistant(
             placeholder="Describe what text to generate for the selected target field...",
             interactive=True,
         )
+
+        components["placeholder_help"] = gr.Markdown(
+            (
+                "Placeholders: `{existing}` = current target field text, `{mode}` = `append` or `replace`, "
+                "`{instruction}` = resolved instruction text (useful in Custom System), "
+                "`{available_emotions}` = available conversation emotions."
+            )
+        )
+
+        with gr.Row():
+            components["placeholder_token"] = gr.Dropdown(
+                label="Insert Placeholder",
+                choices=["{existing}", "{mode}", "{instruction}", "{available_emotions}"],
+                value="{existing}",
+                interactive=True,
+                scale=2,
+            )
+            components["insert_instruction_placeholder"] = gr.Button("Insert in Instruction", size="sm", scale=1)
+            components["insert_system_placeholder"] = gr.Button("Insert in Custom System", size="sm", scale=1)
+
+        with gr.Row():
+            components["language"] = gr.Dropdown(
+                label="Language",
+                choices=prompt_hub.PROMPT_ASSISTANT_LANGUAGE_CHOICES,
+                value=default_language,
+                info="Default comes from Settings. Change here to override for this tab.",
+                interactive=True,
+            )
 
         with gr.Row():
             components["system_preset"] = gr.Dropdown(
@@ -126,7 +155,7 @@ def wire_prompt_assistant_events(
             return _blank_updates("Select a saved prompt first.")
         return _apply_text(mode, selected_target, saved_text, *current_values)
 
-    def generate_and_apply(mode, instruction, preset_name, custom_system, selected_target, *current_values):
+    def generate_and_apply(mode, instruction, preset_name, custom_system, selected_language, selected_target, *current_values):
         target_id = _resolve_target(selected_target)
         current_map = dict(zip(target_ids, current_values))
         existing_text = str(current_map.get(target_id, "") or "")
@@ -138,6 +167,7 @@ def wire_prompt_assistant_events(
             custom_system_override=str(custom_system or ""),
             existing_text=existing_text,
             apply_mode=mode,
+            output_language=str(selected_language or ""),
         )
         if error:
             return _blank_updates(error)
@@ -153,6 +183,15 @@ def wire_prompt_assistant_events(
         default_preset = prompt_hub.get_target_default_preset(target_id)
         return gr.update(value=default_preset)
 
+    def insert_placeholder(current_text, token):
+        token_text = str(token or "").strip()
+        if not token_text:
+            return gr.update(value=current_text)
+        current = str(current_text or "")
+        if current and not current.endswith((" ", "\n")):
+            return gr.update(value=f"{current} {token_text}")
+        return gr.update(value=f"{current}{token_text}")
+
     assistant["refresh_saved"].click(
         refresh_saved,
         inputs=[assistant["saved_prompt"]],
@@ -163,6 +202,18 @@ def wire_prompt_assistant_events(
         on_target_change,
         inputs=[assistant["target"]],
         outputs=[assistant["system_preset"]],
+    )
+
+    assistant["insert_instruction_placeholder"].click(
+        insert_placeholder,
+        inputs=[assistant["instruction"], assistant["placeholder_token"]],
+        outputs=[assistant["instruction"]],
+    )
+
+    assistant["insert_system_placeholder"].click(
+        insert_placeholder,
+        inputs=[assistant["custom_system"], assistant["placeholder_token"]],
+        outputs=[assistant["custom_system"]],
     )
 
     assistant["apply_replace"].click(
@@ -178,13 +229,14 @@ def wire_prompt_assistant_events(
     )
 
     assistant["generate_replace"].click(
-        lambda instruction, preset, custom_system, target_id, *vals: generate_and_apply(
-            "replace", instruction, preset, custom_system, target_id, *vals
+        lambda instruction, preset, custom_system, language, target_id, *vals: generate_and_apply(
+            "replace", instruction, preset, custom_system, language, target_id, *vals
         ),
         inputs=[
             assistant["instruction"],
             assistant["system_preset"],
             assistant["custom_system"],
+            assistant["language"],
             assistant["target"],
             *target_outputs,
         ],
@@ -192,13 +244,14 @@ def wire_prompt_assistant_events(
     )
 
     assistant["generate_append"].click(
-        lambda instruction, preset, custom_system, target_id, *vals: generate_and_apply(
-            "append", instruction, preset, custom_system, target_id, *vals
+        lambda instruction, preset, custom_system, language, target_id, *vals: generate_and_apply(
+            "append", instruction, preset, custom_system, language, target_id, *vals
         ),
         inputs=[
             assistant["instruction"],
             assistant["system_preset"],
             assistant["custom_system"],
+            assistant["language"],
             assistant["target"],
             *target_outputs,
         ],

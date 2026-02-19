@@ -37,6 +37,10 @@ class MemorySnapshot:
     gpu_total_bytes: int
     gpu_reserved_pct_of_total: float
     active_heavy_jobs: int
+    active_heavy_job_names: tuple[str, ...]
+    admitted_jobs_total: int
+    rejected_jobs_total: int
+    completed_jobs_total: int
 
 
 class MemoryAdmissionError(RuntimeError):
@@ -53,6 +57,10 @@ class MemoryGovernor:
     def __init__(self, config: dict[str, Any] | None = None):
         self._lock = threading.RLock()
         self._active_heavy_jobs = 0
+        self._active_job_names: set[str] = set()
+        self._admitted_jobs_total = 0
+        self._rejected_jobs_total = 0
+        self._completed_jobs_total = 0
         self._process = psutil.Process(os.getpid())
         self._config = {}
         self.update_config(config or {})
@@ -111,6 +119,10 @@ class MemoryGovernor:
 
         with self._lock:
             active_heavy_jobs = self._active_heavy_jobs
+            active_heavy_job_names = tuple(sorted(self._active_job_names))
+            admitted_jobs_total = self._admitted_jobs_total
+            rejected_jobs_total = self._rejected_jobs_total
+            completed_jobs_total = self._completed_jobs_total
 
         return MemorySnapshot(
             timestamp=time.time(),
@@ -124,6 +136,10 @@ class MemoryGovernor:
             gpu_total_bytes=gpu_total,
             gpu_reserved_pct_of_total=gpu_reserved_pct,
             active_heavy_jobs=active_heavy_jobs,
+            active_heavy_job_names=active_heavy_job_names,
+            admitted_jobs_total=admitted_jobs_total,
+            rejected_jobs_total=rejected_jobs_total,
+            completed_jobs_total=completed_jobs_total,
         )
 
     def reject_reason(self, snapshot: MemorySnapshot) -> str | None:
@@ -164,6 +180,7 @@ class MemoryGovernor:
             gpu_text = "GPU reserved: N/A"
         return (
             f"Heavy jobs: {snapshot.active_heavy_jobs} | "
+            f"Active names: {', '.join(snapshot.active_heavy_job_names) or 'none'} | "
             f"RSS: {rss_gb:.2f} GB ({snapshot.rss_pct_of_total:.1f}%) | "
             f"RAM available: {avail_gb:.2f} GB | "
             f"{gpu_text}"
@@ -198,6 +215,10 @@ class MemoryGovernor:
             "timestamp": snapshot.timestamp,
             "pid": snapshot.pid,
             "active_heavy_jobs": snapshot.active_heavy_jobs,
+            "active_heavy_job_names": list(snapshot.active_heavy_job_names),
+            "admitted_jobs_total": snapshot.admitted_jobs_total,
+            "rejected_jobs_total": snapshot.rejected_jobs_total,
+            "completed_jobs_total": snapshot.completed_jobs_total,
             "rss_bytes": snapshot.rss_bytes,
             "rss_pct_of_total": round(snapshot.rss_pct_of_total, 2),
             "system_available_bytes": snapshot.system_available_bytes,
@@ -227,9 +248,12 @@ class MemoryGovernor:
             admission_snapshot = self.snapshot()
             reason = self.reject_reason(admission_snapshot)
             if reason:
+                self._rejected_jobs_total += 1
                 self._log_event("reject", job_name, admission_snapshot, reason=reason)
                 raise MemoryAdmissionError(reason, admission_snapshot)
             self._active_heavy_jobs += 1
+            self._active_job_names.add(str(job_name))
+            self._admitted_jobs_total += 1
             running_snapshot = self.snapshot()
             self._log_event("admit", job_name, running_snapshot)
             if torch.cuda.is_available():
@@ -265,6 +289,8 @@ class MemoryGovernor:
 
             with self._lock:
                 self._active_heavy_jobs = max(0, self._active_heavy_jobs - 1)
+                self._active_job_names.discard(str(job_name))
+                self._completed_jobs_total += 1
                 exit_snapshot = self.snapshot()
                 self._log_event(
                     "exit",

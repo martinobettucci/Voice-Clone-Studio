@@ -173,6 +173,7 @@ Note: the Settings tab is only exposed when launching with `--allow-config`.
 ### Help Guide
 
 Dedicated top-level tab with usage guides for every active tab, including detailed end-to-end Library Manager workflows.
+Resource Monitor definitions and formulas are documented in **Help Guide > Resource Monitor**.
 
 ---
 

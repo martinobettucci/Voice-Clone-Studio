@@ -449,6 +449,7 @@ def load_config():
         "llm_use_local_ollama": False,
         "llm_ollama_url": "http://127.0.0.1:11434/v1",
         "llm_model": "gpt-4o-mini",
+        "prompt_assistant_default_language": "English",
     }
 
     try:

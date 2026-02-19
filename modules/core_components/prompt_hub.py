@@ -9,11 +9,37 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from modules.core_components.emotion_manager import CORE_EMOTIONS, EMOTIONS_FILE
 
 PROMPTS_FILE = Path(__file__).parent.parent.parent / "prompts.json"
 
 DEFAULT_OPENAI_ENDPOINT = "https://api.openai.com/v1"
 DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/v1"
+
+PROMPT_ASSISTANT_LANGUAGE_DEFAULT = "English"
+PROMPT_ASSISTANT_LANGUAGE_USE_SETTINGS = "Default (Settings)"
+PROMPT_ASSISTANT_LANGUAGE_CHOICES: List[str] = [
+    PROMPT_ASSISTANT_LANGUAGE_USE_SETTINGS,
+    "English",
+    "French",
+    "Italian",
+    "Spanish",
+    "German",
+    "Portuguese",
+    "Japanese",
+    "Chinese",
+]
+
+PROMPT_ASSISTANT_LANGUAGE_INSTRUCTIONS: Dict[str, str] = {
+    "english": "Generate the output in English.",
+    "french": "Genere la sortie en francais.",
+    "italian": "Genera in italiano.",
+    "spanish": "Genera la salida en espanol.",
+    "german": "Erzeuge die Ausgabe auf Deutsch.",
+    "portuguese": "Gere a saida em portugues.",
+    "japanese": "Generate the output in Japanese.",
+    "chinese": "Generate the output in Chinese.",
+}
 
 SYSTEM_PROMPTS: Dict[str, str] = {
     "TTS / Voice": (
@@ -27,8 +53,10 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         "You are a script writer for multi-speaker conversations. The user will give you a topic, scenario, "
         "or concept along with the number of speakers to use. "
         "Your job is to write a natural conversation where each speaker talks in FIRST PERSON to the others. "
-        "Each speaker line MUST start on a new line with their number in brackets, like [1]: or [2]: etc. "
-        "Output ONLY the conversation lines in [n]: format."
+        "Each speaker line MUST start on a new line and use this exact structure: [n]: (emotion) text. "
+        "The emotional hint is REQUIRED on every line and must be chosen from these available emotions: {available_emotions}. "
+        "Pick the most appropriate emotion for each line based on that line's intent. "
+        "Output ONLY the conversation lines in the exact [n]: (emotion) text structure."
     ),
     "Voice Style": (
         "You are a voice styling assistant for text-to-speech generation. "
@@ -388,6 +416,91 @@ def _normalize_apply_mode(apply_mode: Optional[str]) -> str:
     return "append" if str(apply_mode or "").strip().lower() == "append" else "replace"
 
 
+def get_prompt_assistant_default_language(user_config: Dict[str, object]) -> str:
+    """Return configured default Prompt Assistant language."""
+    value = str(user_config.get("prompt_assistant_default_language", PROMPT_ASSISTANT_LANGUAGE_DEFAULT)).strip()
+    return value if value in PROMPT_ASSISTANT_LANGUAGE_CHOICES else PROMPT_ASSISTANT_LANGUAGE_DEFAULT
+
+
+def resolve_prompt_assistant_language(user_config: Dict[str, object], selected_language: Optional[str]) -> str:
+    """Resolve effective Prompt Assistant language from tab override + settings default."""
+    selected = str(selected_language or "").strip()
+    if not selected or selected == PROMPT_ASSISTANT_LANGUAGE_USE_SETTINGS:
+        return get_prompt_assistant_default_language(user_config)
+    if selected in PROMPT_ASSISTANT_LANGUAGE_CHOICES:
+        return selected
+    return get_prompt_assistant_default_language(user_config)
+
+
+def get_prompt_assistant_language_instruction(language: str) -> str:
+    """Get language steering sentence for Prompt Assistant generation."""
+    key = str(language or "").strip().lower()
+    if not key:
+        return ""
+    if key in PROMPT_ASSISTANT_LANGUAGE_INSTRUCTIONS:
+        return PROMPT_ASSISTANT_LANGUAGE_INSTRUCTIONS[key]
+    return f"Generate the output in {language}."
+
+
+def _extract_emotion_names(emotions: object) -> List[str]:
+    """Extract sorted unique emotion names from an emotions dictionary."""
+    if not isinstance(emotions, dict):
+        return []
+
+    names: List[str] = []
+    for key in emotions.keys():
+        name = str(key).strip()
+        if name:
+            names.append(name)
+    return sorted(set(names), key=lambda x: x.lower())
+
+
+def _load_emotions_from_file() -> Dict[str, object]:
+    """Read emotions.json if present and valid."""
+    if not EMOTIONS_FILE.exists():
+        return {}
+
+    try:
+        with open(EMOTIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _get_available_emotions_text(user_config: Dict[str, object]) -> str:
+    """Resolve comma-separated list of available emotion hints."""
+    names = _extract_emotion_names(user_config.get("emotions"))
+    if not names:
+        names = _extract_emotion_names(_load_emotions_from_file())
+    if not names:
+        names = _extract_emotion_names(CORE_EMOTIONS)
+    return ", ".join(names)
+
+
+def _apply_prompt_placeholders(
+    text: str,
+    existing_text: Optional[str] = None,
+    instruction_text: Optional[str] = None,
+    apply_mode: Optional[str] = None,
+    available_emotions_text: Optional[str] = None,
+) -> str:
+    """Apply supported user-facing placeholders in free-form prompt text."""
+    value = str(text or "")
+    mode = _normalize_apply_mode(apply_mode)
+    existing = str(existing_text or "")
+    instruction = str(instruction_text or "")
+    available_emotions = str(available_emotions_text or "")
+    return (
+        value.replace("{existing}", existing)
+        .replace("{mode}", mode)
+        .replace("{instruction}", instruction)
+        .replace("{available_emotions}", available_emotions)
+    )
+
+
 def _build_existing_context_preamble(base_prompt: str, existing_text: str, apply_mode: str) -> str:
     """Build fallback preamble when template does not include {existing}."""
     action = "continue" if apply_mode == "append" else "replace"
@@ -402,6 +515,7 @@ def _build_target_instruction(
     instruction: str,
     existing_text: Optional[str] = None,
     apply_mode: Optional[str] = None,
+    language_instruction: Optional[str] = None,
 ) -> str:
     """Build user message with target-specific template and optional existing context."""
     cfg = get_target_config(target_id)
@@ -414,13 +528,19 @@ def _build_target_instruction(
     mode = _normalize_apply_mode(apply_mode)
 
     if "{existing}" in template:
-        return template.format(instruction=instruction_clean, existing=existing_clean)
+        final_prompt = template.format(instruction=instruction_clean, existing=existing_clean)
+    else:
+        base_prompt = template.format(instruction=instruction_clean, existing=existing_clean)
+        if not existing_clean:
+            final_prompt = base_prompt
+        else:
+            final_prompt = _build_existing_context_preamble(base_prompt, existing_clean, mode)
 
-    base_prompt = template.format(instruction=instruction_clean, existing=existing_clean)
-    if not existing_clean:
-        return base_prompt
+    language_hint = str(language_instruction or "").strip()
+    if language_hint:
+        return f"{final_prompt}\n\n{language_hint}"
 
-    return _build_existing_context_preamble(base_prompt, existing_clean, mode)
+    return final_prompt
 
 
 def generate_for_target(
@@ -431,13 +551,21 @@ def generate_for_target(
     custom_system_override: Optional[str] = None,
     existing_text: Optional[str] = None,
     apply_mode: Optional[str] = None,
+    output_language: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Generate text tailored for target field using global endpoint settings.
 
     Returns:
         (generated_text, error_message)
     """
-    if not instruction or not instruction.strip():
+    resolved_instruction = _apply_prompt_placeholders(
+        str(instruction or ""),
+        existing_text=existing_text,
+        instruction_text="",
+        apply_mode=apply_mode,
+    )
+
+    if not resolved_instruction or not resolved_instruction.strip():
         return "", "Please enter instructions."
 
     cfg = get_target_config(target_id)
@@ -452,8 +580,24 @@ def generate_for_target(
 
     default_preset = cfg.get("default_system_preset", SYSTEM_PROMPT_CHOICES[0])
     chosen_preset = preset_override if preset_override in SYSTEM_PROMPTS else default_preset
-    custom_system = (custom_system_override or "").strip()
+    available_emotions_text = _get_available_emotions_text(user_config)
+    effective_language = resolve_prompt_assistant_language(user_config, output_language)
+    language_instruction = get_prompt_assistant_language_instruction(effective_language)
+    custom_system = _apply_prompt_placeholders(
+        str(custom_system_override or ""),
+        existing_text=existing_text,
+        instruction_text=resolved_instruction,
+        apply_mode=apply_mode,
+        available_emotions_text=available_emotions_text,
+    ).strip()
     effective_system = custom_system if custom_system else SYSTEM_PROMPTS.get(chosen_preset, SYSTEM_PROMPTS[SYSTEM_PROMPT_CHOICES[0]])
+    effective_system = _apply_prompt_placeholders(
+        effective_system,
+        existing_text=existing_text,
+        instruction_text=resolved_instruction,
+        apply_mode=apply_mode,
+        available_emotions_text=available_emotions_text,
+    ).strip()
 
     payload = {
         "model": model,
@@ -463,9 +607,10 @@ def generate_for_target(
                 "role": "user",
                 "content": _build_target_instruction(
                     target_id,
-                    instruction,
+                    resolved_instruction,
                     existing_text=existing_text,
                     apply_mode=apply_mode,
+                    language_instruction=language_instruction,
                 ),
             },
         ],

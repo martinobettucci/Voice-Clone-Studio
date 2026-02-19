@@ -21,6 +21,7 @@ import random
 import tempfile
 import time
 import logging
+import html
 
 # Suppress Gradio's noisy HTTP request logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -64,7 +65,10 @@ from modules.core_components.ai_models.model_utils import (
     get_trained_models,
     configure_runtime_reproducibility,
 )
-from modules.core_components.runtime import get_memory_governor
+from modules.core_components.runtime import (
+    build_resource_monitor_payload,
+    get_memory_governor,
+)
 
 # Modular tools
 from modules.core_components.tools import (
@@ -78,6 +82,7 @@ from modules.core_components.tools import (
     TRIGGER_HIDE_CSS,
     CONFIG_FILE,
     set_runtime_options,
+    get_tenant_service,
 )
 from modules.core_components.tenant_context import validate_tenant_id
 
@@ -224,6 +229,125 @@ _tts_manager = None
 _asr_manager = None
 _foley_manager = None
 
+RESOURCE_MONITOR_CSS = """
+#resource-monitor-card {
+    margin-top: 0.4rem;
+}
+#resource-monitor-card .resource-monitor {
+    border: 1px solid var(--block-border-color);
+    border-radius: 12px;
+    padding: 0.65rem;
+    background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--background-fill-primary) 88%, transparent),
+        var(--background-fill-secondary)
+    );
+}
+#resource-monitor-card .resource-monitor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-bottom: 0.55rem;
+}
+#resource-monitor-card .resource-monitor-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--body-text-color);
+}
+#resource-monitor-card .resource-monitor-time {
+    font-size: 0.75rem;
+    color: var(--body-text-color-subdued);
+}
+#resource-monitor-card .resource-status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.73rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+}
+#resource-monitor-card .resource-status-badge--ok {
+    color: #2f8f46;
+    background: color-mix(in srgb, #2f8f46 16%, transparent);
+    border-color: color-mix(in srgb, #2f8f46 35%, transparent);
+}
+#resource-monitor-card .resource-status-badge--warn {
+    color: #b67800;
+    background: color-mix(in srgb, #b67800 16%, transparent);
+    border-color: color-mix(in srgb, #b67800 35%, transparent);
+}
+#resource-monitor-card .resource-status-badge--danger {
+    color: #c93737;
+    background: color-mix(in srgb, #c93737 16%, transparent);
+    border-color: color-mix(in srgb, #c93737 35%, transparent);
+}
+#resource-monitor-card .resource-monitor-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
+}
+#resource-monitor-card .resource-metric {
+    border: 1px solid color-mix(in srgb, var(--block-border-color) 70%, transparent);
+    border-radius: 10px;
+    padding: 0.45rem 0.5rem;
+    background: color-mix(in srgb, var(--background-fill-secondary) 75%, transparent);
+}
+#resource-monitor-card .resource-metric-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--body-text-color-subdued);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+#resource-monitor-card .resource-metric-value {
+    margin-top: 0.15rem;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--body-text-color);
+}
+#resource-monitor-card .resource-meter {
+    margin-top: 0.35rem;
+    height: 6px;
+    background: color-mix(in srgb, var(--body-text-color-subdued) 20%, transparent);
+    border-radius: 999px;
+    overflow: hidden;
+}
+#resource-monitor-card .resource-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+}
+#resource-monitor-card .resource-meter-fill--ok {
+    background: #2f8f46;
+}
+#resource-monitor-card .resource-meter-fill--warn {
+    background: #b67800;
+}
+#resource-monitor-card .resource-meter-fill--danger {
+    background: #c93737;
+}
+#resource-monitor-card .resource-metric-detail {
+    margin-top: 0.3rem;
+    font-size: 0.74rem;
+    color: var(--body-text-color-subdued);
+}
+#resource-monitor-card .resource-monitor-note {
+    margin-top: 0.55rem;
+    font-size: 0.75rem;
+    color: var(--body-text-color-subdued);
+    line-height: 1.35;
+}
+@media (max-width: 900px) {
+    #resource-monitor-card .resource-monitor-grid {
+        grid-template-columns: 1fr;
+    }
+}
+"""
+
 # ============================================================================
 # UI CREATION
 # ============================================================================
@@ -237,15 +361,103 @@ def create_ui():
     _asr_manager = get_asr_manager(_user_config)
     _foley_manager = get_foley_manager(_user_config, MODELS_DIR)
 
-    # CSS to hide trigger widgets (use imported TRIGGER_HIDE_CSS)
-    custom_css = TRIGGER_HIDE_CSS
-
     with gr.Blocks(title="Voice Clone Studio") as app:
         memory_governor = get_memory_governor(_user_config)
+        tenant_service = get_tenant_service(_user_config)
 
-        def _memory_status_text():
+        def _clamp_pct(value: float) -> float:
+            return max(0.0, min(100.0, float(value)))
+
+        def _metric_html(
+            title: str,
+            value: str,
+            detail: str,
+            pct: float | None = None,
+            level: str = "ok",
+        ) -> str:
+            meter_html = ""
+            if pct is not None:
+                meter_html = (
+                    '<div class="resource-meter">'
+                    f'<span class="resource-meter-fill resource-meter-fill--{level}" style="width:{_clamp_pct(pct):.1f}%"></span>'
+                    "</div>"
+                )
+            return (
+                '<div class="resource-metric">'
+                f'<div class="resource-metric-title">{html.escape(title)}</div>'
+                f'<div class="resource-metric-value">{html.escape(value)}</div>'
+                f"{meter_html}"
+                f'<div class="resource-metric-detail">{html.escape(detail)}</div>'
+                "</div>"
+            )
+
+        def _tenant_unresolved_reason(request: gr.Request | None) -> str:
+            header_name = tenant_service.tenant_header_name
+            default_tenant = (tenant_service.default_tenant_id or "").strip()
+            headers = getattr(request, "headers", None) if request is not None else None
+            if headers is None and request is not None and hasattr(request, "request"):
+                headers = getattr(request.request, "headers", None)
+
+            header_value = None
+            if headers:
+                header_value = headers.get(header_name) or headers.get(header_name.lower())
+
+            if not header_value and not default_tenant:
+                return f"Missing tenant header '{header_name}' and no default tenant fallback."
+            if header_value and not validate_tenant_id(str(header_value).strip()):
+                return f"Invalid tenant id in header '{header_name}'."
+            return f"Tenant could not be resolved from header '{header_name}'."
+
+        def _resource_monitor_html(request: gr.Request | None = None):
             snapshot = memory_governor.snapshot()
-            return f"Memory: {memory_governor.format_snapshot(snapshot)}"
+            tenant_id = None
+            tenant_usage_summary = None
+            tenant_unresolved_reason = None
+            try:
+                tenant_paths = tenant_service.get_tenant_paths(request=request, required=False)
+                if tenant_paths is None:
+                    tenant_unresolved_reason = _tenant_unresolved_reason(request)
+                else:
+                    tenant_id = tenant_paths.tenant_id
+                    tenant_usage_summary = tenant_service.compute_usage_summary(tenant_paths)
+            except Exception as e:
+                tenant_unresolved_reason = f"Tenant resolution error: {str(e)}"
+
+            payload = build_resource_monitor_payload(
+                snapshot,
+                memory_max_rss_pct=memory_governor.memory_max_rss_pct,
+                memory_min_available_mb=memory_governor.memory_min_available_mb,
+                memory_max_gpu_reserved_pct=memory_governor.memory_max_gpu_reserved_pct,
+                max_active_heavy_jobs=memory_governor.max_active_heavy_jobs,
+                tenant_id=tenant_id,
+                tenant_usage_summary=tenant_usage_summary,
+                tenant_unresolved_reason=tenant_unresolved_reason,
+            )
+            metrics_html = "".join(
+                _metric_html(
+                    metric["title"],
+                    metric["value"],
+                    metric["detail"],
+                    pct=metric["pct"],
+                    level=metric["level"],
+                )
+                for metric in payload["metrics"]
+            )
+            return (
+                '<div class="resource-monitor">'
+                '<div class="resource-monitor-header">'
+                '<div>'
+                '<div class="resource-monitor-title">Resource Monitor</div>'
+                f'<div class="resource-monitor-time">Updated {payload["updated_at_text"]}</div>'
+                "</div>"
+                f'<span class="resource-status-badge resource-status-badge--{payload["status_class"]}">{html.escape(payload["status_label"])}</span>'
+                "</div>"
+                '<div class="resource-monitor-grid">'
+                f"{metrics_html}"
+                "</div>"
+                f'<div class="resource-monitor-note">{html.escape(payload["guide_hint"])}</div>'
+                "</div>"
+            )
 
         # Modal HTML
         gr.HTML(CONFIRMATION_MODAL_HTML)
@@ -264,11 +476,13 @@ def create_ui():
                     <p style="font-size: 0.9em; color: var(--body-text-color-subdued); margin-top: -10px;">Powered by Qwen3-TTS, VibeVoice, LuxTTS, Chatterbox and Whisper</p>
                     """)
 
-            with gr.Column(scale=1, min_width=180):
-                unload_all_btn = gr.Button("Clear VRAM", size="sm", variant="secondary")
-                refresh_memory_btn = gr.Button("Refresh Memory", size="sm", variant="secondary")
+            with gr.Column(scale=7, min_width=330):
+                with gr.Row():
+                    unload_all_btn = gr.Button("Clear VRAM", size="sm", variant="secondary")
+                    refresh_memory_btn = gr.Button("Refresh", size="sm", variant="secondary")
                 unload_status = gr.Markdown(" ", visible=True)
-                memory_status = gr.Markdown(_memory_status_text(), visible=True)
+                with gr.Accordion("Resource Monitor", open=False, elem_id="resource-monitor-accordion"):
+                    resource_status = gr.HTML(_resource_monitor_html(), visible=True, elem_id="resource-monitor-card")
 
         # ============================================================
         # BUILD SHARED STATE - everything tools need
@@ -337,8 +551,8 @@ def create_ui():
             on_unload_all,
             outputs=[unload_status]
         ).then(
-            fn=_memory_status_text,
-            outputs=[memory_status],
+            fn=_resource_monitor_html,
+            outputs=[resource_status],
         ).then(
             fn=clear_status,
             inputs=[],
@@ -347,14 +561,14 @@ def create_ui():
         )
 
         refresh_memory_btn.click(
-            fn=_memory_status_text,
-            outputs=[memory_status],
+            fn=_resource_monitor_html,
+            outputs=[resource_status],
             show_progress="hidden"
         )
 
         app.load(
-            fn=_memory_status_text,
-            outputs=[memory_status],
+            fn=_resource_monitor_html,
+            outputs=[resource_status],
             show_progress="hidden"
         )
 
@@ -401,7 +615,7 @@ if __name__ == "__main__":
             share=False,
             inbrowser=not (network_mode or server_host == "0.0.0.0"),
             theme=theme,
-            css=TRIGGER_HIDE_CSS + CONFIRMATION_MODAL_CSS + INPUT_MODAL_CSS,
+            css=TRIGGER_HIDE_CSS + CONFIRMATION_MODAL_CSS + INPUT_MODAL_CSS + RESOURCE_MONITOR_CSS,
             head=CONFIRMATION_MODAL_HEAD + INPUT_MODAL_HEAD
         )
     except OSError:

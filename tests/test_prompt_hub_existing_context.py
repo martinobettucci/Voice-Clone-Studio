@@ -1,6 +1,38 @@
 import modules.core_components.prompt_hub as prompt_hub
 
 
+def test_apply_prompt_placeholders_replaces_supported_tokens():
+    result = prompt_hub._apply_prompt_placeholders(
+        "Mode={mode}; Existing={existing}; Instruction={instruction}",
+        existing_text="draft line",
+        instruction_text="write line",
+        apply_mode="append",
+    )
+    assert result == "Mode=append; Existing=draft line; Instruction=write line"
+
+
+def test_apply_prompt_placeholders_replaces_available_emotions_token():
+    result = prompt_hub._apply_prompt_placeholders(
+        "Emotions={available_emotions}",
+        available_emotions_text="calm, excited",
+    )
+    assert result == "Emotions=calm, excited"
+
+
+def test_resolve_prompt_assistant_language_uses_settings_default_when_requested():
+    assert (
+        prompt_hub.resolve_prompt_assistant_language(
+            {"prompt_assistant_default_language": "French"},
+            prompt_hub.PROMPT_ASSISTANT_LANGUAGE_USE_SETTINGS,
+        )
+        == "French"
+    )
+
+
+def test_get_prompt_assistant_language_instruction_for_italian():
+    assert prompt_hub.get_prompt_assistant_language_instruction("Italian") == "Genera in italiano."
+
+
 def test_build_target_instruction_replaces_existing_placeholder(monkeypatch):
     target_id = "test.prompt.inline_existing"
     monkeypatch.setitem(
@@ -145,7 +177,8 @@ def test_generate_for_target_builds_user_message_with_existing_context(monkeypat
         "To continue the content, follow these instructions: "
         "Write final spoken text for voice generation. "
         "Return only the exact text to speak, no extra labels or notes.\n\n"
-        "User instruction:\nmake it dramatic"
+        "User instruction:\nmake it dramatic\n\n"
+        "Generate the output in English."
     )
 
 
@@ -177,5 +210,106 @@ def test_generate_for_target_without_existing_text_keeps_previous_prompt_shape(m
     assert captured["json"]["messages"][1]["content"] == (
         "Write final spoken text for voice generation. "
         "Return only the exact text to speak, no extra labels or notes.\n\n"
-        "User instruction:\nmake it dramatic"
+        "User instruction:\nmake it dramatic\n\n"
+        "Generate the output in English."
     )
+
+
+def test_generate_for_target_resolves_placeholders_in_instruction_and_custom_system(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"ok":true}'
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "generated"}}]}
+
+    def fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("modules.core_components.prompt_hub.requests.post", fake_post)
+
+    text, error = prompt_hub.generate_for_target(
+        user_config={},
+        target_id="voice_clone.text",
+        instruction="Continue from {existing} in {mode} mode.",
+        custom_system_override="System sees mode={mode}; instruction={instruction}; existing={existing}",
+        existing_text="draft one",
+        apply_mode="append",
+    )
+
+    assert error is None
+    assert text == "generated"
+    assert captured["json"]["messages"][0]["content"] == (
+        "System sees mode=append; instruction=Continue from draft one in append mode.; existing=draft one"
+    )
+    assert captured["json"]["messages"][1]["content"] == (
+        "Previous existing content was: draft one\n\n"
+        "To continue the content, follow these instructions: "
+        "Write final spoken text for voice generation. "
+        "Return only the exact text to speak, no extra labels or notes.\n\n"
+        "User instruction:\nContinue from draft one in append mode.\n\n"
+        "Generate the output in English."
+    )
+
+
+def test_generate_for_target_conversation_uses_available_emotions_in_system_prompt(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"ok":true}'
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "generated"}}]}
+
+    def fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("modules.core_components.prompt_hub.requests.post", fake_post)
+
+    text, error = prompt_hub.generate_for_target(
+        user_config={"emotions": {"happy": {}, "sad": {}}},
+        target_id="conversation.script",
+        instruction="Two friends discuss weekend plans.",
+    )
+
+    assert error is None
+    assert text == "generated"
+    system_prompt = captured["json"]["messages"][0]["content"]
+    assert "[n]: (emotion) text" in system_prompt
+    assert "happy, sad" in system_prompt
+
+
+def test_generate_for_target_uses_selected_language_override(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"ok":true}'
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "generated"}}]}
+
+    def fake_post(url, json, headers, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("modules.core_components.prompt_hub.requests.post", fake_post)
+
+    text, error = prompt_hub.generate_for_target(
+        user_config={"prompt_assistant_default_language": "English"},
+        target_id="voice_clone.text",
+        instruction="Write a short line",
+        output_language="French",
+    )
+
+    assert error is None
+    assert text == "generated"
+    assert captured["json"]["messages"][1]["content"].endswith("Genere la sortie en francais.")

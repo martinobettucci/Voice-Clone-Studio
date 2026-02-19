@@ -17,6 +17,7 @@ if __name__ == "__main__":
 import gradio as gr
 from pathlib import Path
 
+import modules.core_components.prompt_hub as prompt_hub
 from modules.core_components.tool_base import Tool, ToolConfig
 from modules.core_components.constants import (
     ASR_ENGINES,
@@ -305,6 +306,13 @@ class SettingsTool(Tool):
                             value=_user_config.get("llm_ollama_url", "http://127.0.0.1:11434/v1"),
                             info="Used when 'Use local Ollama' is enabled in Prompt Manager.",
                             placeholder="e.g. http://127.0.0.1:11434/v1",
+                        )
+                        components["settings_prompt_assistant_default_language"] = gr.Dropdown(
+                            label="Prompt Assistant Default Language",
+                            choices=prompt_hub.PROMPT_ASSISTANT_LANGUAGE_CHOICES[1:],
+                            value=prompt_hub.get_prompt_assistant_default_language(_user_config),
+                            info="Default language used by Prompt Assistant tabs. Can be overridden per tab.",
+                            interactive=True,
                         )
 
                 gr.Markdown("Configure where files are stored. Changes apply after clicking **Apply Changes**.")
@@ -792,6 +800,7 @@ class SettingsTool(Tool):
             llm_api_key,
             llm_endpoint_url,
             llm_ollama_url,
+            prompt_assistant_default_language,
             tenant_header_name,
             tenant_file_limit_mb,
             tenant_media_quota_gb,
@@ -823,6 +832,10 @@ class SettingsTool(Tool):
                 _user_config["llm_api_key"] = llm_api_key.strip()
                 _user_config["llm_endpoint_url"] = llm_endpoint_url.strip()
                 _user_config["llm_ollama_url"] = llm_ollama_url.strip()
+                _user_config["prompt_assistant_default_language"] = prompt_hub.resolve_prompt_assistant_language(
+                    _user_config,
+                    prompt_assistant_default_language,
+                )
                 _user_config["tenant_header_name"] = (tenant_header_name or "X-Tenant-Id").strip() or "X-Tenant-Id"
                 _user_config["tenant_file_limit_mb"] = max(1, int(tenant_file_limit_mb or 200))
                 _user_config["tenant_media_quota_gb"] = max(1, int(tenant_media_quota_gb or 5))
@@ -844,6 +857,9 @@ class SettingsTool(Tool):
                 )
                 status_lines.append(
                     f"LLM API Key: {'[set]' if _user_config.get('llm_api_key') else '[not set]'}"
+                )
+                status_lines.append(
+                    f"Prompt Assistant default language: {_user_config.get('prompt_assistant_default_language', 'English')}"
                 )
                 status_lines.append(
                     f"Tenant header: {_user_config.get('tenant_header_name', 'X-Tenant-Id')}"
@@ -875,6 +891,7 @@ class SettingsTool(Tool):
                 components["settings_llm_api_key"],
                 components["settings_llm_endpoint_url"],
                 components["settings_llm_ollama_url"],
+                components["settings_prompt_assistant_default_language"],
                 components["tenant_header_name"],
                 components["tenant_file_limit_mb"],
                 components["tenant_media_quota_gb"],

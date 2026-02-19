@@ -25,6 +25,10 @@ def _snapshot(**overrides):
         "gpu_total_bytes": 0,
         "gpu_reserved_pct_of_total": 0.0,
         "active_heavy_jobs": 0,
+        "active_heavy_job_names": (),
+        "admitted_jobs_total": 0,
+        "rejected_jobs_total": 0,
+        "completed_jobs_total": 0,
     }
     data.update(overrides)
     return MemorySnapshot(**data)
@@ -50,6 +54,9 @@ def test_governor_rejects_second_concurrent_heavy_job():
     t = threading.Thread(target=lambda: governor.run_heavy("job_1", long_job), daemon=True)
     t.start()
     assert started.wait(timeout=1.0), "first heavy job did not start in time"
+    running_snapshot = governor.snapshot()
+    assert running_snapshot.active_heavy_jobs == 1
+    assert "job_1" in running_snapshot.active_heavy_job_names
 
     with pytest.raises(MemoryAdmissionError) as exc_info:
         governor.run_heavy("job_2", lambda: "never")
@@ -57,6 +64,12 @@ def test_governor_rejects_second_concurrent_heavy_job():
     release.set()
     t.join(timeout=2.0)
     assert "one heavy task at a time" in str(exc_info.value)
+    final_snapshot = governor.snapshot()
+    assert final_snapshot.active_heavy_jobs == 0
+    assert final_snapshot.active_heavy_job_names == ()
+    assert final_snapshot.admitted_jobs_total == 1
+    assert final_snapshot.rejected_jobs_total == 1
+    assert final_snapshot.completed_jobs_total == 1
 
 
 def test_governor_rejects_when_available_ram_below_threshold():
@@ -105,6 +118,10 @@ def test_governor_runs_cleanup_hooks_on_success_and_failure(monkeypatch):
 
     assert calls["gc"] == 2
     assert calls["cache"] == 2
+    snapshot = governor.snapshot()
+    assert snapshot.admitted_jobs_total == 2
+    assert snapshot.rejected_jobs_total == 0
+    assert snapshot.completed_jobs_total == 2
 
 
 def test_governor_reject_reason_reports_gpu_threshold():

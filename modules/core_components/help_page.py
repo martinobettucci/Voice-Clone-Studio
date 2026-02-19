@@ -64,6 +64,13 @@ def show_voice_clone_help():
         2. Choose sample in Voice Clone.
         3. Enter target text and generation settings.
         4. Generate and review output in **Output History**.
+        5. In **Prompt Assistant**, placeholders are available:
+           - `{existing}` inserts current target field text
+           - `{mode}` inserts generation mode (`append` or `replace`)
+           - `{instruction}` resolves to instruction text (for custom system prompts)
+           Use the insert-placeholder controls to add tokens quickly.
+        6. In **Prompt Assistant > Language**, choose output language per tab.
+           Default language comes from **Settings > Prompt Assistant Default Language**.
         """
     )
 
@@ -92,6 +99,8 @@ def show_voice_presets_help():
         1. Select voice type (preset or trained model).
         2. Enter prompt text and optional style.
         3. Generate and save output.
+        4. In **Prompt Assistant**, you can insert `{existing}`, `{mode}`, and `{instruction}` using the placeholder buttons.
+        5. Use **Prompt Assistant > Language** to override output language for this tab.
         """
     )
 
@@ -107,6 +116,8 @@ def show_conversation_help():
         2. Write script with speaker tags.
         3. Configure model/engine/pause settings.
         4. Generate and review in **Output History**.
+        5. In **Prompt Assistant**, placeholder tokens (`{existing}`, `{mode}`, `{instruction}`) can be inserted via buttons.
+        6. Use **Prompt Assistant > Language** to force the script language for this tab.
         """
     )
 
@@ -121,6 +132,8 @@ def show_voice_design_help():
         1. Enter text + voice instruction.
         2. Generate preview.
         3. Save output/sample for future cloning workflows.
+        4. In **Prompt Assistant**, use placeholder buttons for `{existing}`, `{mode}`, and `{instruction}`.
+        5. Use **Prompt Assistant > Language** to set generation language per tab.
         """
     )
 
@@ -150,6 +163,8 @@ def show_sound_effects_help():
         1. Choose mode (Text to Audio / Video to Audio).
         2. Configure prompt, model, seed, settings.
         3. Generate and save output.
+        4. In **Prompt Assistant**, placeholder buttons can insert `{existing}`, `{mode}`, and `{instruction}` tokens.
+        5. Use **Prompt Assistant > Language** to steer output language for this tab.
         """
     )
 
@@ -195,6 +210,57 @@ def show_settings_help():
     )
 
 
+def show_resource_monitor_help():
+    return dedent(
+        """
+        ### Resource Monitor
+
+        Compact live monitor in the app header. It is intentionally concise; use this page for full definitions.
+
+        #### What it shows
+        - **Running Heavy Jobs**: current strict scheduler occupancy and active job names.
+        - **App RAM (RSS)**: resident memory used by this app process.
+        - **App VRAM (allocated / reserved)**: PyTorch allocator stats for this process only.
+        - **Tenant Quota Usage**: tenant storage usage tracked by quota rules (samples + datasets only).
+
+        #### Formulas and data sources
+        - **App RAM (RSS)**:
+          - Source: process RSS from `psutil.Process(...).memory_info().rss`
+          - Display percent: `rss_bytes / system_total_bytes * 100`
+        - **App VRAM (allocated / reserved)**:
+          - Source: `torch.cuda.memory_allocated(device)` and `torch.cuda.memory_reserved(device)`
+          - Display percent: `gpu_reserved_bytes / gpu_total_bytes * 100`
+          - If CUDA is unavailable, this metric is shown as `N/A`.
+        - **Tenant Quota Usage**:
+          - Source: tenant storage service
+          - Used bytes: recursive file size sum of `samples/tenants/<tenant>` + `datasets/tenants/<tenant>`
+          - Percent: `used_bytes / quota_bytes * 100`
+          - Note: output/models/temp are not included in quota usage.
+
+        #### Why heavy jobs can look like 0/1
+        - The scheduler is intentionally **strict single-lane** for heavy tasks.
+        - Only one heavy task can run at a time (`max_active_heavy_jobs = 1`), so live count is usually 0 or 1.
+        - Session counters provide more context:
+          - admitted jobs total
+          - completed jobs total
+          - rejected jobs total
+
+        #### Threshold defaults and where 70% comes from
+        Default admission thresholds come from config defaults:
+        - `memory_max_rss_pct = 70.0`
+        - `memory_min_available_mb = 2048`
+        - `memory_max_gpu_reserved_pct = 90.0`
+
+        Runtime environment overrides (if set) take precedence:
+        - `VCS_MEMORY_MAX_RSS_PCT`
+        - `VCS_MEMORY_MIN_AVAILABLE_MB`
+        - `VCS_MEMORY_MAX_GPU_RESERVED_PCT`
+
+        These thresholds are used for admission safety checks, not to report total machine usage.
+        """
+    )
+
+
 def show_tips_help():
     return dedent(
         """
@@ -211,6 +277,7 @@ def show_tips_help():
 
 HELP_TOPICS = [
     "Library Manager",
+    "Resource Monitor",
     "Voice Clone",
     "Voice Changer",
     "Voice Presets",
@@ -228,6 +295,7 @@ HELP_TOPICS = [
 def get_help_text(topic: str) -> str:
     mapping = {
         "Library Manager": show_library_manager_help,
+        "Resource Monitor": show_resource_monitor_help,
         "Voice Clone": show_voice_clone_help,
         "Voice Changer": show_voice_changer_help,
         "Voice Presets": show_voice_presets_help,
