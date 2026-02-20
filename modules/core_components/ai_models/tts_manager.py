@@ -420,10 +420,25 @@ class TTSManager:
         if audio_chunk is None:
             return np.zeros(0, dtype=np.float32)
 
+        def _tensor_to_numpy(tensor_like):
+            tensor = tensor_like.detach() if hasattr(tensor_like, "detach") and callable(tensor_like.detach) else tensor_like
+            if isinstance(tensor, torch.Tensor):
+                # NumPy cannot represent torch.bfloat16 directly.
+                if tensor.dtype == torch.bfloat16:
+                    tensor = tensor.to(dtype=torch.float32)
+                try:
+                    return tensor.cpu().numpy()
+                except TypeError:
+                    if hasattr(tensor, "float") and callable(tensor.float):
+                        return tensor.float().cpu().numpy()
+                    raise
+            cpu_tensor = tensor.cpu() if hasattr(tensor, "cpu") else tensor
+            return cpu_tensor.numpy()
+
         if hasattr(audio_chunk, "detach") and callable(audio_chunk.detach):
-            arr = audio_chunk.detach().cpu().numpy()
+            arr = _tensor_to_numpy(audio_chunk)
         elif hasattr(audio_chunk, "cpu") and hasattr(audio_chunk, "numpy"):
-            arr = audio_chunk.cpu().numpy()
+            arr = _tensor_to_numpy(audio_chunk)
         elif hasattr(audio_chunk, "numpy") and callable(audio_chunk.numpy):
             arr = audio_chunk.numpy()
         else:

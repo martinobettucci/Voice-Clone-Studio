@@ -27,6 +27,16 @@ def test_supports_live_streaming_matrix(monkeypatch):
     assert mgr.supports_live_streaming("luxtts", "voice_clone") is False
 
 
+def test_normalize_stream_chunk_handles_bfloat16_tensor():
+    chunk = torch.tensor([[0.1, -0.2]], dtype=torch.bfloat16)
+
+    arr = TTSManager._normalize_stream_chunk(chunk)
+
+    assert arr.dtype == np.float32
+    assert arr.shape == (2,)
+    np.testing.assert_allclose(arr, np.array([0.1, -0.2], dtype=np.float32), rtol=1e-2, atol=1e-2)
+
+
 def test_qwen_runtime_streaming_available_false_when_model_missing(monkeypatch):
     mgr = TTSManager(user_config={})
 
@@ -133,4 +143,3 @@ def test_stream_voice_clone_vibevoice_adapter_yields_chunks(monkeypatch):
     assert all(sr == 24000 for _, sr in chunks)
     assert chunks[0][0].shape[0] == 2
     assert chunks[1][0].shape[0] == 1
-
