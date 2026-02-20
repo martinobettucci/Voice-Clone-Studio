@@ -1172,6 +1172,7 @@ class TTSManager:
     ) -> Iterator[Tuple[Any, int]]:
         """Stream VibeVoice voice-clone chunks using native audio streamer support."""
         import random
+        import numpy as np
         import warnings
         import logging
         import threading
@@ -1275,11 +1276,39 @@ class TTSManager:
         worker = threading.Thread(target=_run_generation, name="vibevoice-stream-gen", daemon=True)
         worker.start()
 
+        # Tiny chunks cause audible stutter in browser playback; coalesce to ~200ms packets.
+        sr = 24000
+        min_emit_samples = int(sr * 0.20)
+        pending_chunks = []
+        pending_samples = 0
+
+        def _flush_pending():
+            nonlocal pending_chunks, pending_samples
+            if pending_samples <= 0:
+                return None
+            if len(pending_chunks) == 1:
+                merged = pending_chunks[0]
+            else:
+                merged = np.concatenate(pending_chunks, axis=0)
+            pending_chunks = []
+            pending_samples = 0
+            return merged
+
         stream = streamer.get_stream(0)
         for audio_chunk in stream:
             chunk = self._normalize_stream_chunk(audio_chunk)
-            if chunk.size > 0:
-                yield chunk, 24000
+            if chunk.size <= 0:
+                continue
+            pending_chunks.append(chunk)
+            pending_samples += int(chunk.shape[0])
+            if pending_samples >= min_emit_samples:
+                merged = _flush_pending()
+                if merged is not None and merged.size > 0:
+                    yield merged, sr
+
+        tail = _flush_pending()
+        if tail is not None and tail.size > 0:
+            yield tail, sr
 
         worker.join()
         if generation_errors:

@@ -1923,6 +1923,21 @@ class ConversationTool(Tool):
                 writer = LiveAudioChunkWriter(preview_path)
                 streamed_chunks = 0
                 sr = 24000
+                min_emit_samples = int(sr * 0.20)
+                pending_chunks = []
+                pending_samples = 0
+
+                def _take_pending_chunk():
+                    nonlocal pending_chunks, pending_samples
+                    if pending_samples <= 0:
+                        return None
+                    if len(pending_chunks) == 1:
+                        merged = pending_chunks[0]
+                    else:
+                        merged = np.concatenate(pending_chunks, axis=0)
+                    pending_chunks = []
+                    pending_samples = 0
+                    return merged
 
                 # Reset audio output for a fresh live stream session.
                 yield gr.update(value=None), "Streaming VibeVoice...", gr.update(interactive=False), "", "", ""
@@ -1968,6 +1983,15 @@ class ConversationTool(Tool):
 
                     for audio_chunk in streamer.get_stream(0):
                         chunk_arr = normalize_audio_chunk(audio_chunk)
+                        if chunk_arr.size <= 0:
+                            continue
+                        pending_chunks.append(chunk_arr)
+                        pending_samples += int(chunk_arr.shape[0])
+                        if pending_samples < min_emit_samples:
+                            continue
+                        chunk_arr = _take_pending_chunk()
+                        if chunk_arr is None or chunk_arr.size <= 0:
+                            continue
                         chunk_path = writer.write_chunk(chunk_arr, sr)
                         if not chunk_path:
                             continue
@@ -1984,6 +2008,21 @@ class ConversationTool(Tool):
                         )
 
                     worker.join()
+                    tail_arr = _take_pending_chunk()
+                    if tail_arr is not None and tail_arr.size > 0:
+                        tail_path = writer.write_chunk(tail_arr, sr)
+                        if tail_path:
+                            streamed_chunks += 1
+                            ui_tail = np.clip(tail_arr, -1.0, 1.0)
+                            ui_tail = (ui_tail * 32767.0).astype(np.int16, copy=False)
+                            yield (
+                                (int(sr), ui_tail),
+                                f"Streaming VibeVoice... chunk {idx + 1}/{len(script_chunks)}",
+                                gr.update(interactive=False),
+                                "",
+                                "",
+                                "",
+                            )
                     if generation_errors:
                         raise generation_errors[0]
 

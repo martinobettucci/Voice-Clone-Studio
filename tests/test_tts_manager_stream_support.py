@@ -139,7 +139,7 @@ def test_stream_voice_clone_vibevoice_adapter_yields_chunks(monkeypatch):
         )
     )
 
-    assert len(chunks) == 2
+    assert len(chunks) >= 1
     assert all(sr == 24000 for _, sr in chunks)
-    assert chunks[0][0].shape[0] == 2
-    assert chunks[1][0].shape[0] == 1
+    merged = np.concatenate([arr for arr, _ in chunks], axis=0)
+    np.testing.assert_allclose(merged, np.array([0.1, 0.2, 0.3], dtype=np.float32), rtol=1e-6, atol=1e-6)
