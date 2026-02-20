@@ -40,7 +40,7 @@ from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
 )
-from modules.core_components.tools.live_audio_streaming import LiveAudioChunkWriter
+from modules.core_components.tools.live_audio_streaming import LiveAudioChunkWriter, normalize_audio_chunk
 from modules.core_components.tools.live_stream_policy import (
     conversation_stream_supported,
     prefix_non_stream_status,
@@ -448,13 +448,16 @@ class ConversationTool(Tool):
                         components['qwen_conv_max_new_tokens'] = qwen_conv_params['max_new_tokens']
 
                     # Shared settings
-                    components['conv_generate_btn'] = gr.Button("Generate Conversation", variant="primary", size="lg")
+                    with gr.Row():
+                        components['conv_generate_btn'] = gr.Button("Generate Conversation", variant="primary", size="lg")
+                        components['conv_stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
 
                     components['conv_output_audio'] = gr.Audio(
                         label="Generated Conversation",
                         type="filepath",
-                        interactive=True,
+                        interactive=False,
                         streaming=True,
+                        autoplay=True,
                     )
                     with gr.Row():
                         components['conv_output_enable_denoise'] = gr.Checkbox(
@@ -478,6 +481,7 @@ class ConversationTool(Tool):
                     components['conv_save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
                     components['conv_suggested_name'] = gr.State(value="")
                     components['conv_metadata_text'] = gr.State(value="")
+                    components['conv_output_audio_path'] = gr.State(value="")
                     components['conv_existing_files_json'] = gr.State(value="[]")
                     components['conv_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=5)
 
@@ -705,6 +709,12 @@ class ConversationTool(Tool):
                         segment_pause = 0.0
                 segments.append((segment_text, segment_pause))
             return segments
+
+        def _unwrap_cached_voice_prompt(prompt_value):
+            """Normalize prompt cache return value to prompt items only."""
+            if isinstance(prompt_value, tuple) and len(prompt_value) >= 1:
+                return prompt_value[0]
+            return prompt_value
 
         class _StreamingPreviewWriter:
             """Incrementally write generated segments to disk to avoid large in-memory concatenations."""
@@ -1005,6 +1015,7 @@ class ConversationTool(Tool):
                             voice_prompt = get_or_create_voice_prompt(
                                 model, speaker_key, voice_sample_path, ref_text, model_size, request=request
                             )
+                            voice_prompt = _unwrap_cached_voice_prompt(voice_prompt)
 
                         for j, (segment_text, segment_pause) in enumerate(line_segments):
                             wavs, sr = model.generate_voice_clone(
@@ -1606,15 +1617,16 @@ class ConversationTool(Tool):
                                                       progress=gr.Progress()):
             """Stream multi-speaker conversation with Qwen Base + custom voice samples."""
             if not conversation_data or not conversation_data.strip():
-                yield None, "❌ Please enter conversation lines.", gr.update(interactive=False), "", ""
+                yield None, "❌ Please enter conversation lines.", gr.update(interactive=False), "", "", ""
                 return
 
             if not voice_samples_dict:
-                yield None, "❌ Please select at least one voice sample.", gr.update(interactive=False), "", ""
+                yield None, "❌ Please select at least one voice sample.", gr.update(interactive=False), "", "", ""
                 return
 
             conversation_data = preprocess_conversation_script(conversation_data)
             writer = None
+            finalized = False
 
             try:
                 # Parse lines
@@ -1638,7 +1650,7 @@ class ConversationTool(Tool):
                                     lines.append((speaker_key, sample_data["wav_path"], sample_data["ref_text"], text))
 
                 if not lines:
-                    yield None, "❌ No valid conversation lines found. Use format: [N]: Text (N=1-8)", gr.update(interactive=False), "", ""
+                    yield None, "❌ No valid conversation lines found. Use format: [N]: Text (N=1-8)", gr.update(interactive=False), "", "", ""
                     return
 
                 # Set seed and configure
@@ -1656,6 +1668,9 @@ class ConversationTool(Tool):
                 writer = LiveAudioChunkWriter(preview_path)
                 pause_pattern = re.compile(r'\[break=([\d\.]+)\]')
                 streamed_chunks = 0
+
+                # Reset audio output for a fresh live stream session.
+                yield gr.update(value=None), "Streaming Qwen Base...", gr.update(interactive=False), "", "", ""
 
                 for i, (speaker_key, voice_sample_path, ref_text, text) in enumerate(lines):
                     progress_val = 0.1 + (0.8 * i / len(lines))
@@ -1696,6 +1711,7 @@ class ConversationTool(Tool):
                         voice_prompt = get_or_create_voice_prompt(
                             model, speaker_key, voice_sample_path, ref_text, model_size, request=request
                         )
+                        voice_prompt = _unwrap_cached_voice_prompt(voice_prompt)
 
                     for j, (segment_text, segment_pause) in enumerate(line_segments):
                         stream_iter = tts_manager.stream_voice_clone_qwen(
@@ -1714,15 +1730,19 @@ class ConversationTool(Tool):
 
                         emitted_segment_chunk = False
                         for chunk_audio, chunk_sr in stream_iter:
-                            chunk_path = writer.write_chunk(chunk_audio, chunk_sr)
+                            chunk_arr = normalize_audio_chunk(chunk_audio)
+                            chunk_path = writer.write_chunk(chunk_arr, chunk_sr)
                             if not chunk_path:
                                 continue
                             emitted_segment_chunk = True
                             streamed_chunks += 1
+                            ui_chunk = np.clip(chunk_arr, -1.0, 1.0)
+                            ui_chunk = (ui_chunk * 32767.0).astype(np.int16, copy=False)
                             yield (
-                                chunk_path,
+                                (int(chunk_sr), ui_chunk),
                                 f"Streaming Qwen Base... line {i + 1}/{len(lines)}",
                                 gr.update(interactive=False),
+                                "",
                                 "",
                                 "",
                             )
@@ -1738,6 +1758,7 @@ class ConversationTool(Tool):
                     raise RuntimeError("Qwen Base did not emit any streamed audio chunks.")
 
                 result = writer.finalize()
+                finalized = True
                 speakers_used = list(set(k for k, _, _, _ in lines))
                 metadata = dedent(f"""\
                     Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
@@ -1762,13 +1783,15 @@ class ConversationTool(Tool):
                 status = f"Ready to save | {len(lines)} lines | {result.duration_seconds:.1f}s | Seed: {seed} | Base {model_size}"
                 if play_completion_beep:
                     play_completion_beep()
-                yield result.path, status, gr.update(interactive=True), safe_prefix, metadata_out
+                # Keep the streamed audio in the player; only publish finalized filepath via state.
+                yield gr.update(), status, gr.update(interactive=True), safe_prefix, metadata_out, result.path
             except Exception as e:
                 import traceback
                 print(f"Error in generate_conversation_base_stream_handler:\n{traceback.format_exc()}")
-                if writer is not None:
+                yield None, f"❌ Error generating conversation: {str(e)}", gr.update(interactive=False), "", "", ""
+            finally:
+                if writer is not None and not finalized:
                     writer.cleanup_final_file()
-                yield None, f"❌ Error generating conversation: {str(e)}", gr.update(interactive=False), "", ""
 
         def generate_vibevoice_longform_stream_handler(script_text, voice_samples_dict, model_size, cfg_scale, seed,
                                                        num_steps, do_sample, temperature, top_k, top_p, repetition_penalty,
@@ -1776,11 +1799,12 @@ class ConversationTool(Tool):
                                                        progress=gr.Progress()):
             """Stream long-form multi-speaker audio with VibeVoice native audio streamer."""
             if not script_text or not script_text.strip():
-                yield None, "❌ Please enter a script.", gr.update(interactive=False), "", ""
+                yield None, "❌ Please enter a script.", gr.update(interactive=False), "", "", ""
                 return
 
             script_text = preprocess_conversation_script(script_text)
             writer = None
+            finalized = False
 
             try:
                 import warnings
@@ -1857,7 +1881,7 @@ class ConversationTool(Tool):
                         available_samples.append((speaker_key, wav_path))
 
                 if not available_samples:
-                    yield None, "❌ Please provide at least one voice sample (Speaker1).", gr.update(interactive=False), "", ""
+                    yield None, "❌ Please provide at least one voice sample (Speaker1).", gr.update(interactive=False), "", "", ""
                     return
 
                 voice_samples = [sample for _, sample in available_samples]
@@ -1871,7 +1895,7 @@ class ConversationTool(Tool):
                         formatted_lines.append(f"Speaker {vv_speaker_num}: {clean_text}")
 
                 if not formatted_lines:
-                    yield None, "❌ No valid conversation lines found.", gr.update(interactive=False), "", ""
+                    yield None, "❌ No valid conversation lines found.", gr.update(interactive=False), "", "", ""
                     return
 
                 sentences_per_chunk = int(sentences_per_chunk) if sentences_per_chunk else 0
@@ -1899,6 +1923,9 @@ class ConversationTool(Tool):
                 writer = LiveAudioChunkWriter(preview_path)
                 streamed_chunks = 0
                 sr = 24000
+
+                # Reset audio output for a fresh live stream session.
+                yield gr.update(value=None), "Streaming VibeVoice...", gr.update(interactive=False), "", "", ""
 
                 for idx, chunk_script in enumerate(script_chunks):
                     progress_val = 0.2 + (0.6 * idx / len(script_chunks))
@@ -1940,14 +1967,18 @@ class ConversationTool(Tool):
                     worker.start()
 
                     for audio_chunk in streamer.get_stream(0):
-                        chunk_path = writer.write_chunk(audio_chunk, sr)
+                        chunk_arr = normalize_audio_chunk(audio_chunk)
+                        chunk_path = writer.write_chunk(chunk_arr, sr)
                         if not chunk_path:
                             continue
                         streamed_chunks += 1
+                        ui_chunk = np.clip(chunk_arr, -1.0, 1.0)
+                        ui_chunk = (ui_chunk * 32767.0).astype(np.int16, copy=False)
                         yield (
-                            chunk_path,
+                            (int(sr), ui_chunk),
                             f"Streaming VibeVoice... chunk {idx + 1}/{len(script_chunks)}",
                             gr.update(interactive=False),
+                            "",
                             "",
                             "",
                         )
@@ -1960,6 +1991,7 @@ class ConversationTool(Tool):
                     raise RuntimeError("VibeVoice failed to emit streamed audio chunks.")
 
                 result = writer.finalize()
+                finalized = True
                 chunk_info = f"Lines per Chunk: {sentences_per_chunk}" if sentences_per_chunk > 0 else "Chunking: Off"
                 metadata = dedent(f"""\
                     Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
@@ -1979,13 +2011,15 @@ class ConversationTool(Tool):
                 status = f"Ready to save | {len(lines)} lines | {result.duration_seconds:.1f}s | Seed: {seed} | VibeVoice"
                 if play_completion_beep:
                     play_completion_beep()
-                yield result.path, status, gr.update(interactive=True), safe_prefix, metadata_out
+                # Keep the streamed audio in the player; only publish finalized filepath via state.
+                yield gr.update(), status, gr.update(interactive=True), safe_prefix, metadata_out, result.path
             except Exception as e:
                 import traceback
                 print(f"Error in generate_vibevoice_longform_stream_handler:\n{traceback.format_exc()}")
-                if writer is not None:
+                yield None, f"❌ Error generating conversation: {str(e)}", gr.update(interactive=False), "", "", ""
+            finally:
+                if writer is not None and not finalized:
                     writer.cleanup_final_file()
-                yield None, f"❌ Error generating conversation: {str(e)}", gr.update(interactive=False), "", ""
 
         def unified_conversation_generate(
             model_type, script,
@@ -2019,6 +2053,14 @@ class ConversationTool(Tool):
             progress=gr.Progress()
         ):
             """Route to appropriate generation function based on model type."""
+            yield (
+                gr.update(value=None),
+                "Generating...",
+                gr.update(interactive=False),
+                "",
+                "",
+                "",
+            )
             voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8, request=request)
             stream_selected = conversation_stream_supported(model_type, tts_manager)
             if stream_selected and model_type == "Qwen Base":
@@ -2121,6 +2163,7 @@ class ConversationTool(Tool):
                     gr.update(interactive=bool(audio_value)),
                     suggested_name,
                     metadata_text,
+                    audio_value,
                 )
 
             try:
@@ -2141,6 +2184,7 @@ class ConversationTool(Tool):
                     gr.update(interactive=False),
                     "",
                     "",
+                    "",
                 )
 
         # Event handlers
@@ -2159,7 +2203,7 @@ class ConversationTool(Tool):
                 status_component=components['conv_status'],
             )
 
-        components['conv_generate_btn'].click(
+        conv_generate_event = components['conv_generate_btn'].click(
             unified_conversation_generate,
             inputs=[
                 components['conv_model_type'], components['conversation_script'],
@@ -2200,17 +2244,26 @@ class ConversationTool(Tool):
                 components['conv_save_btn'],
                 components['conv_suggested_name'],
                 components['conv_metadata_text'],
+                components['conv_output_audio_path'],
             ]
         )
 
-        def apply_conversation_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+        components['conv_stop_btn'].click(
+            lambda: ("Generation stopped.", gr.update(interactive=False)),
+            inputs=[],
+            outputs=[components['conv_status'], components['conv_save_btn']],
+            cancels=[conv_generate_event],
+            queue=False,
+        )
+
+        def apply_conversation_output_pipeline(audio_path, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
             pipeline = OutputAudioPipelineConfig(
                 enable_denoise=bool(enable_denoise),
                 enable_normalize=bool(enable_normalize),
                 enable_mono=bool(enable_mono),
             )
             updated_audio, status = apply_generation_output_pipeline(
-                audio_value,
+                audio_path,
                 pipeline,
                 deepfilter_available=deepfilter_available,
                 denoise_step=lambda path: clean_audio(path),
@@ -2218,18 +2271,18 @@ class ConversationTool(Tool):
                 mono_step=lambda path: convert_to_mono(path, request=request),
             )
             if not updated_audio:
-                return gr.update(), status
-            return gr.update(value=updated_audio), status
+                return gr.update(), status, audio_path
+            return gr.update(value=updated_audio), status, updated_audio
 
         components['conv_output_apply_pipeline_btn'].click(
             apply_conversation_output_pipeline,
             inputs=[
-                components['conv_output_audio'],
+                components['conv_output_audio_path'],
                 components['conv_output_enable_denoise'],
                 components['conv_output_enable_normalize'],
                 components['conv_output_enable_mono'],
             ],
-            outputs=[components['conv_output_audio'], components['conv_status']],
+            outputs=[components['conv_output_audio'], components['conv_status'], components['conv_output_audio_path']],
         )
 
         save_conv_modal_js = show_input_modal_js(
@@ -2265,7 +2318,7 @@ class ConversationTool(Tool):
             js=save_conv_js,
         )
 
-        def handle_conv_save_input(input_value, audio_value, metadata_text, request: gr.Request):
+        def handle_conv_save_input(input_value, output_audio_path, metadata_text, request: gr.Request):
             matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_conv_")
             if not matched:
                 return gr.update(), gr.update()
@@ -2273,13 +2326,13 @@ class ConversationTool(Tool):
                 return gr.update(), gr.update()
             if not chosen_name or not chosen_name.strip():
                 return "❌ Please enter a filename.", gr.update()
-            if not audio_value:
+            if not output_audio_path:
                 return "❌ No generated audio to save.", gr.update(interactive=False)
 
             try:
                 output_dir = get_tenant_output_dir(request=request, strict=True)
                 output_path = save_generated_output(
-                    audio_value=audio_value,
+                    audio_value=output_audio_path,
                     output_dir=output_dir,
                     raw_name=chosen_name,
                     metadata_text=metadata_text,
@@ -2291,7 +2344,7 @@ class ConversationTool(Tool):
 
         input_trigger.change(
             handle_conv_save_input,
-            inputs=[input_trigger, components['conv_output_audio'], components['conv_metadata_text']],
+            inputs=[input_trigger, components['conv_output_audio_path'], components['conv_metadata_text']],
             outputs=[components['conv_status'], components['conv_save_btn']]
         )
 

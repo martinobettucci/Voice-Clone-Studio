@@ -266,7 +266,9 @@ class VoiceCloneTool(Tool):
                             label="Language (Chatterbox Multilingual)",
                         )
 
-                    components['generate_btn'] = gr.Button("Generate Audio", variant="primary", size="lg")
+                    with gr.Row():
+                        components['generate_btn'] = gr.Button("Generate Audio", variant="primary", size="lg")
+                        components['stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
 
                     components['output_audio'] = gr.Audio(
                         label="Generated Audio",
@@ -584,6 +586,7 @@ class VoiceCloneTool(Tool):
 
             def _stream_generate_impl():
                 writer = None
+                finalized = False
                 try:
                     resolved_seed = int(seed) if seed is not None else -1
                     if resolved_seed < 0:
@@ -670,6 +673,7 @@ class VoiceCloneTool(Tool):
                         raise RuntimeError(f"{engine_display} did not emit any streamed audio chunks.")
 
                     result = writer.finalize()
+                    finalized = True
                     metadata = dedent(f"""\
                         Generated: {timestamp}
                         Sample: {sample_name}
@@ -685,7 +689,7 @@ class VoiceCloneTool(Tool):
                     if play_completion_beep:
                         play_completion_beep()
                     yield (
-                        result.path,
+                        gr.update(),
                         f"Generated using {engine_display}. {cache_status}\n{seed_msg}\nReady to save.",
                         gr.update(interactive=True),
                         f"{safe_name}_{engine_display.lower().replace(' ', '_').replace('-', '_')}",
@@ -695,9 +699,10 @@ class VoiceCloneTool(Tool):
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
-                    if writer is not None:
-                        writer.cleanup_final_file()
                     yield None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", "", ""
+                finally:
+                    if writer is not None and not finalized:
+                        writer.cleanup_final_file()
 
             try:
                 if should_stream:
@@ -844,13 +849,21 @@ class VoiceCloneTool(Tool):
 
         def generate_from_lister(lister_value, *args, request: gr.Request = None):
             """Extract sample name from lister and pass to generate."""
+            yield (
+                gr.update(value=None),
+                "Generating...",
+                gr.update(interactive=False),
+                "",
+                "",
+                "",
+            )
             result = generate_audio_handler(get_selected_sample_name(lister_value), *args, request=request)
             if hasattr(result, "__next__"):
                 yield from result
                 return
             yield result
 
-        components['generate_btn'].click(
+        generate_event = components['generate_btn'].click(
             generate_from_lister,
             inputs=[components['sample_lister'], components['text_input'], components['language_dropdown'], components['seed_input'], components['clone_model_dropdown'],
                     components['qwen_do_sample'], components['qwen_temperature'], components['qwen_top_k'], components['qwen_top_p'], components['qwen_repetition_penalty'],
@@ -870,6 +883,14 @@ class VoiceCloneTool(Tool):
                 components['metadata_text'],
                 components['output_audio_path'],
             ]
+        )
+
+        components['stop_btn'].click(
+            lambda: ("Generation stopped.", gr.update(interactive=False)),
+            inputs=[],
+            outputs=[components['clone_status'], components['save_btn']],
+            cancels=[generate_event],
+            queue=False,
         )
 
         def apply_clone_output_pipeline(audio_path, enable_denoise, enable_normalize, enable_mono, request: gr.Request):

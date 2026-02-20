@@ -34,6 +34,7 @@ from modules.core_components.tools.output_audio_pipeline import (
     apply_generation_output_pipeline,
 )
 from modules.core_components.tools.live_stream_policy import prefix_non_stream_status
+from modules.core_components.runtime import MemoryAdmissionError
 from gradio_filelister import FileLister
 
 
@@ -107,9 +108,11 @@ class VoiceChangerTool(Tool):
                         sources=["upload", "microphone"],
                     )
 
-                    components['convert_btn'] = gr.Button(
-                        "Convert Voice", variant="primary", size="lg"
-                    )
+                    with gr.Row():
+                        components['convert_btn'] = gr.Button(
+                            "Convert Voice", variant="primary", size="lg"
+                        )
+                        components['stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
 
                     components['output_audio'] = gr.Audio(
                         label="Converted Audio",
@@ -161,8 +164,9 @@ class VoiceChangerTool(Tool):
         get_available_samples = shared_state['get_available_samples']
         load_sample_details = shared_state['load_sample_details']
         get_tenant_output_dir = shared_state['get_tenant_output_dir']
-        TEMP_DIR = shared_state['TEMP_DIR']
+        get_tenant_paths = shared_state['get_tenant_paths']
         play_completion_beep = shared_state.get('play_completion_beep')
+        run_heavy_job = shared_state.get('run_heavy_job')
         show_input_modal_js = shared_state['show_input_modal_js']
         input_trigger = shared_state['input_trigger']
         normalize_audio = shared_state['normalize_audio']
@@ -189,7 +193,7 @@ class VoiceChangerTool(Tool):
                 return None, "", ""
             return load_sample_details(sample_name)
 
-        def convert_voice(source_audio, target_lister_value, progress=gr.Progress()):
+        def convert_voice(source_audio, target_lister_value, request: gr.Request = None, progress=gr.Progress()):
             """Run voice conversion."""
             if source_audio is None:
                 return None, gr.update(interactive=False), None, "", "", "Please upload or record source audio."
@@ -202,7 +206,7 @@ class VoiceChangerTool(Tool):
                 return None, gr.update(interactive=False), None, "", "", "Please select a target voice sample."
 
             # Find target sample wav path
-            samples = get_available_samples()
+            samples = get_available_samples(request=request, strict=True)
 
             target_wav = None
             for s in samples:
@@ -213,61 +217,76 @@ class VoiceChangerTool(Tool):
             if not target_wav:
                 return None, gr.update(interactive=False), None, "", "", f"Target sample '{target_name}' not found."
 
-            try:
+            def _convert_impl():
                 progress(0.1, desc="Loading Chatterbox VC model...")
 
                 # Save source numpy audio to a temp WAV (Chatterbox VC expects a file path)
                 import numpy as np
-                src_temp = str(TEMP_DIR / "_vc_source_input.wav")
+                tenant_paths = get_tenant_paths(request=request, strict=True)
+                temp_dir = tenant_paths.temp_dir
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                src_temp = str(temp_dir / "_vc_source_input.wav")
                 # Gradio may return int16/int32 — convert to float for soundfile
-                if src_data.dtype in (np.int16, np.int32):
-                    src_data = src_data.astype(np.float32) / np.iinfo(src_data.dtype).max
-                sf.write(src_temp, src_data, src_sr)
+                src_wave = src_data
+                if src_wave.dtype in (np.int16, np.int32):
+                    src_wave = src_wave.astype(np.float32) / np.iinfo(src_wave.dtype).max
+                sf.write(src_temp, src_wave, src_sr)
+                try:
+                    progress(0.4, desc="Converting voice...")
+                    audio_data, sr = tts_manager.generate_voice_convert_chatterbox(
+                        source_audio_path=src_temp,
+                        target_voice_path=target_wav,
+                    )
 
-                progress(0.4, desc="Converting voice...")
-                audio_data, sr = tts_manager.generate_voice_convert_chatterbox(
-                    source_audio_path=src_temp,
-                    target_voice_path=target_wav,
-                )
+                    progress(0.8, desc="Saving to temp...")
 
-                progress(0.8, desc="Saving to temp...")
+                    # Save to temp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_target = "".join(c if c.isalnum() else "_" for c in target_name)
+                    temp_filename = f"vc_{safe_target}_{timestamp}.wav"
+                    temp_path = str(temp_dir / temp_filename)
+                    sf.write(temp_path, audio_data, sr)
 
-                # Save to temp
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                safe_target = "".join(c if c.isalnum() else "_" for c in target_name)
-                temp_filename = f"vc_{safe_target}_{timestamp}.wav"
-                temp_path = str(TEMP_DIR / temp_filename)
-                sf.write(temp_path, audio_data, sr)
+                    suggested = f"vc_{safe_target}"
 
-                suggested = f"vc_{safe_target}"
+                    metadata = dedent(f"""\
+                        Generated: {timestamp}
+                        Type: Voice Conversion
+                        Target Voice: {target_name}
+                        Engine: Chatterbox VC
+                        """)
+                    metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
-                metadata = dedent(f"""\
-                    Generated: {timestamp}
-                    Type: Voice Conversion
-                    Target Voice: {target_name}
-                    Engine: Chatterbox VC
-                    """)
-                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                    progress(1.0, desc="Done!")
+                    if play_completion_beep:
+                        play_completion_beep()
 
-                progress(1.0, desc="Done!")
-                if play_completion_beep:
-                    play_completion_beep()
+                    return (
+                        temp_path,
+                        gr.update(interactive=True),
+                        temp_path,
+                        suggested,
+                        metadata_out,
+                        prefix_non_stream_status(f"Voice changed to match '{target_name}'."),
+                    )
+                finally:
+                    try:
+                        Path(src_temp).unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
-                return (
-                    temp_path,
-                    gr.update(interactive=True),
-                    temp_path,
-                    suggested,
-                    metadata_out,
-                    prefix_non_stream_status(f"Voice changed to match '{target_name}'."),
-                )
-
+            try:
+                if run_heavy_job:
+                    return run_heavy_job("voice_changer_convert", _convert_impl, request=request)
+                return _convert_impl()
+            except MemoryAdmissionError as exc:
+                return None, gr.update(interactive=False), None, "", "", f"⚠ Memory safety guard rejected request: {str(exc)}"
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 return None, gr.update(interactive=False), None, "", "", f"❌ Error: {str(e)}"
 
-        components['convert_btn'].click(
+        convert_event = components['convert_btn'].click(
             convert_voice,
             inputs=[components['source_audio'], components['target_lister']],
             outputs=[
@@ -278,6 +297,14 @@ class VoiceChangerTool(Tool):
                 components['metadata_text'],
                 components['convert_status'],
             ]
+        )
+
+        components['stop_btn'].click(
+            lambda: ("Generation stopped.", gr.update(interactive=False)),
+            inputs=[],
+            outputs=[components['convert_status'], components['save_btn']],
+            cancels=[convert_event],
+            queue=False,
         )
 
         def apply_voice_changer_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):

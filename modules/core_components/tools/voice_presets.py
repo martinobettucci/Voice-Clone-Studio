@@ -278,7 +278,9 @@ class VoicePresetsTool(Tool):
                     components['custom_max_new_tokens'] = custom_params['max_new_tokens']
                     components['custom_params'] = custom_params
 
-                    components['custom_generate_btn'] = gr.Button("Generate Audio", variant="primary", size="lg")
+                    with gr.Row():
+                        components['custom_generate_btn'] = gr.Button("Generate Audio", variant="primary", size="lg")
+                        components['custom_stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
 
                     components['custom_output_audio'] = gr.Audio(
                         label="Generated Audio",
@@ -791,7 +793,7 @@ class VoicePresetsTool(Tool):
             )
         )
 
-        components['custom_generate_btn'].click(
+        custom_generate_event = components['custom_generate_btn'].click(
             generate_with_voice_type,
             inputs=[
                 components['custom_text_input'], components['custom_language'], components['custom_speaker_dropdown'],
@@ -808,6 +810,14 @@ class VoicePresetsTool(Tool):
                 components['custom_suggested_name'],
                 components['custom_metadata_text'],
             ]
+        )
+
+        components['custom_stop_btn'].click(
+            lambda: ("Generation stopped.", gr.update(interactive=False)),
+            inputs=[],
+            outputs=[components['preset_status'], components['custom_save_btn']],
+            cancels=[custom_generate_event],
+            queue=False,
         )
 
         def apply_preset_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):

@@ -147,11 +147,13 @@ class SoundEffectsTool(Tool):
                             )
 
                     # Generate button
-                    components['sfx_generate_btn'] = gr.Button(
-                        "Generate Sound Effect",
-                        variant="primary",
-                        size="lg"
-                    )
+                    with gr.Row():
+                        components['sfx_generate_btn'] = gr.Button(
+                            "Generate Sound Effect",
+                            variant="primary",
+                            size="lg"
+                        )
+                        components['sfx_stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
                     components['sfx_status'] = gr.Textbox(
                         label="Status",
                         interactive=False,
@@ -490,7 +492,7 @@ class SoundEffectsTool(Tool):
                 traceback.print_exc()
                 return None, None, f"Error: {str(e)}", "", "", gr.update(interactive=False), gr.update(), gr.update()
 
-        components['sfx_generate_btn'].click(
+        sfx_generate_event = components['sfx_generate_btn'].click(
             generate_sfx,
             inputs=[
                 components['sfx_mode'],
@@ -513,6 +515,14 @@ class SoundEffectsTool(Tool):
                 components['sfx_video_toggle'],
                 components['sfx_video_input'],
             ]
+        )
+
+        components['sfx_stop_btn'].click(
+            lambda: ("Generation stopped.", gr.update(interactive=False)),
+            inputs=[],
+            outputs=[components['sfx_status'], components['sfx_save_btn']],
+            cancels=[sfx_generate_event],
+            queue=False,
         )
 
         def apply_sfx_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):

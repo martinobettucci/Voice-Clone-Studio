@@ -107,7 +107,9 @@ class VoiceDesignTool(Tool):
                     )
                     components.update(design_params)
 
-                    components['design_generate_btn'] = gr.Button("Generate Voice", variant="primary", size="lg")
+                    with gr.Row():
+                        components['design_generate_btn'] = gr.Button("Generate Voice", variant="primary", size="lg")
+                        components['design_stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
                     components['design_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=3)
 
                 with gr.Column(scale=1):
@@ -270,13 +272,21 @@ class VoiceDesignTool(Tool):
                 return f"❌ Error saving: {str(e)}"
 
         # Wire generate button
-        components['design_generate_btn'].click(
+        design_generate_event = components['design_generate_btn'].click(
             generate_voice_design_handler,
             inputs=[components['design_text_input'], components['design_language'], components['design_instruct_input'],
                     components['design_seed'],
                     components['do_sample'], components['temperature'], components['top_k'],
                     components['top_p'], components['repetition_penalty'], components['max_new_tokens']],
             outputs=[components['design_output_audio'], components['design_status'], components['design_save_btn']]
+        )
+
+        components['design_stop_btn'].click(
+            lambda: ("Generation stopped.", gr.update(interactive=False)),
+            inputs=[],
+            outputs=[components['design_status'], components['design_save_btn']],
+            cancels=[design_generate_event],
+            queue=False,
         )
 
         def apply_design_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
