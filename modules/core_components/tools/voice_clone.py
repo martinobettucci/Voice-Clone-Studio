@@ -13,6 +13,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(project_root / "modules"))
 
 import gradio as gr
+import numpy as np
 import soundfile as sf
 import torch
 import random
@@ -38,6 +39,11 @@ from modules.core_components.tools.generated_output_save import (
 from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
+)
+from modules.core_components.tools.live_audio_streaming import LiveAudioChunkWriter, normalize_audio_chunk
+from modules.core_components.tools.live_stream_policy import (
+    prefix_non_stream_status,
+    voice_clone_stream_supported,
 )
 from gradio_filelister import FileLister
 
@@ -265,7 +271,9 @@ class VoiceCloneTool(Tool):
                     components['output_audio'] = gr.Audio(
                         label="Generated Audio",
                         type="filepath",
-                        interactive=True,
+                        interactive=False,
+                        streaming=True,
+                        autoplay=True,
                     )
                     with gr.Row():
                         components['output_enable_denoise'] = gr.Checkbox(
@@ -289,6 +297,7 @@ class VoiceCloneTool(Tool):
                     components['save_btn'] = gr.Button("Save to Output", variant="primary", interactive=False)
                     components['suggested_name'] = gr.State(value="")
                     components['metadata_text'] = gr.State(value="")
+                    components['output_audio_path'] = gr.State(value="")
                     components['existing_files_json'] = gr.State(value="[]")
 
                     components['clone_status'] = gr.Textbox(label="Status", interactive=False, lines=2, max_lines=5)
@@ -319,6 +328,7 @@ class VoiceCloneTool(Tool):
         get_tenant_paths = shared_state['get_tenant_paths']
         play_completion_beep = shared_state.get('play_completion_beep')
         run_heavy_job = shared_state.get('run_heavy_job')
+        run_heavy_stream_job = shared_state.get('run_heavy_stream_job')
         normalize_audio = shared_state['normalize_audio']
         convert_to_mono = shared_state['convert_to_mono']
         clean_audio = shared_state['clean_audio']
@@ -350,10 +360,10 @@ class VoiceCloneTool(Tool):
                                    progress=gr.Progress()):
             """Generate audio using voice cloning - supports Qwen, VibeVoice, and LuxTTS engines."""
             if not sample_name:
-                return None, "Please select a voice sample first.", gr.update(interactive=False), "", ""
+                return None, "Please select a voice sample first.", gr.update(interactive=False), "", "", ""
 
             if not text_to_generate or not text_to_generate.strip():
-                return None, "Please enter text to generate.", gr.update(interactive=False), "", ""
+                return None, "Please enter text to generate.", gr.update(interactive=False), "", "", ""
 
             # Parse model selection to determine engine and size
             if "LuxTTS" in model_selection:
@@ -389,7 +399,7 @@ class VoiceCloneTool(Tool):
                     break
 
             if not sample:
-                return None, f"❌ Sample '{sample_name}' not found.", gr.update(interactive=False), "", ""
+                return None, f"❌ Sample '{sample_name}' not found.", gr.update(interactive=False), "", "", ""
 
             # Check that sample has a transcript (required for all engines)
             sample_ref_text = sample.get("ref_text") or sample.get("meta", {}).get("Text", "")
@@ -398,7 +408,13 @@ class VoiceCloneTool(Tool):
                     f"❌ No transcript found for sample '{sample_name}'.\n\n"
                     "Please transcribe this sample first in the **Library Manager** tab "
                     "(using Whisper or VibeVoice ASR), then try again."
-                ), gr.update(interactive=False), "", ""
+                ), gr.update(interactive=False), "", "", ""
+
+            stream_supported = voice_clone_stream_supported(model_selection, tts_manager)
+            if engine == "qwen" and stream_supported:
+                stream_supported = tts_manager.qwen_runtime_streaming_available(model_size=model_size)
+            should_stream = engine in {"qwen", "vibevoice"} and stream_supported
+            add_non_stream_notice = not should_stream
 
             def _generate_impl():
                 # Set the seed for reproducibility
@@ -554,24 +570,149 @@ class VoiceCloneTool(Tool):
                 progress(1.0, desc="Done!")
                 if play_completion_beep:
                     play_completion_beep()
+                status_msg = f"Generated using {engine_display}. {cache_status}\n{seed_msg}\nReady to save."
+                if add_non_stream_notice:
+                    status_msg = prefix_non_stream_status(status_msg)
                 return (
                     str(output_file),
-                    f"Generated using {engine_display}. {cache_status}\n{seed_msg}\nReady to save.",
+                    status_msg,
                     gr.update(interactive=True),
                     f"{safe_name}_{engine_display.lower().replace(' ', '_').replace('-', '_')}",
                     metadata_out,
+                    str(output_file),
                 )
 
+            def _stream_generate_impl():
+                writer = None
+                try:
+                    resolved_seed = int(seed) if seed is not None else -1
+                    if resolved_seed < 0:
+                        resolved_seed = random.randint(0, 2147483647)
+                    set_seed(resolved_seed)
+                    seed_msg = f"Seed: {resolved_seed}"
+
+                    if configure_tts_manager_for_tenant:
+                        configure_tts_manager_for_tenant(request=request, strict=True)
+
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_name = "".join(c if c.isalnum() else "_" for c in sample_name)
+                    tenant_paths = get_tenant_paths(request=request, strict=True)
+                    temp_dir = tenant_paths.temp_dir
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    final_output_file = temp_dir / f"voice_clone_{safe_name}_{timestamp}.wav"
+                    writer = LiveAudioChunkWriter(final_output_file)
+
+                    if engine == "qwen":
+                        progress(0.1, desc=f"Loading Qwen3 model ({model_size})...")
+                        model = tts_manager.get_qwen3_base(model_size)
+                        prompt_items, was_cached = get_or_create_voice_prompt(
+                            model=model,
+                            sample_name=sample_name,
+                            wav_path=sample["wav_path"],
+                            ref_text=sample["ref_text"],
+                            model_size=model_size,
+                            progress_callback=progress,
+                            request=request,
+                        )
+                        cache_status = "cached prompt" if was_cached else "new prompt"
+                        stream_iter = tts_manager.stream_voice_clone_qwen(
+                            text=text_to_generate,
+                            language=language,
+                            prompt_items=prompt_items,
+                            seed=resolved_seed,
+                            do_sample=qwen_do_sample,
+                            temperature=qwen_temperature,
+                            top_k=qwen_top_k,
+                            top_p=qwen_top_p,
+                            repetition_penalty=qwen_repetition_penalty,
+                            max_new_tokens=qwen_max_new_tokens,
+                            model_size=model_size,
+                        )
+                        engine_display = f"Qwen3-{model_size}"
+                    else:
+                        progress(0.1, desc=f"Loading VibeVoice model ({model_size})...")
+                        cache_status = "native streaming"
+                        stream_iter = tts_manager.stream_voice_clone_vibevoice(
+                            text=text_to_generate,
+                            voice_sample_path=sample["wav_path"],
+                            seed=resolved_seed,
+                            do_sample=vv_do_sample,
+                            temperature=vv_temperature,
+                            top_k=vv_top_k,
+                            top_p=vv_top_p,
+                            repetition_penalty=vv_repetition_penalty,
+                            cfg_scale=vv_cfg_scale,
+                            num_steps=vv_num_steps,
+                            model_size=model_size,
+                            user_config=shared_state.get("_user_config", {}),
+                        )
+                        engine_display = f"VibeVoice-{model_size}"
+
+                    chunk_count = 0
+                    for chunk_audio, chunk_sr in stream_iter:
+                        chunk_arr = normalize_audio_chunk(chunk_audio)
+                        chunk_path = writer.write_chunk(chunk_arr, chunk_sr)
+                        if not chunk_path:
+                            continue
+                        chunk_count += 1
+                        ui_chunk = np.clip(chunk_arr, -1.0, 1.0)
+                        ui_chunk = (ui_chunk * 32767.0).astype(np.int16, copy=False)
+                        yield (
+                            (int(chunk_sr), ui_chunk),
+                            f"Streaming {engine_display}... chunk {chunk_count}",
+                            gr.update(interactive=False),
+                            "",
+                            "",
+                            "",
+                        )
+
+                    if chunk_count <= 0:
+                        raise RuntimeError(f"{engine_display} did not emit any streamed audio chunks.")
+
+                    result = writer.finalize()
+                    metadata = dedent(f"""\
+                        Generated: {timestamp}
+                        Sample: {sample_name}
+                        Engine: {engine_display}
+                        Language: {language}
+                        Seed: {resolved_seed}
+                        Stream Chunks: {chunk_count}
+                        Text: {' '.join(text_to_generate.split())}
+                        """)
+                    metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+
+                    progress(1.0, desc="Done!")
+                    if play_completion_beep:
+                        play_completion_beep()
+                    yield (
+                        result.path,
+                        f"Generated using {engine_display}. {cache_status}\n{seed_msg}\nReady to save.",
+                        gr.update(interactive=True),
+                        f"{safe_name}_{engine_display.lower().replace(' ', '_').replace('-', '_')}",
+                        metadata_out,
+                        result.path,
+                    )
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    if writer is not None:
+                        writer.cleanup_final_file()
+                    yield None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", "", ""
+
             try:
+                if should_stream:
+                    if run_heavy_stream_job:
+                        return run_heavy_stream_job("voice_clone_generate_stream", _stream_generate_impl, request=request)
+                    return _stream_generate_impl()
                 if run_heavy_job:
                     return run_heavy_job("voice_clone_generate", _generate_impl, request=request)
                 return _generate_impl()
             except MemoryAdmissionError as exc:
-                return None, f"⚠ Memory safety guard rejected request: {str(exc)}", gr.update(interactive=False), "", ""
+                return None, f"⚠ Memory safety guard rejected request: {str(exc)}", gr.update(interactive=False), "", "", ""
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", ""
+                return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False), "", "", ""
 
         def load_sample_from_lister(lister_value, request: gr.Request):
             """Load audio, text, and info for the selected sample from FileLister."""
@@ -703,7 +844,11 @@ class VoiceCloneTool(Tool):
 
         def generate_from_lister(lister_value, *args, request: gr.Request = None):
             """Extract sample name from lister and pass to generate."""
-            return generate_audio_handler(get_selected_sample_name(lister_value), *args, request=request)
+            result = generate_audio_handler(get_selected_sample_name(lister_value), *args, request=request)
+            if hasattr(result, "__next__"):
+                yield from result
+                return
+            yield result
 
         components['generate_btn'].click(
             generate_from_lister,
@@ -723,17 +868,18 @@ class VoiceCloneTool(Tool):
                 components['save_btn'],
                 components['suggested_name'],
                 components['metadata_text'],
+                components['output_audio_path'],
             ]
         )
 
-        def apply_clone_output_pipeline(audio_value, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
+        def apply_clone_output_pipeline(audio_path, enable_denoise, enable_normalize, enable_mono, request: gr.Request):
             pipeline = OutputAudioPipelineConfig(
                 enable_denoise=bool(enable_denoise),
                 enable_normalize=bool(enable_normalize),
                 enable_mono=bool(enable_mono),
             )
             updated_audio, status = apply_generation_output_pipeline(
-                audio_value,
+                audio_path,
                 pipeline,
                 deepfilter_available=deepfilter_available,
                 denoise_step=lambda path: clean_audio(path),
@@ -741,18 +887,18 @@ class VoiceCloneTool(Tool):
                 mono_step=lambda path: convert_to_mono(path, request=request),
             )
             if not updated_audio:
-                return gr.update(), status
-            return gr.update(value=updated_audio), status
+                return gr.update(), status, audio_path
+            return gr.update(value=updated_audio), status, updated_audio
 
         components['output_apply_pipeline_btn'].click(
             apply_clone_output_pipeline,
             inputs=[
-                components['output_audio'],
+                components['output_audio_path'],
                 components['output_enable_denoise'],
                 components['output_enable_normalize'],
                 components['output_enable_mono'],
             ],
-            outputs=[components['output_audio'], components['clone_status']],
+            outputs=[components['output_audio'], components['clone_status'], components['output_audio_path']],
         )
 
         save_clone_modal_js = show_input_modal_js(
@@ -788,7 +934,7 @@ class VoiceCloneTool(Tool):
             js=save_clone_js,
         )
 
-        def handle_clone_save_input(input_value, audio_value, metadata_text, request: gr.Request):
+        def handle_clone_save_input(input_value, output_audio_path, metadata_text, request: gr.Request):
             matched, cancelled, chosen_name = parse_modal_submission(input_value, "save_vc_clone_")
             if not matched:
                 return gr.update(), gr.update()
@@ -796,13 +942,13 @@ class VoiceCloneTool(Tool):
                 return gr.update(), gr.update()
             if not chosen_name or not chosen_name.strip():
                 return "❌ Please enter a filename.", gr.update()
-            if not audio_value:
+            if not output_audio_path:
                 return "❌ No generated audio to save.", gr.update(interactive=False)
 
             try:
                 output_dir = get_tenant_output_dir(request=request, strict=True)
                 output_path = save_generated_output(
-                    audio_value=audio_value,
+                    audio_value=output_audio_path,
                     output_dir=output_dir,
                     raw_name=chosen_name,
                     metadata_text=metadata_text,
@@ -814,7 +960,7 @@ class VoiceCloneTool(Tool):
 
         input_trigger.change(
             handle_clone_save_input,
-            inputs=[input_trigger, components['output_audio'], components['metadata_text']],
+            inputs=[input_trigger, components['output_audio_path'], components['metadata_text']],
             outputs=[components['clone_status'], components['save_btn']]
         )
 

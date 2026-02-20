@@ -30,6 +30,7 @@ from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
 )
+from modules.core_components.tools.live_stream_policy import prefix_non_stream_status
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -219,7 +220,11 @@ class VoiceDesignTool(Tool):
                 progress(1.0, desc="Done!")
                 if play_completion_beep:
                     play_completion_beep()
-                return str(out_file), f"Voice design generated. Ready to save.\n{seed_msg}", gr.update(interactive=True)
+                return (
+                    str(out_file),
+                    prefix_non_stream_status(f"Voice design generated. Ready to save.\n{seed_msg}"),
+                    gr.update(interactive=True),
+                )
 
             except Exception as e:
                 return None, f"❌ Error generating audio: {str(e)}", gr.update(interactive=False)

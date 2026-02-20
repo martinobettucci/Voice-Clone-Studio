@@ -1080,6 +1080,23 @@ def build_shared_state(
             timeout_s=timeout_s,
         )
 
+    def run_heavy_stream_job(job_name, fn, request=None, timeout_s=None):
+        memory_governor.update_config(user_config)
+        tenant_id = None
+        if request is not None:
+            try:
+                tenant_paths = resolve_tenant_paths(request=request, required=False, config=user_config)
+                if tenant_paths is not None:
+                    tenant_id = tenant_paths.tenant_id
+            except TenantResolutionError:
+                tenant_id = None
+        return memory_governor.run_heavy_stream(
+            job_name=job_name,
+            fn=fn,
+            tenant_id=tenant_id,
+            timeout_s=timeout_s,
+        )
+
     shared_state = {
         # Config & Emotions
         'user_config': user_config,
@@ -1098,6 +1115,7 @@ def build_shared_state(
         'ALLOW_CONFIG_API': is_config_api_enabled(),
         'get_memory_snapshot': get_memory_snapshot,
         'run_heavy_job': run_heavy_job,
+        'run_heavy_stream_job': run_heavy_stream_job,
 
         # Constants
         'LANGUAGES': constants.get('LANGUAGES', []),
@@ -1407,6 +1425,7 @@ def run_tool_standalone(ToolClass, port=7860, title="Tool - Standalone", extra_s
     print(f"\n✓ {ToolClass.config.name} UI loaded successfully!")
     print(f"[*] Launching on http://127.0.0.1:{port}")
 
+    app.queue(default_concurrency_limit=1)
     app.launch(
         theme=theme,
         css=CONFIRMATION_MODAL_CSS + INPUT_MODAL_CSS + SHARED_CSS,

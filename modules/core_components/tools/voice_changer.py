@@ -33,6 +33,7 @@ from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
 )
+from modules.core_components.tools.live_stream_policy import prefix_non_stream_status
 from gradio_filelister import FileLister
 
 
@@ -258,7 +259,7 @@ class VoiceChangerTool(Tool):
                     temp_path,
                     suggested,
                     metadata_out,
-                    f"Voice changed to match '{target_name}'."
+                    prefix_non_stream_status(f"Voice changed to match '{target_name}'."),
                 )
 
             except Exception as e:

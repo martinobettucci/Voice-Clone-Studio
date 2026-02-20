@@ -231,19 +231,12 @@ class MemoryGovernor:
             payload.update(extra)
         LOGGER.info("memory_governor %s", json.dumps(payload, sort_keys=True))
 
-    def run_heavy(
-        self,
-        job_name: str,
-        fn: Callable[[], Any],
-        tenant_id: str | None = None,
-        timeout_s: int | None = None,
-    ) -> Any:
-        """Run a heavy function with strict admission and serialized concurrency."""
-        del tenant_id  # Reserved for future per-tenant policy.
-
+    def _enter_heavy_job(self, job_name: str, timeout_s: int | None = None) -> dict[str, Any]:
+        """Run admission checks and mark a heavy job as active."""
         timeout = int(timeout_s) if timeout_s is not None else int(self.heavy_job_timeout_s)
         start = time.monotonic()
         peak_rss_before = self._peak_rss_bytes()
+
         with self._lock:
             admission_snapshot = self.snapshot()
             reason = self.reject_reason(admission_snapshot)
@@ -251,6 +244,7 @@ class MemoryGovernor:
                 self._rejected_jobs_total += 1
                 self._log_event("reject", job_name, admission_snapshot, reason=reason)
                 raise MemoryAdmissionError(reason, admission_snapshot)
+
             self._active_heavy_jobs += 1
             self._active_job_names.add(str(job_name))
             self._admitted_jobs_total += 1
@@ -262,46 +256,98 @@ class MemoryGovernor:
                 except Exception:
                     pass
 
+        return {
+            "timeout": timeout,
+            "start": start,
+            "peak_rss_before": peak_rss_before,
+        }
+
+    def _exit_heavy_job(self, job_name: str, ctx: dict[str, Any]) -> None:
+        """Finalize heavy job accounting and cleanup."""
+        gc.collect()
+        empty_device_cache()
+
+        elapsed = time.monotonic() - float(ctx.get("start", time.monotonic()))
+        timeout = int(ctx.get("timeout", self.heavy_job_timeout_s))
+        if timeout > 0 and elapsed > timeout:
+            LOGGER.warning("memory_governor job '%s' exceeded timeout (%ss > %ss)", job_name, int(elapsed), timeout)
+
+        peak_rss_before = int(ctx.get("peak_rss_before", 0))
+        peak_rss_after = self._peak_rss_bytes()
+        job_peak_rss = max(
+            peak_rss_before,
+            peak_rss_after,
+            int(self._process.memory_info().rss),
+        )
+        job_peak_gpu_reserved = 0
+        if torch.cuda.is_available():
+            try:
+                device_idx = torch.cuda.current_device()
+                job_peak_gpu_reserved = int(torch.cuda.max_memory_reserved(device_idx))
+            except Exception:
+                job_peak_gpu_reserved = 0
+
+        with self._lock:
+            self._active_heavy_jobs = max(0, self._active_heavy_jobs - 1)
+            self._active_job_names.discard(str(job_name))
+            self._completed_jobs_total += 1
+            exit_snapshot = self.snapshot()
+            self._log_event(
+                "exit",
+                job_name,
+                exit_snapshot,
+                extra={
+                    "elapsed_s": round(elapsed, 3),
+                    "job_peak_rss_bytes": job_peak_rss,
+                    "job_peak_gpu_reserved_bytes": job_peak_gpu_reserved,
+                },
+            )
+
+    def run_heavy(
+        self,
+        job_name: str,
+        fn: Callable[[], Any],
+        tenant_id: str | None = None,
+        timeout_s: int | None = None,
+    ) -> Any:
+        """Run a heavy function with strict admission and serialized concurrency."""
+        del tenant_id  # Reserved for future per-tenant policy.
+
+        timeout = int(timeout_s) if timeout_s is not None else int(self.heavy_job_timeout_s)
+        ctx = self._enter_heavy_job(job_name=job_name, timeout_s=timeout)
+
         try:
             result = fn()
             return result
         finally:
-            gc.collect()
-            empty_device_cache()
+            self._exit_heavy_job(job_name=job_name, ctx=ctx)
 
-            elapsed = time.monotonic() - start
-            if timeout > 0 and elapsed > timeout:
-                LOGGER.warning("memory_governor job '%s' exceeded timeout (%ss > %ss)", job_name, int(elapsed), timeout)
+    def run_heavy_stream(
+        self,
+        job_name: str,
+        fn: Callable[[], Any],
+        tenant_id: str | None = None,
+        timeout_s: int | None = None,
+    ):
+        """Run a heavy streaming function while holding admission until stream completes."""
+        del tenant_id  # Reserved for future per-tenant policy.
 
-            peak_rss_after = self._peak_rss_bytes()
-            job_peak_rss = max(
-                peak_rss_before,
-                peak_rss_after,
-                int(self._process.memory_info().rss),
-            )
-            job_peak_gpu_reserved = 0
-            if torch.cuda.is_available():
-                try:
-                    device_idx = torch.cuda.current_device()
-                    job_peak_gpu_reserved = int(torch.cuda.max_memory_reserved(device_idx))
-                except Exception:
-                    job_peak_gpu_reserved = 0
+        timeout = int(timeout_s) if timeout_s is not None else int(self.heavy_job_timeout_s)
+        ctx = self._enter_heavy_job(job_name=job_name, timeout_s=timeout)
 
-            with self._lock:
-                self._active_heavy_jobs = max(0, self._active_heavy_jobs - 1)
-                self._active_job_names.discard(str(job_name))
-                self._completed_jobs_total += 1
-                exit_snapshot = self.snapshot()
-                self._log_event(
-                    "exit",
-                    job_name,
-                    exit_snapshot,
-                    extra={
-                        "elapsed_s": round(elapsed, 3),
-                        "job_peak_rss_bytes": job_peak_rss,
-                        "job_peak_gpu_reserved_bytes": job_peak_gpu_reserved,
-                    },
-                )
+        try:
+            stream = fn()
+            if stream is None:
+                return
+
+            if isinstance(stream, (str, bytes, bytearray)):
+                yield stream
+                return
+
+            for item in stream:
+                yield item
+        finally:
+            self._exit_heavy_job(job_name=job_name, ctx=ctx)
 
 
 _GOVERNOR: MemoryGovernor | None = None

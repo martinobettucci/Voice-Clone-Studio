@@ -609,6 +609,7 @@ if __name__ == "__main__":
             print("=" * 50)
             print()
 
+        app.queue(default_concurrency_limit=1)
         app.launch(
             server_name=server_host,
             server_port=7860,

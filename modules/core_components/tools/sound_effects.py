@@ -30,6 +30,7 @@ from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
 )
+from modules.core_components.tools.live_stream_policy import prefix_non_stream_status
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -450,7 +451,9 @@ class SoundEffectsTool(Tool):
                 progress(1.0, desc="Done!")
                 play_completion_beep()
 
-                status = f"Ready to save | Seed: {resolved_seed} | {actual_duration}s @ {sr}Hz"
+                status = prefix_non_stream_status(
+                    f"Ready to save | Seed: {resolved_seed} | {actual_duration}s @ {sr}Hz"
+                )
 
                 # In video mode, auto-switch preview to Result
                 if combined_video_path:

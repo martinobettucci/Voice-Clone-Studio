@@ -9,7 +9,7 @@ import hashlib
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Iterator, Any
 from collections import OrderedDict
 from functools import wraps
 
@@ -81,6 +81,7 @@ class TTSManager:
         self._voice_prompt_cache_limit = int(self.user_config.get("voice_prompt_memory_cache_limit", 8))
         self._luxtts_prompt_cache_limit = int(self.user_config.get("luxtts_prompt_memory_cache_limit", 8))
         self._last_loaded_model = None
+        self._qwen_stream_patch_state = None
 
     @staticmethod
     def _hash_file_md5(path: str, chunk_size: int = 1024 * 1024) -> str:
@@ -394,6 +395,83 @@ class TTSManager:
             print(f"Unloaded TTS models: {', '.join(freed)}")
 
         return bool(freed)
+
+    def _ensure_qwen_stream_patch(self):
+        """Apply Qwen streaming patch once per manager lifecycle."""
+        if self._qwen_stream_patch_state is None:
+            try:
+                from .qwen_stream_patch import apply_qwen_streaming_patch
+
+                self._qwen_stream_patch_state = apply_qwen_streaming_patch()
+            except Exception as exc:
+                class _State:
+                    available = False
+                    patched = False
+                    reason = str(exc)
+
+                self._qwen_stream_patch_state = _State()
+        return self._qwen_stream_patch_state
+
+    @staticmethod
+    def _normalize_stream_chunk(audio_chunk: Any):
+        """Convert streamed chunk payload to mono float32 numpy."""
+        import numpy as np
+
+        if audio_chunk is None:
+            return np.zeros(0, dtype=np.float32)
+
+        if hasattr(audio_chunk, "detach") and callable(audio_chunk.detach):
+            arr = audio_chunk.detach().cpu().numpy()
+        elif hasattr(audio_chunk, "cpu") and hasattr(audio_chunk, "numpy"):
+            arr = audio_chunk.cpu().numpy()
+        elif hasattr(audio_chunk, "numpy") and callable(audio_chunk.numpy):
+            arr = audio_chunk.numpy()
+        else:
+            arr = np.asarray(audio_chunk)
+
+        arr = np.squeeze(arr)
+        if arr.ndim == 0:
+            arr = arr.reshape(1)
+        elif arr.ndim > 1:
+            arr = arr.reshape(-1)
+
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32, copy=False)
+        return arr
+
+    def supports_live_streaming(self, engine: str, mode: str) -> bool:
+        """Return whether native live streaming is available for engine+mode."""
+        engine_key = str(engine or "").strip().lower()
+        mode_key = str(mode or "").strip().lower()
+
+        if engine_key in {"vibevoice", "vibevoice_tts"}:
+            return mode_key in {"voice_clone", "conversation", "conversation_vibevoice"}
+
+        if engine_key in {"qwen", "qwen3", "qwen_tts"}:
+            if mode_key not in {"voice_clone", "conversation", "conversation_qwen_base"}:
+                return False
+            patch_state = self._ensure_qwen_stream_patch()
+            return bool(getattr(patch_state, "available", False))
+
+        return False
+
+    def qwen_runtime_streaming_available(self, model_size: str = "1.7B") -> bool:
+        """Return whether loaded Qwen runtime exposes native stream entrypoints."""
+        patch_state = self._ensure_qwen_stream_patch()
+        if not getattr(patch_state, "available", False):
+            return False
+
+        try:
+            model = self.get_qwen3_base(model_size)
+        except Exception:
+            return False
+
+        try:
+            from .qwen_stream_patch import qwen_streaming_runtime_available
+
+            return bool(qwen_streaming_runtime_available(model))
+        except Exception:
+            return False
 
     # ============================================================
     # GENERATION METHODS
@@ -763,6 +841,72 @@ class TTSManager:
 
         return audio_data, sr
 
+    def stream_voice_clone_qwen(
+        self,
+        text: str,
+        language: str,
+        prompt_items,
+        seed: int = -1,
+        do_sample: bool = True,
+        temperature: float = 0.9,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        repetition_penalty: float = 1.05,
+        max_new_tokens: int = 2048,
+        model_size: str = "1.7B",
+        chunk_size: int = 16,
+        play_steps: int = 50,
+    ) -> Iterator[Tuple[Any, int]]:
+        """Stream Qwen voice-clone chunks using patched native streaming APIs."""
+        import random
+
+        patch_state = self._ensure_qwen_stream_patch()
+        if not getattr(patch_state, "available", False):
+            reason = getattr(patch_state, "reason", "streaming patch unavailable")
+            raise RuntimeError(f"Qwen live streaming unavailable: {reason}")
+
+        if seed < 0:
+            seed = random.randint(0, 2147483647)
+        set_seed(seed)
+
+        model = self.get_qwen3_base(model_size)
+
+        try:
+            model.enable_streaming_optimizations()
+        except Exception:
+            # Optional optimization hook; generation may still stream without it.
+            pass
+
+        from .qwen_stream_patch import qwen_streaming_runtime_available
+
+        if not qwen_streaming_runtime_available(model):
+            raise RuntimeError("Qwen runtime does not expose native streaming entrypoints.")
+
+        gen_kwargs = {
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": bool(do_sample),
+            "temperature": float(temperature),
+            "top_k": int(top_k),
+            "top_p": float(top_p),
+            "repetition_penalty": float(repetition_penalty),
+        }
+
+        stream_iter = model.stream_generate_voice_clone(
+            text=text.strip(),
+            language=language if language != "Auto" else "Auto",
+            voice_clone_prompt=prompt_items,
+            output_format="pcm",
+            chunk_size=int(chunk_size),
+            play_steps=int(play_steps),
+            seed=seed,
+            **gen_kwargs,
+        )
+
+        for audio_chunk, sr in stream_iter:
+            chunk = self._normalize_stream_chunk(audio_chunk)
+            if chunk.size > 0:
+                yield chunk, int(sr)
+
     @staticmethod
     def _chunk_text_for_vibevoice(text, sentences_per_chunk):
         """Split text into multi-turn Speaker 1 format for VibeVoice stability.
@@ -970,7 +1114,11 @@ class TTSManager:
                 inputs[k] = v.to(device)
 
         # Set inference steps
-        model.set_ddpm_inference_steps(num_steps=int(num_steps))
+        # Some model variants expose this as positional-only while others accept `num_steps=`.
+        try:
+            model.set_ddpm_inference_steps(num_steps=int(num_steps))
+        except TypeError:
+            model.set_ddpm_inference_steps(int(num_steps))
 
         # Generate
         outputs = model.generate(
@@ -991,6 +1139,136 @@ class TTSManager:
             raise RuntimeError("VibeVoice failed to generate audio")
 
         return audio_data, sr
+
+    def stream_voice_clone_vibevoice(
+        self,
+        text,
+        voice_sample_path,
+        seed=-1,
+        do_sample=False,
+        temperature=1.0,
+        top_k=50,
+        top_p=1.0,
+        repetition_penalty=1.0,
+        cfg_scale=3.0,
+        num_steps=20,
+        model_size="Large",
+        user_config=None,
+    ) -> Iterator[Tuple[Any, int]]:
+        """Stream VibeVoice voice-clone chunks using native audio streamer support."""
+        import random
+        import warnings
+        import logging
+        import threading
+
+        if seed < 0:
+            seed = random.randint(0, 2147483647)
+        set_seed(seed)
+
+        model = self.get_vibevoice_tts(model_size)
+        from modules.vibevoice_tts.processor.vibevoice_processor import VibeVoiceProcessor
+        from modules.vibevoice_tts.modular.streamer import AudioStreamer
+
+        if model_size == "Large (4-bit)":
+            model_repo_id = "FranckyB/VibeVoice-Large-4bit"
+            download_label = "VibeVoice-Large (4-bit)"
+        elif model_size == "Large":
+            model_repo_id = "FranckyB/VibeVoice-Large"
+            download_label = "VibeVoice-Large"
+        else:
+            model_repo_id = "FranckyB/VibeVoice-1.5B"
+            download_label = "VibeVoice-1.5B"
+
+        if user_config is None:
+            user_config = self.user_config or {}
+        offline_mode = user_config.get("offline_mode", False)
+
+        processor_source = resolve_model_source(
+            model_repo_id,
+            offline_mode=offline_mode,
+            settings_download_name=download_label,
+            auto_download_when_online=True,
+        )
+        tokenizer_source = resolve_model_source(
+            "Qwen/Qwen2.5-1.5B",
+            offline_mode=offline_mode,
+            settings_download_name="Qwen2.5-1.5B (VibeVoice Tokenizer)",
+            auto_download_when_online=True,
+        )
+
+        prev_level = logging.getLogger("transformers.tokenization_utils_base").level
+        logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            processor = VibeVoiceProcessor.from_pretrained(
+                processor_source,
+                local_files_only=offline_mode,
+                language_model_pretrained_name=tokenizer_source,
+            )
+        logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
+
+        formatted_script = f"Speaker 1: {text.strip()}"
+        inputs = processor(
+            text=[formatted_script],
+            voice_samples=[[voice_sample_path]],
+            padding=True,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+
+        device = get_device()
+        for k, v in inputs.items():
+            if torch.is_tensor(v):
+                inputs[k] = v.to(device)
+
+        gen_config = {"do_sample": bool(do_sample)}
+        if do_sample:
+            gen_config["temperature"] = float(temperature)
+            if top_k > 0:
+                gen_config["top_k"] = int(top_k)
+            if top_p < 1.0:
+                gen_config["top_p"] = float(top_p)
+            if repetition_penalty != 1.0:
+                gen_config["repetition_penalty"] = float(repetition_penalty)
+
+        # Some model variants expose this as positional-only while others accept `num_steps=`.
+        try:
+            model.set_ddpm_inference_steps(num_steps=int(num_steps))
+        except TypeError:
+            model.set_ddpm_inference_steps(int(num_steps))
+        streamer = AudioStreamer(batch_size=1, timeout=None)
+        generation_errors = []
+
+        def _run_generation():
+            try:
+                model.generate(
+                    **inputs,
+                    max_new_tokens=None,
+                    cfg_scale=float(cfg_scale),
+                    tokenizer=processor.tokenizer,
+                    generation_config=gen_config,
+                    audio_streamer=streamer,
+                    verbose=False,
+                )
+            except Exception as exc:
+                generation_errors.append(exc)
+                try:
+                    streamer.end()
+                except Exception:
+                    pass
+
+        worker = threading.Thread(target=_run_generation, name="vibevoice-stream-gen", daemon=True)
+        worker.start()
+
+        stream = streamer.get_stream(0)
+        for audio_chunk in stream:
+            chunk = self._normalize_stream_chunk(audio_chunk)
+            if chunk.size > 0:
+                yield chunk, 24000
+
+        worker.join()
+        if generation_errors:
+            raise generation_errors[0]
 
     # Voice prompt caching
     def get_prompt_cache_path(self, sample_name: str, model_size: str = "1.7B") -> Path:

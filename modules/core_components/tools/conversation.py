@@ -40,6 +40,11 @@ from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
 )
+from modules.core_components.tools.live_audio_streaming import LiveAudioChunkWriter
+from modules.core_components.tools.live_stream_policy import (
+    conversation_stream_supported,
+    prefix_non_stream_status,
+)
 from modules.core_components.runtime import MemoryAdmissionError
 
 
@@ -449,6 +454,7 @@ class ConversationTool(Tool):
                         label="Generated Conversation",
                         type="filepath",
                         interactive=True,
+                        streaming=True,
                     )
                     with gr.Row():
                         components['conv_output_enable_denoise'] = gr.Checkbox(
@@ -581,6 +587,7 @@ class ConversationTool(Tool):
         _user_config = shared_state.get('_user_config', {})
         prompt_apply_trigger = shared_state.get('prompt_apply_trigger')
         run_heavy_job = shared_state.get('run_heavy_job')
+        run_heavy_stream_job = shared_state.get('run_heavy_stream_job')
         normalize_audio = shared_state['normalize_audio']
         convert_to_mono = shared_state['convert_to_mono']
         clean_audio = shared_state['clean_audio']
@@ -1591,6 +1598,395 @@ class ConversationTool(Tool):
                 print(f"Error in generate_chatterbox_conversation_handler:\n{traceback.format_exc()}")
                 return _error_result(f"Error generating Chatterbox conversation: {str(e)}")
 
+        def generate_conversation_base_stream_handler(conversation_data, voice_samples_dict, pause_linebreak,
+                                                      pause_period, pause_comma, pause_question, pause_hyphen,
+                                                      language, seed, model_size, do_sample, temperature, top_k,
+                                                      top_p, repetition_penalty, max_new_tokens, emotion_intensity,
+                                                      request: gr.Request = None,
+                                                      progress=gr.Progress()):
+            """Stream multi-speaker conversation with Qwen Base + custom voice samples."""
+            if not conversation_data or not conversation_data.strip():
+                yield None, "❌ Please enter conversation lines.", gr.update(interactive=False), "", ""
+                return
+
+            if not voice_samples_dict:
+                yield None, "❌ Please select at least one voice sample.", gr.update(interactive=False), "", ""
+                return
+
+            conversation_data = preprocess_conversation_script(conversation_data)
+            writer = None
+
+            try:
+                # Parse lines
+                lines = []
+                for line in conversation_data.strip().split('\n'):
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
+
+                    if line.startswith('[') and ']' in line:
+                        bracket_end = line.index(']')
+                        bracket_content = line[1:bracket_end].strip()
+                        text = line[bracket_end + 1:].lstrip(':').strip()
+
+                        if bracket_content.isdigit():
+                            speaker_num = int(bracket_content)
+                            if 1 <= speaker_num <= 8:
+                                speaker_key = f"Speaker{speaker_num}"
+                                if speaker_key in voice_samples_dict and text:
+                                    sample_data = voice_samples_dict[speaker_key]
+                                    lines.append((speaker_key, sample_data["wav_path"], sample_data["ref_text"], text))
+
+                if not lines:
+                    yield None, "❌ No valid conversation lines found. Use format: [N]: Text (N=1-8)", gr.update(interactive=False), "", ""
+                    return
+
+                # Set seed and configure
+                seed = int(seed) if seed is not None else -1
+                if seed < 0:
+                    seed = random.randint(0, 2147483647)
+                set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
+
+                progress(0.1, desc=f"Loading Base model ({model_size})...")
+                model = tts_manager.get_qwen3_base(model_size)
+
+                preview_path, safe_prefix = _create_preview_path("conversation_qwen_base_stream", request=request)
+                writer = LiveAudioChunkWriter(preview_path)
+                pause_pattern = re.compile(r'\[break=([\d\.]+)\]')
+                streamed_chunks = 0
+
+                for i, (speaker_key, voice_sample_path, ref_text, text) in enumerate(lines):
+                    progress_val = 0.1 + (0.8 * i / len(lines))
+                    clean_text, detected_emotion = extract_style_instructions(text)
+
+                    # Apply emotion adjustments
+                    emotion_key = detected_emotion.lower().replace(" ", "_").replace(",", "").strip() if detected_emotion else None
+                    line_temp = temperature
+                    line_top_p = top_p
+                    line_rep_pen = repetition_penalty
+
+                    if emotion_key and emotion_key in _active_emotions:
+                        adjustments = _active_emotions[emotion_key]
+                        line_temp = max(0.1, min(2.0, temperature + (adjustments["temp"] * emotion_intensity)))
+                        line_top_p = max(0.0, min(1.0, top_p + (adjustments["top_p"] * emotion_intensity)))
+                        line_rep_pen = max(1.0, min(2.0, repetition_penalty + (adjustments["penalty"] * emotion_intensity)))
+                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key}) [{emotion_key}]")
+                    else:
+                        progress(progress_val, desc=f"Line {i + 1}/{len(lines)} ({speaker_key})")
+
+                    line_text = clean_text
+
+                    if pause_period > 0:
+                        line_text = re.sub(r'\.(?!\d)', f'. [break={pause_period}]', line_text)
+                    if pause_comma > 0:
+                        line_text = re.sub(r',(?!\d)', f', [break={pause_comma}]', line_text)
+                    if pause_question > 0:
+                        line_text = re.sub(r'\?(?!\d)', f'? [break={pause_question}]', line_text)
+                    if pause_hyphen > 0:
+                        line_text = re.sub(r'-(?!\d)', f'- [break={pause_hyphen}]', line_text)
+
+                    line_segments = _split_segments_with_pauses(line_text, pause_pattern)
+                    if not line_segments:
+                        continue
+
+                    voice_prompt = None
+                    if get_or_create_voice_prompt:
+                        voice_prompt = get_or_create_voice_prompt(
+                            model, speaker_key, voice_sample_path, ref_text, model_size, request=request
+                        )
+
+                    for j, (segment_text, segment_pause) in enumerate(line_segments):
+                        stream_iter = tts_manager.stream_voice_clone_qwen(
+                            text=segment_text,
+                            language=language if language != "Auto" else "auto",
+                            prompt_items=voice_prompt,
+                            seed=seed,
+                            do_sample=do_sample,
+                            temperature=line_temp,
+                            top_k=top_k,
+                            top_p=line_top_p,
+                            repetition_penalty=line_rep_pen,
+                            max_new_tokens=max_new_tokens,
+                            model_size=model_size,
+                        )
+
+                        emitted_segment_chunk = False
+                        for chunk_audio, chunk_sr in stream_iter:
+                            chunk_path = writer.write_chunk(chunk_audio, chunk_sr)
+                            if not chunk_path:
+                                continue
+                            emitted_segment_chunk = True
+                            streamed_chunks += 1
+                            yield (
+                                chunk_path,
+                                f"Streaming Qwen Base... line {i + 1}/{len(lines)}",
+                                gr.update(interactive=False),
+                                "",
+                                "",
+                            )
+
+                        if emitted_segment_chunk:
+                            pause_after = float(segment_pause)
+                            if j == len(line_segments) - 1 and i < len(lines) - 1:
+                                pause_after += float(pause_linebreak)
+                            if pause_after > 0:
+                                writer.add_silence(pause_after)
+
+                if streamed_chunks <= 0:
+                    raise RuntimeError("Qwen Base did not emit any streamed audio chunks.")
+
+                result = writer.finalize()
+                speakers_used = list(set(k for k, _, _, _ in lines))
+                metadata = dedent(f"""\
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
+                    Type: Qwen3-TTS Conversation (Base Model + Custom Voices)
+                    Model: Base {model_size}
+                    Language: {language}
+                    Seed: {seed}
+                    Stream Chunks: {streamed_chunks}
+                    Pause Settings:
+                      - Linebreak: {pause_linebreak}s
+                      - Period: {pause_period}s
+                      - Comma: {pause_comma}s
+                      - Question: {pause_question}s
+                      - Hyphen: {pause_hyphen}s
+                    Speakers: {', '.join(speakers_used)}
+                    Lines: {len(lines)}
+
+                    --- Script ---
+                    {conversation_data.strip()}
+                    """)
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                status = f"Ready to save | {len(lines)} lines | {result.duration_seconds:.1f}s | Seed: {seed} | Base {model_size}"
+                if play_completion_beep:
+                    play_completion_beep()
+                yield result.path, status, gr.update(interactive=True), safe_prefix, metadata_out
+            except Exception as e:
+                import traceback
+                print(f"Error in generate_conversation_base_stream_handler:\n{traceback.format_exc()}")
+                if writer is not None:
+                    writer.cleanup_final_file()
+                yield None, f"❌ Error generating conversation: {str(e)}", gr.update(interactive=False), "", ""
+
+        def generate_vibevoice_longform_stream_handler(script_text, voice_samples_dict, model_size, cfg_scale, seed,
+                                                       num_steps, do_sample, temperature, top_k, top_p, repetition_penalty,
+                                                       sentences_per_chunk=0, request: gr.Request = None,
+                                                       progress=gr.Progress()):
+            """Stream long-form multi-speaker audio with VibeVoice native audio streamer."""
+            if not script_text or not script_text.strip():
+                yield None, "❌ Please enter a script.", gr.update(interactive=False), "", ""
+                return
+
+            script_text = preprocess_conversation_script(script_text)
+            writer = None
+
+            try:
+                import warnings
+                import logging
+                import threading
+                from modules.vibevoice_tts.modular.streamer import AudioStreamer
+                from vibevoice_tts.processor.vibevoice_processor import VibeVoiceProcessor
+
+                seed = int(seed) if seed is not None else -1
+                if seed < 0:
+                    seed = random.randint(0, 2147483647)
+                set_seed(seed)
+                if configure_tts_manager_for_tenant:
+                    configure_tts_manager_for_tenant(request=request, strict=True)
+
+                progress(0.1, desc=f"Loading VibeVoice TTS ({model_size})...")
+                model = tts_manager.get_vibevoice_tts(model_size)
+
+                if model_size == "Large (4-bit)":
+                    model_repo_id = "FranckyB/VibeVoice-Large-4bit"
+                    download_label = "VibeVoice-Large (4-bit)"
+                else:
+                    model_repo_id = f"FranckyB/VibeVoice-{model_size}"
+                    download_label = "VibeVoice-Large" if model_size == "Large" else "VibeVoice-1.5B"
+
+                offline_mode = _user_config.get("offline_mode", False)
+                processor_source = resolve_model_source(
+                    model_repo_id,
+                    offline_mode=offline_mode,
+                    settings_download_name=download_label,
+                    auto_download_when_online=True,
+                )
+                tokenizer_source = resolve_model_source(
+                    "Qwen/Qwen2.5-1.5B",
+                    offline_mode=offline_mode,
+                    settings_download_name="Qwen2.5-1.5B (VibeVoice Tokenizer)",
+                    auto_download_when_online=True,
+                )
+
+                prev_level = logging.getLogger("transformers.tokenization_utils_base").level
+                logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    processor = VibeVoiceProcessor.from_pretrained(
+                        processor_source,
+                        local_files_only=offline_mode,
+                        language_model_pretrained_name=tokenizer_source,
+                    )
+                logging.getLogger("transformers.tokenization_utils_base").setLevel(prev_level)
+
+                # Parse script
+                lines = []
+                for line in script_text.strip().split('\n'):
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
+
+                    if line.startswith('[') and ']' in line:
+                        bracket_end = line.index(']')
+                        bracket_content = line[1:bracket_end].strip()
+                        text = line[bracket_end + 1:].lstrip(':').strip()
+                        if bracket_content.isdigit():
+                            speaker_num = int(bracket_content)
+                            if text:
+                                wrapped_num = ((speaker_num - 1) % 4) + 1
+                                lines.append((f"Speaker{wrapped_num}", text, speaker_num))
+
+                available_samples = []
+                for i in range(1, 5):
+                    speaker_key = f"Speaker{i}"
+                    if speaker_key in voice_samples_dict and voice_samples_dict[speaker_key]:
+                        sample_data = voice_samples_dict[speaker_key]
+                        wav_path = sample_data["wav_path"] if isinstance(sample_data, dict) else sample_data
+                        available_samples.append((speaker_key, wav_path))
+
+                if not available_samples:
+                    yield None, "❌ Please provide at least one voice sample (Speaker1).", gr.update(interactive=False), "", ""
+                    return
+
+                voice_samples = [sample for _, sample in available_samples]
+                speaker_to_sample = {speaker: idx for idx, (speaker, _) in enumerate(available_samples)}
+
+                formatted_lines = []
+                for speaker, text, _original_num in lines:
+                    if speaker in speaker_to_sample:
+                        vv_speaker_num = speaker_to_sample[speaker]
+                        clean_text, _ = extract_style_instructions(text)
+                        formatted_lines.append(f"Speaker {vv_speaker_num}: {clean_text}")
+
+                if not formatted_lines:
+                    yield None, "❌ No valid conversation lines found.", gr.update(interactive=False), "", ""
+                    return
+
+                sentences_per_chunk = int(sentences_per_chunk) if sentences_per_chunk else 0
+                if sentences_per_chunk > 0 and len(formatted_lines) > sentences_per_chunk:
+                    script_chunks = [
+                        '\n'.join(formatted_lines[i:i + sentences_per_chunk])
+                        for i in range(0, len(formatted_lines), sentences_per_chunk)
+                    ]
+                else:
+                    script_chunks = ['\n'.join(formatted_lines)]
+
+                gen_config = {'do_sample': do_sample}
+                if do_sample:
+                    gen_config['temperature'] = temperature
+                    if top_k > 0:
+                        gen_config['top_k'] = int(top_k)
+                    if top_p < 1.0:
+                        gen_config['top_p'] = top_p
+                    if repetition_penalty != 1.0:
+                        gen_config['repetition_penalty'] = repetition_penalty
+
+                model.set_ddpm_inference_steps(num_steps=num_steps)
+                device = get_device()
+                preview_path, safe_prefix = _create_preview_path("conversation_vibevoice_stream", request=request)
+                writer = LiveAudioChunkWriter(preview_path)
+                streamed_chunks = 0
+                sr = 24000
+
+                for idx, chunk_script in enumerate(script_chunks):
+                    progress_val = 0.2 + (0.6 * idx / len(script_chunks))
+                    progress(progress_val, desc=f"Streaming chunk {idx + 1}/{len(script_chunks)}...")
+
+                    chunk_inputs = processor(
+                        text=[chunk_script],
+                        voice_samples=[voice_samples],
+                        padding=True,
+                        return_tensors="pt",
+                        return_attention_mask=True,
+                    )
+                    for k, v in chunk_inputs.items():
+                        if torch.is_tensor(v):
+                            chunk_inputs[k] = v.to(device)
+
+                    streamer = AudioStreamer(batch_size=1, timeout=None)
+                    generation_errors = []
+
+                    def _run_generation():
+                        try:
+                            model.generate(
+                                **chunk_inputs,
+                                max_new_tokens=None,
+                                cfg_scale=cfg_scale,
+                                tokenizer=processor.tokenizer,
+                                generation_config=gen_config,
+                                audio_streamer=streamer,
+                                verbose=False,
+                            )
+                        except Exception as exc:
+                            generation_errors.append(exc)
+                            try:
+                                streamer.end()
+                            except Exception:
+                                pass
+
+                    worker = threading.Thread(target=_run_generation, daemon=True, name=f"vv-conv-stream-{idx}")
+                    worker.start()
+
+                    for audio_chunk in streamer.get_stream(0):
+                        chunk_path = writer.write_chunk(audio_chunk, sr)
+                        if not chunk_path:
+                            continue
+                        streamed_chunks += 1
+                        yield (
+                            chunk_path,
+                            f"Streaming VibeVoice... chunk {idx + 1}/{len(script_chunks)}",
+                            gr.update(interactive=False),
+                            "",
+                            "",
+                        )
+
+                    worker.join()
+                    if generation_errors:
+                        raise generation_errors[0]
+
+                if streamed_chunks <= 0:
+                    raise RuntimeError("VibeVoice failed to emit streamed audio chunks.")
+
+                result = writer.finalize()
+                chunk_info = f"Lines per Chunk: {sentences_per_chunk}" if sentences_per_chunk > 0 else "Chunking: Off"
+                metadata = dedent(f"""\
+                    Generated: {datetime.now().strftime("%Y%m%d_%H%M%S")}
+                    Type: VibeVoice Conversation
+                    Model: VibeVoice-{model_size}
+                    Seed: {seed}
+                    CFG Scale: {cfg_scale}
+                    Stream Chunks: {streamed_chunks}
+                    {chunk_info}
+                    Lines: {len(lines)}
+                    Speakers: {len(available_samples)}
+
+                    --- Script ---
+                    {script_text.strip()}
+                    """)
+                metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
+                status = f"Ready to save | {len(lines)} lines | {result.duration_seconds:.1f}s | Seed: {seed} | VibeVoice"
+                if play_completion_beep:
+                    play_completion_beep()
+                yield result.path, status, gr.update(interactive=True), safe_prefix, metadata_out
+            except Exception as e:
+                import traceback
+                print(f"Error in generate_vibevoice_longform_stream_handler:\n{traceback.format_exc()}")
+                if writer is not None:
+                    writer.cleanup_final_file()
+                yield None, f"❌ Error generating conversation: {str(e)}", gr.update(interactive=False), "", ""
+
         def unified_conversation_generate(
             model_type, script,
             # Shared voice samples (used by all sample-based engines)
@@ -1623,9 +2019,61 @@ class ConversationTool(Tool):
             progress=gr.Progress()
         ):
             """Route to appropriate generation function based on model type."""
-            def _generate_impl():
-                voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8, request=request)
+            voice_samples = prepare_voice_samples_dict(sv1, sv2, sv3, sv4, sv5, sv6, sv7, sv8, request=request)
+            stream_selected = conversation_stream_supported(model_type, tts_manager)
+            if stream_selected and model_type == "Qwen Base":
+                qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
+                stream_selected = tts_manager.qwen_runtime_streaming_available(model_size=qwen_size)
 
+            def _generate_stream_impl():
+                if model_type == "Qwen Base":
+                    qwen_size = "1.7B" if qwen_base_model_size == "Large" else "0.6B"
+                    yield from generate_conversation_base_stream_handler(
+                        script,
+                        voice_samples,
+                        qwen_base_pause_linebreak,
+                        qwen_base_pause_period,
+                        qwen_base_pause_comma,
+                        qwen_base_pause_question,
+                        qwen_base_pause_hyphen,
+                        qwen_lang,
+                        qwen_seed,
+                        qwen_size,
+                        qwen_do_sample,
+                        qwen_temperature,
+                        qwen_top_k,
+                        qwen_top_p,
+                        qwen_repetition_penalty,
+                        qwen_max_new_tokens,
+                        emotion_intensity,
+                        request,
+                        progress,
+                    )
+                else:
+                    if vv_model_size == "Small":
+                        vv_size = "1.5B"
+                    elif vv_model_size == "Large (4-bit)":
+                        vv_size = "Large (4-bit)"
+                    else:
+                        vv_size = "Large"
+                    yield from generate_vibevoice_longform_stream_handler(
+                        script,
+                        voice_samples,
+                        vv_size,
+                        vv_cfg,
+                        seed,
+                        vv_num_steps,
+                        vv_do_sample,
+                        vv_temperature,
+                        vv_top_k,
+                        vv_top_p,
+                        vv_repetition_penalty,
+                        vv_sentences_per_chunk,
+                        request,
+                        progress,
+                    )
+
+            def _generate_impl():
                 if model_type == "Qwen Speakers":
                     qwen_size = "1.7B" if qwen_custom_model_size == "Large" else "0.6B"
                     result = generate_conversation_handler(script, qwen_custom_pause_linebreak, qwen_custom_pause_period,
@@ -1665,6 +2113,8 @@ class ConversationTool(Tool):
                                                                  vv_sentences_per_chunk, request, progress)
 
                 audio_value, status, suggested_name, metadata_text = result
+                if not stream_selected:
+                    status = prefix_non_stream_status(status)
                 return (
                     audio_value,
                     status,
@@ -1674,11 +2124,18 @@ class ConversationTool(Tool):
                 )
 
             try:
+                if stream_selected:
+                    if run_heavy_stream_job:
+                        yield from run_heavy_stream_job("conversation_generate_stream", _generate_stream_impl, request=request)
+                        return
+                    yield from _generate_stream_impl()
+                    return
                 if run_heavy_job:
-                    return run_heavy_job("conversation_generate", _generate_impl, request=request)
-                return _generate_impl()
+                    yield run_heavy_job("conversation_generate", _generate_impl, request=request)
+                    return
+                yield _generate_impl()
             except MemoryAdmissionError as exc:
-                return (
+                yield (
                     None,
                     f"⚠ Memory safety guard rejected request: {str(exc)}",
                     gr.update(interactive=False),

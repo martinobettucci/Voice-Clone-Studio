@@ -65,6 +65,32 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         "Do not write dialogue or script content. Do not explain. "
         "Output only the final style instruction text."
     ),
+    "Voice Design": (
+        "You are a voice design assistant for text-to-speech voice creation. "
+        "Convert user intent into a structured voice design instruction object. "
+        "Do not write dialogue or script content. Do not explain. "
+        "Output only one object using this exact key structure and key order:\n"
+        "{\n"
+        "  'label': '',\n"
+        "  'role_type': '<e.g., Narrator, Podcast Host, Customer Agent, Actor, News Anchor, Teacher>',\n"
+        "  'attributes': {\n"
+        "    'age_range': '<e.g., young adult, middle-aged, elderly>',\n"
+        "    'gender_presentation': '<male|female|nonbinary|androgynous|unspecified>',\n"
+        "    'timbre': '',\n"
+        "    'pitch': '<low|mid|high and numeric approximate in Hz if known, optional>',\n"
+        "    'pitch_range': '<narrow|medium|wide>',\n"
+        "    'speaking_rate': '<slow|medium|fast and approximate words/min if known, optional>',\n"
+        "    'breathiness': '<none|light|moderate|heavy>',\n"
+        "    'nasality': '<none|low|moderate|high>',\n"
+        "    'articulation': '<clear|soft-mumbled|crisp|rounded>',\n"
+        "    'warmth': '<cool|neutral|warm|very warm>',\n"
+        "    'emotional_baseline': '<neutral|warm|authoritative|wry|cheerful|calm|serious|friendly etc.>',\n"
+        "    'accent_locale': '<e.g., General American, RP British, Southern US, Australian, neutral European Spanish>',\n"
+        "    'prosody_notes': '<short notes about intonation, stress, pausing>',\n"
+        "    'phonetic_cues': ['<1-3 specific phonetic cues, e.g., elongated vowels, crisp plosives, soft sibilants>'],\n"
+        "  }\n"
+        "}"
+    ),
     "Sound Design / SFX": (
         "You are a sound design prompt writer. The user will give you a short idea or concept. "
         "Your job is to expand it into a detailed, evocative description of a sound or soundscape. "
@@ -129,10 +155,11 @@ PROMPT_TARGETS: Dict[str, Dict[str, str]] = {
         "tool": "Voice Design",
         "tab_id": "tab_voice_design",
         "component_key": "design_instruct_input",
-        "default_system_preset": "Voice Style",
+        "default_system_preset": "Voice Design",
         "template": (
-            "Write voice design descriptors only. Focus on timbre, age, energy, pacing, and delivery style. "
-            "Return a compact instruction paragraph only.\n\n"
+            "Write voice design instructions as one structured object that follows the system schema exactly. "
+            "Fill all fields with specific values when possible. "
+            "Return only the object, no markdown.\n\n"
             "User instruction:\n{instruction}"
         ),
     },

@@ -32,6 +32,7 @@ from modules.core_components.tools.output_audio_pipeline import (
     OutputAudioPipelineConfig,
     apply_generation_output_pipeline,
 )
+from modules.core_components.tools.live_stream_policy import prefix_non_stream_status
 from modules.core_components.ui_components.prompt_assistant import (
     create_prompt_assistant,
     wire_prompt_assistant_events,
@@ -404,7 +405,9 @@ class VoicePresetsTool(Tool):
                     play_completion_beep()
                 return (
                     str(output_file),
-                    f"Ready to save | Speaker: {speaker}{instruct_msg}\nSeed: {seed} | {model_size}",
+                    prefix_non_stream_status(
+                        f"Ready to save | Speaker: {speaker}{instruct_msg}\nSeed: {seed} | {model_size}"
+                    ),
                     gr.update(interactive=True),
                     f"custom_{safe_speaker}",
                     metadata_out,
@@ -510,7 +513,9 @@ class VoicePresetsTool(Tool):
                     play_completion_beep()
                 return (
                     str(output_file),
-                    f"Ready to save | Speaker: {speaker_name}{instruct_msg}{icl_msg}\nSeed: {seed} | Trained Model",
+                    prefix_non_stream_status(
+                        f"Ready to save | Speaker: {speaker_name}{instruct_msg}{icl_msg}\nSeed: {seed} | Trained Model"
+                    ),
                     gr.update(interactive=True),
                     f"trained_{safe_speaker}",
                     metadata_out,
@@ -652,8 +657,14 @@ class VoicePresetsTool(Tool):
         def refresh_trained_model_dropdown(request: gr.Request):
             models = get_trained_models(request=request, strict=True)
             if not models:
-                return gr.update(choices=["(No trained models found)"])
-            return gr.update(choices=["(Select Model)"] + [m['display_name'] for m in models])
+                return gr.update(
+                    choices=["(No trained models found)"],
+                    value="(No trained models found)",
+                )
+            return gr.update(
+                choices=["(Select Model)"] + [m['display_name'] for m in models],
+                value="(Select Model)",
+            )
 
         components['voice_presets_tab'].select(
             refresh_trained_model_dropdown,
