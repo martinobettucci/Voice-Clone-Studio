@@ -80,6 +80,9 @@ class ConversationTool(Tool):
         CUSTOM_VOICE_SPEAKERS = shared_state['CUSTOM_VOICE_SPEAKERS']
         _active_emotions = shared_state.get('_active_emotions', {})
         TTS_ENGINES = shared_state.get('TTS_ENGINES', {})
+        expert_visible = bool(_user_config.get("conversation_show_expert_params", False))
+        initial_cb_min_p = float(_user_config.get("chatterbox_min_p", 0.05))
+        initial_cb_max_new_tokens = int(_user_config.get("chatterbox_max_new_tokens", 2048))
 
         # Mapping: conversation radio label -> engine key in TTS_ENGINES
         CONV_ENGINE_MAP = {
@@ -303,6 +306,16 @@ class ConversationTool(Tool):
                                 info="(-1 for random)"
                             )
 
+                    components['conv_show_expert_params'] = gr.Checkbox(
+                        label="Show Expert Parameters",
+                        value=expert_visible,
+                        info="Reveal advanced controls for selected engines",
+                    )
+                    components['conv_expert_note'] = gr.Markdown(
+                        "Expert options are currently available for Chatterbox mode only.",
+                        visible=(expert_visible and not is_chatterbox),
+                    )
+
                     # Shared Pause Controls
                     components['qwen_pause_controls'] = gr.Accordion("Pause Controls", open=False, visible=(is_qwen_custom or is_qwen_base))
                     with components['qwen_pause_controls']:
@@ -367,12 +380,22 @@ class ConversationTool(Tool):
 
                         # Chatterbox Advanced Parameters
                         create_chatterbox_advanced_params = shared_state['create_chatterbox_advanced_params']
-                        cb_conv_params = create_chatterbox_advanced_params(visible=True)
+                        cb_conv_params = create_chatterbox_advanced_params(
+                            visible=True,
+                            include_expert=True,
+                            initial_min_p=initial_cb_min_p,
+                            initial_max_new_tokens=initial_cb_max_new_tokens,
+                            expert_visible=(expert_visible and is_chatterbox),
+                        )
                         components['cb_conv_exaggeration'] = cb_conv_params['exaggeration']
                         components['cb_conv_cfg_weight'] = cb_conv_params['cfg_weight']
                         components['cb_conv_temperature'] = cb_conv_params['temperature']
                         components['cb_conv_repetition_penalty'] = cb_conv_params['repetition_penalty']
                         components['cb_conv_top_p'] = cb_conv_params['top_p']
+                        components['cb_conv_min_p'] = cb_conv_params['min_p']
+                        components['cb_conv_max_new_tokens'] = cb_conv_params['max_new_tokens']
+                        components['cb_conv_expert_row'] = cb_conv_params['expert_row']
+                        components['cb_conv_accordion'] = cb_conv_params['accordion']
 
                     # LuxTTS-specific settings
                     components['luxtts_settings'] = gr.Column(visible=is_luxtts)
@@ -1459,7 +1482,7 @@ class ConversationTool(Tool):
         def generate_chatterbox_conversation_handler(
             conversation_data, voice_samples_dict,
             pause_linebreak, language, seed,
-            exaggeration, cfg_weight, temperature, repetition_penalty, top_p,
+            exaggeration, cfg_weight, temperature, repetition_penalty, top_p, min_p, max_new_tokens,
             request: gr.Request = None,
             progress=gr.Progress()
         ):
@@ -1515,6 +1538,8 @@ class ConversationTool(Tool):
                 lang_code = CHATTERBOX_LANG_TO_CODE.get(language, "en")
                 use_multilingual = lang_code != "en"
                 model_label = "Multilingual" if use_multilingual else "Default"
+                min_p = max(0.0, min(0.30, float(min_p)))
+                max_new_tokens = max(256, min(4096, int(max_new_tokens)))
 
                 if use_multilingual:
                     progress(0.05, desc="Loading Chatterbox Multilingual...")
@@ -1548,6 +1573,8 @@ class ConversationTool(Tool):
                                 temperature=temperature,
                                 repetition_penalty=repetition_penalty,
                                 top_p=top_p,
+                                min_p=min_p,
+                                max_new_tokens=max_new_tokens,
                             )
                         else:
                             audio_data, audio_sr = tts_manager.generate_voice_clone_chatterbox(
@@ -1559,6 +1586,8 @@ class ConversationTool(Tool):
                                 temperature=temperature,
                                 repetition_penalty=repetition_penalty,
                                 top_p=top_p,
+                                min_p=min_p,
+                                max_new_tokens=max_new_tokens,
                             )
 
                         # Add segment with linebreak pause after (except last line)
@@ -1589,6 +1618,7 @@ class ConversationTool(Tool):
                     Pause Between Lines: {pause_linebreak}s
                     Exaggeration: {exaggeration} | CFG Weight: {cfg_weight}
                     Temperature: {temperature} | Repetition Penalty: {repetition_penalty} | Top-p: {top_p}
+                    Min-p: {min_p} | Max New Tokens: {max_new_tokens}
                     Speakers: {', '.join(speakers_used)}
                     Lines: {len(lines)}
                     Segments: {segment_count}
@@ -2085,7 +2115,7 @@ class ConversationTool(Tool):
             lux_rms, lux_ref_duration, lux_return_smooth,
             # Chatterbox params
             cb_pause_linebreak,
-            cb_exaggeration, cb_cfg_weight, cb_temperature, cb_repetition_penalty, cb_top_p,
+            cb_exaggeration, cb_cfg_weight, cb_temperature, cb_repetition_penalty, cb_top_p, cb_min_p, cb_max_new_tokens,
             # Shared
             seed,
             request: gr.Request = None,
@@ -2180,7 +2210,8 @@ class ConversationTool(Tool):
                     result = generate_chatterbox_conversation_handler(script, voice_samples, cb_pause_linebreak,
                                                                       qwen_lang, seed,
                                                                       cb_exaggeration, cb_cfg_weight, cb_temperature,
-                                                                      cb_repetition_penalty, cb_top_p, request, progress)
+                                                                      cb_repetition_penalty, cb_top_p, cb_min_p, cb_max_new_tokens,
+                                                                      request, progress)
                 else:  # VibeVoice
                     if vv_model_size == "Small":
                         vv_size = "1.5B"
@@ -2274,6 +2305,7 @@ class ConversationTool(Tool):
                 components['cb_pause_linebreak'],
                 components['cb_conv_exaggeration'], components['cb_conv_cfg_weight'], components['cb_conv_temperature'],
                 components['cb_conv_repetition_penalty'], components['cb_conv_top_p'],
+                components['cb_conv_min_p'], components['cb_conv_max_new_tokens'],
                 # Shared
                 components['conv_seed']
             ],
@@ -2388,7 +2420,7 @@ class ConversationTool(Tool):
         )
 
         # Toggle UI based on model selection
-        def toggle_conv_ui(model_type):
+        def toggle_conv_ui(model_type, show_expert):
             from modules.core_components.constants import CHATTERBOX_LANGUAGES
             is_qwen_custom = model_type == "Qwen Speakers"
             is_qwen_base = model_type == "Qwen Base"
@@ -2397,6 +2429,7 @@ class ConversationTool(Tool):
             is_chatterbox = model_type == "Chatterbox"
             is_qwen = is_qwen_custom or is_qwen_base
             uses_samples = is_qwen_base or is_luxtts or is_chatterbox or is_vibevoice
+            show_cb_expert = bool(show_expert) and is_chatterbox
 
             # Language dropdown: full list for Qwen, Chatterbox languages for Chatterbox, Auto-only for VV/LuxTTS
             if is_qwen:
@@ -2424,12 +2457,15 @@ class ConversationTool(Tool):
                 components['vibevoice_tips']: gr.update(visible=is_vibevoice),
                 components['luxtts_tips']: gr.update(visible=is_luxtts),
                 components['cb_tips']: gr.update(visible=is_chatterbox),
+                components['cb_conv_expert_row']: gr.update(visible=show_cb_expert),
+                components['cb_conv_accordion']: gr.update(open=show_cb_expert),
+                components['conv_expert_note']: gr.update(visible=(bool(show_expert) and not is_chatterbox)),
                 components['conv_language']: lang_update,
             }
 
         components['conv_model_type'].change(
             toggle_conv_ui,
-            inputs=[components['conv_model_type']],
+            inputs=[components['conv_model_type'], components['conv_show_expert_params']],
             outputs=[components['qwen_speaker_table'],
                      components['shared_voices_section'], components['conv_voices_row_5_6'], components['conv_voices_row_7_8'],
                      components['qwen_custom_settings'], components['qwen_base_settings'], components['qwen_pause_controls'],
@@ -2438,8 +2474,25 @@ class ConversationTool(Tool):
                      components['vibevoice_settings'],
                      components['cb_settings'],
                      components['qwen_custom_tips'], components['qwen_base_tips'], components['vibevoice_tips'],
-                     components['luxtts_tips'], components['cb_tips'],
+                     components['luxtts_tips'], components['cb_tips'], components['cb_conv_expert_row'],
+                     components['cb_conv_accordion'], components['conv_expert_note'],
                      components['conv_language']]
+        )
+
+        components['conv_show_expert_params'].change(
+            lambda enabled: save_preference("conversation_show_expert_params", bool(enabled)),
+            inputs=[components['conv_show_expert_params']],
+            outputs=[],
+        )
+
+        components['conv_show_expert_params'].change(
+            lambda model_type, enabled: (
+                gr.update(visible=(model_type == "Chatterbox" and bool(enabled))),
+                gr.update(open=(model_type == "Chatterbox" and bool(enabled))),
+                gr.update(visible=(bool(enabled) and model_type != "Chatterbox")),
+            ),
+            inputs=[components['conv_model_type'], components['conv_show_expert_params']],
+            outputs=[components['cb_conv_expert_row'], components['cb_conv_accordion'], components['conv_expert_note']],
         )
 
         # Refresh voice samples handler
@@ -2520,6 +2573,18 @@ class ConversationTool(Tool):
             lambda x: save_preference("conv_pause_hyphen", x),
             inputs=[components['conv_pause_hyphen']],
             outputs=[]
+        )
+
+        components['cb_conv_min_p'].change(
+            lambda v: save_preference("chatterbox_min_p", float(v) if v is not None else 0.05),
+            inputs=[components['cb_conv_min_p']],
+            outputs=[],
+        )
+
+        components['cb_conv_max_new_tokens'].change(
+            lambda v: save_preference("chatterbox_max_new_tokens", int(v) if v is not None else 2048),
+            inputs=[components['cb_conv_max_new_tokens']],
+            outputs=[],
         )
 
 

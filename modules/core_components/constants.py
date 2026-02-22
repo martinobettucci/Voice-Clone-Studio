@@ -545,6 +545,8 @@ CHATTERBOX_GENERATION_DEFAULTS = {
     "temperature": 0.8,
     "repetition_penalty": 1.2,
     "top_p": 1.0,
+    "min_p": 0.05,
+    "max_new_tokens": 2048,
 }
 
 # Chatterbox supported languages (ISO codes from mtl_tts.py)

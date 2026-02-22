@@ -258,6 +258,7 @@ class ChatterboxMultilingualTTS:
         repetition_penalty=2.0,
         min_p=0.05,
         top_p=1.0,
+        max_new_tokens=2048,
     ):
         # Validate language_id
         if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
@@ -295,7 +296,7 @@ class ChatterboxMultilingualTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=2048,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,

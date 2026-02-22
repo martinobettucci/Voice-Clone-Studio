@@ -75,6 +75,9 @@ class VoiceCloneTool(Tool):
         _user_config = shared_state['_user_config']
         _active_emotions = shared_state['_active_emotions']
         deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
+        expert_visible = bool(_user_config.get("voice_clone_show_expert_params", False))
+        initial_cb_min_p = float(_user_config.get("chatterbox_min_p", 0.05))
+        initial_cb_max_new_tokens = int(_user_config.get("chatterbox_max_new_tokens", 2048))
 
         # Filter voice clone options based on enabled engines
         engine_settings = _user_config.get("enabled_engines", {})
@@ -247,13 +250,22 @@ class VoiceCloneTool(Tool):
                     # Chatterbox Advanced Parameters
                     is_cb_initial = "Chatterbox" in saved_model
                     create_chatterbox_advanced_params = shared_state['create_chatterbox_advanced_params']
-                    cb_params = create_chatterbox_advanced_params(visible=is_cb_initial)
+                    cb_params = create_chatterbox_advanced_params(
+                        visible=is_cb_initial,
+                        include_expert=True,
+                        initial_min_p=initial_cb_min_p,
+                        initial_max_new_tokens=initial_cb_max_new_tokens,
+                        expert_visible=(expert_visible and is_cb_initial),
+                    )
                     components['cb_params_accordion'] = cb_params['accordion']
                     components['cb_exaggeration'] = cb_params['exaggeration']
                     components['cb_cfg_weight'] = cb_params['cfg_weight']
                     components['cb_temperature'] = cb_params['temperature']
                     components['cb_repetition_penalty'] = cb_params['repetition_penalty']
                     components['cb_top_p'] = cb_params['top_p']
+                    components['cb_min_p'] = cb_params['min_p']
+                    components['cb_max_new_tokens'] = cb_params['max_new_tokens']
+                    components['cb_expert_row'] = cb_params['expert_row']
 
                     # Chatterbox Multilingual language dropdown (only shown for Chatterbox - Multilingual)
                     is_cb_mtl_initial = "Multilingual" in saved_model
@@ -265,6 +277,12 @@ class VoiceCloneTool(Tool):
                             value="English",
                             label="Language (Chatterbox Multilingual)",
                         )
+
+                    components['vc_show_expert_params'] = gr.Checkbox(
+                        label="Show Expert Parameters",
+                        value=expert_visible,
+                        info="Reveal advanced controls for selected engines",
+                    )
 
                     with gr.Row():
                         components['generate_btn'] = gr.Button("Generate Audio", variant="primary", size="lg")
@@ -357,7 +375,8 @@ class VoiceCloneTool(Tool):
                                    lux_num_steps=4, lux_t_shift=0.5, lux_speed=1.0, lux_return_smooth=False,
                                    lux_rms=0.01, lux_ref_duration=30, lux_guidance_scale=3.0,
                                    cb_exaggeration=0.5, cb_cfg_weight=0.5, cb_temperature=0.8,
-                                   cb_repetition_penalty=1.2, cb_top_p=1.0, cb_language="English",
+                                   cb_repetition_penalty=1.2, cb_top_p=1.0, cb_min_p=0.05, cb_max_new_tokens=2048,
+                                   cb_language="English",
                                    request: gr.Request = None,
                                    progress=gr.Progress()):
             """Generate audio using voice cloning - supports Qwen, VibeVoice, and LuxTTS engines."""
@@ -515,6 +534,8 @@ class VoiceCloneTool(Tool):
                     cache_status = "cached" if was_cached else "newly processed"
 
                 elif engine == "chatterbox":
+                    cb_min_p = max(0.0, min(0.30, float(cb_min_p)))
+                    cb_max_new_tokens = max(256, min(4096, int(cb_max_new_tokens)))
                     if model_size == "Multilingual":
                         progress(0.1, desc="Loading Chatterbox Multilingual model...")
                         from modules.core_components.constants import CHATTERBOX_LANG_TO_CODE
@@ -529,6 +550,8 @@ class VoiceCloneTool(Tool):
                             temperature=float(cb_temperature),
                             repetition_penalty=float(cb_repetition_penalty),
                             top_p=float(cb_top_p),
+                            min_p=cb_min_p,
+                            max_new_tokens=cb_max_new_tokens,
                         )
                         engine_display = "Chatterbox Multilingual"
                     else:
@@ -542,6 +565,8 @@ class VoiceCloneTool(Tool):
                             temperature=float(cb_temperature),
                             repetition_penalty=float(cb_repetition_penalty),
                             top_p=float(cb_top_p),
+                            min_p=cb_min_p,
+                            max_new_tokens=cb_max_new_tokens,
                         )
                         engine_display = "Chatterbox"
 
@@ -559,12 +584,17 @@ class VoiceCloneTool(Tool):
 
                 sf.write(str(output_file), wavs[0], sr)
 
+                chatterbox_extra = ""
+                if engine == "chatterbox":
+                    chatterbox_extra = f"Min-p: {cb_min_p} | Max New Tokens: {cb_max_new_tokens}"
+
                 metadata = dedent(f"""\
                     Generated: {timestamp}
                     Sample: {sample_name}
                     Engine: {engine_display}
                     Language: {language}
                     Seed: {resolved_seed}
+                    {chatterbox_extra}
                     Text: {' '.join(text_to_generate.split())}
                     """)
                 metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
@@ -873,7 +903,8 @@ class VoiceCloneTool(Tool):
                     components['luxtts_num_steps'], components['luxtts_t_shift'], components['luxtts_speed'], components['luxtts_return_smooth'],
                     components['luxtts_rms'], components['luxtts_ref_duration'], components['luxtts_guidance_scale'],
                     components['cb_exaggeration'], components['cb_cfg_weight'], components['cb_temperature'],
-                    components['cb_repetition_penalty'], components['cb_top_p'], components['cb_language_dropdown']],
+                    components['cb_repetition_penalty'], components['cb_top_p'], components['cb_min_p'],
+                    components['cb_max_new_tokens'], components['cb_language_dropdown']],
 
             outputs=[
                 components['output_audio'],
@@ -1003,12 +1034,50 @@ class VoiceCloneTool(Tool):
             is_vv = "VibeVoice" in model_selection
             is_lux = "LuxTTS" in model_selection
             is_cb = "Chatterbox" in model_selection
-            return gr.update(visible=is_qwen), gr.update(visible=is_vv), gr.update(visible=is_lux), gr.update(visible=is_cb)
+            return (
+                gr.update(visible=is_qwen),
+                gr.update(visible=is_vv),
+                gr.update(visible=is_lux),
+                gr.update(visible=is_cb),
+            )
+
+        def toggle_cb_expert_row(model_selection, show_expert):
+            return gr.update(visible=("Chatterbox" in model_selection and bool(show_expert)))
 
         components['clone_model_dropdown'].change(
             toggle_engine_params,
             inputs=[components['clone_model_dropdown']],
             outputs=[components['qwen_params_accordion'], components['vv_params_accordion'], components['luxtts_params_accordion'], components['cb_params_accordion']]
+        )
+
+        components['clone_model_dropdown'].change(
+            toggle_cb_expert_row,
+            inputs=[components['clone_model_dropdown'], components['vc_show_expert_params']],
+            outputs=[components['cb_expert_row']],
+        )
+
+        components['vc_show_expert_params'].change(
+            lambda enabled: save_preference("voice_clone_show_expert_params", bool(enabled)),
+            inputs=[components['vc_show_expert_params']],
+            outputs=[],
+        )
+
+        components['vc_show_expert_params'].change(
+            toggle_cb_expert_row,
+            inputs=[components['clone_model_dropdown'], components['vc_show_expert_params']],
+            outputs=[components['cb_expert_row']],
+        )
+
+        components['cb_min_p'].change(
+            lambda v: save_preference("chatterbox_min_p", float(v) if v is not None else 0.05),
+            inputs=[components['cb_min_p']],
+            outputs=[],
+        )
+
+        components['cb_max_new_tokens'].change(
+            lambda v: save_preference("chatterbox_max_new_tokens", int(v) if v is not None else 2048),
+            inputs=[components['cb_max_new_tokens']],
+            outputs=[],
         )
 
         # Save voice clone model selection

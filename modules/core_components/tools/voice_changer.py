@@ -55,7 +55,10 @@ class VoiceChangerTool(Tool):
         components = {}
 
         get_sample_choices = shared_state['get_sample_choices']
+        _user_config = shared_state.get('_user_config', {})
         deepfilter_available = bool(shared_state.get("DEEPFILTER_AVAILABLE", False))
+        expert_visible = bool(_user_config.get("voice_changer_show_expert_params", False))
+        initial_vc_steps = int(_user_config.get("voice_changer_vc_n_cfm_timesteps", 0))
 
         with gr.TabItem("Voice Changer") as voice_changer_tab:
             components['voice_changer_tab'] = voice_changer_tab
@@ -114,6 +117,22 @@ class VoiceChangerTool(Tool):
                         )
                         components['stop_btn'] = gr.Button("Stop", variant="stop", size="lg")
 
+                    components['vc_show_expert_params'] = gr.Checkbox(
+                        label="Show Expert Parameters",
+                        value=expert_visible,
+                        info="Reveal advanced Chatterbox VC controls",
+                    )
+                    with gr.Accordion("Voice Changer Expert Parameters", open=False, visible=expert_visible) as vc_expert_accordion:
+                        components['vc_n_cfm_timesteps'] = gr.Slider(
+                            minimum=0,
+                            maximum=30,
+                            value=initial_vc_steps,
+                            step=1,
+                            label="VC Diffusion Steps (0=Auto)",
+                            info="Higher values can improve quality but are slower",
+                        )
+                    components['vc_expert_accordion'] = vc_expert_accordion
+
                     components['output_audio'] = gr.Audio(
                         label="Converted Audio",
                         type="filepath",
@@ -168,6 +187,7 @@ class VoiceChangerTool(Tool):
         play_completion_beep = shared_state.get('play_completion_beep')
         run_heavy_job = shared_state.get('run_heavy_job')
         show_input_modal_js = shared_state['show_input_modal_js']
+        save_preference = shared_state['save_preference']
         input_trigger = shared_state['input_trigger']
         normalize_audio = shared_state['normalize_audio']
         convert_to_mono = shared_state['convert_to_mono']
@@ -193,7 +213,7 @@ class VoiceChangerTool(Tool):
                 return None, "", ""
             return load_sample_details(sample_name)
 
-        def convert_voice(source_audio, target_lister_value, request: gr.Request = None, progress=gr.Progress()):
+        def convert_voice(source_audio, target_lister_value, vc_n_cfm_timesteps, request: gr.Request = None, progress=gr.Progress()):
             """Run voice conversion."""
             if source_audio is None:
                 return None, gr.update(interactive=False), None, "", "", "Please upload or record source audio."
@@ -219,6 +239,8 @@ class VoiceChangerTool(Tool):
 
             def _convert_impl():
                 progress(0.1, desc="Loading Chatterbox VC model...")
+                resolved_steps = int(vc_n_cfm_timesteps) if vc_n_cfm_timesteps is not None else 0
+                resolved_steps = None if resolved_steps <= 0 else max(1, min(30, resolved_steps))
 
                 # Save source numpy audio to a temp WAV (Chatterbox VC expects a file path)
                 import numpy as np
@@ -236,6 +258,7 @@ class VoiceChangerTool(Tool):
                     audio_data, sr = tts_manager.generate_voice_convert_chatterbox(
                         source_audio_path=src_temp,
                         target_voice_path=target_wav,
+                        n_cfm_timesteps=resolved_steps,
                     )
 
                     progress(0.8, desc="Saving to temp...")
@@ -254,6 +277,7 @@ class VoiceChangerTool(Tool):
                         Type: Voice Conversion
                         Target Voice: {target_name}
                         Engine: Chatterbox VC
+                        VC Diffusion Steps: {resolved_steps if resolved_steps is not None else "Auto"}
                         """)
                     metadata_out = '\n'.join(line.lstrip() for line in metadata.lstrip().splitlines())
 
@@ -288,7 +312,7 @@ class VoiceChangerTool(Tool):
 
         convert_event = components['convert_btn'].click(
             convert_voice,
-            inputs=[components['source_audio'], components['target_lister']],
+            inputs=[components['source_audio'], components['target_lister'], components['vc_n_cfm_timesteps']],
             outputs=[
                 components['output_audio'],
                 components['save_btn'],
@@ -334,6 +358,21 @@ class VoiceChangerTool(Tool):
                 components['output_enable_mono'],
             ],
             outputs=[components['output_audio'], components['convert_status']],
+        )
+
+        components['vc_show_expert_params'].change(
+            lambda enabled: (
+                save_preference("voice_changer_show_expert_params", bool(enabled)),
+                gr.update(visible=bool(enabled)),
+            )[1],
+            inputs=[components['vc_show_expert_params']],
+            outputs=[components['vc_expert_accordion']],
+        )
+
+        components['vc_n_cfm_timesteps'].change(
+            lambda v: save_preference("voice_changer_vc_n_cfm_timesteps", int(v) if v is not None else 0),
+            inputs=[components['vc_n_cfm_timesteps']],
+            outputs=[],
         )
 
         # Target voice preview + text + info

@@ -214,6 +214,7 @@ class ChatterboxTTS:
         repetition_penalty=1.2,
         min_p=0.05,
         top_p=1.0,
+        max_new_tokens=2048,
         audio_prompt_path=None,
         exaggeration=0.5,
         cfg_weight=0.5,
@@ -249,7 +250,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=2048,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,

@@ -493,6 +493,10 @@ def create_chatterbox_advanced_params(
     initial_temperature=0.8,
     initial_repetition_penalty=1.2,
     initial_top_p=1.0,
+    initial_min_p=0.05,
+    initial_max_new_tokens=2048,
+    include_expert=False,
+    expert_visible=False,
     visible=False
 ):
     """
@@ -504,6 +508,10 @@ def create_chatterbox_advanced_params(
         initial_temperature: Sampling temperature
         initial_repetition_penalty: Repetition penalty
         initial_top_p: Top-p sampling
+        initial_min_p: Min-p sampling cutoff
+        initial_max_new_tokens: Maximum tokens to generate
+        include_expert: Include expert-only controls
+        expert_visible: Make expert-only controls visible
         visible: Make accordion visible
 
     Returns:
@@ -557,6 +565,26 @@ def create_chatterbox_advanced_params(
                 label="Top-p",
                 info="Nucleus sampling threshold"
             )
+
+        if include_expert:
+            with gr.Row(visible=expert_visible) as expert_row:
+                components['min_p'] = gr.Slider(
+                    minimum=0.0,
+                    maximum=0.30,
+                    value=initial_min_p,
+                    step=0.01,
+                    label="Min-p",
+                    info="Minimum probability threshold before top-p"
+                )
+                components['max_new_tokens'] = gr.Slider(
+                    minimum=256,
+                    maximum=4096,
+                    value=initial_max_new_tokens,
+                    step=256,
+                    label="Max New Tokens",
+                    info="Maximum codec tokens to generate"
+                )
+            components['expert_row'] = expert_row
 
     components['accordion'] = accordion
 

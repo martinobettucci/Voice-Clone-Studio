@@ -1767,7 +1767,8 @@ class TTSManager:
     def generate_voice_clone_chatterbox(self, text, voice_sample_path, seed=-1,
                                         exaggeration=0.5, cfg_weight=0.5,
                                         temperature=0.8, repetition_penalty=1.2,
-                                        top_p=1.0):
+                                        top_p=1.0, min_p=0.05,
+                                        max_new_tokens=2048):
         """Generate audio using Chatterbox TTS (English voice cloning).
 
         Args:
@@ -1779,6 +1780,8 @@ class TTSManager:
             temperature: Sampling temperature
             repetition_penalty: Repetition penalty
             top_p: Top-p sampling
+            min_p: Min-p sampling threshold
+            max_new_tokens: Maximum tokens to generate
 
         Returns:
             Tuple: (audio_array, sample_rate)
@@ -1790,6 +1793,9 @@ class TTSManager:
             seed = random.randint(0, 2147483647)
         set_seed(seed)
 
+        min_p = max(0.0, min(0.30, float(min_p)))
+        max_new_tokens = max(256, min(4096, int(max_new_tokens)))
+
         model = self.get_chatterbox_tts()
 
         wav_tensor = model.generate(
@@ -1800,6 +1806,8 @@ class TTSManager:
             temperature=float(temperature),
             repetition_penalty=float(repetition_penalty),
             top_p=float(top_p),
+            min_p=min_p,
+            max_new_tokens=max_new_tokens,
         )
 
         # Output is [1, N] float tensor at 24kHz
@@ -1811,7 +1819,8 @@ class TTSManager:
                                                      voice_sample_path, seed=-1,
                                                      exaggeration=0.5, cfg_weight=0.5,
                                                      temperature=0.8, repetition_penalty=2.0,
-                                                     top_p=1.0):
+                                                     top_p=1.0, min_p=0.05,
+                                                     max_new_tokens=2048):
         """Generate audio using Chatterbox Multilingual TTS (23 languages).
 
         Args:
@@ -1824,6 +1833,8 @@ class TTSManager:
             temperature: Sampling temperature
             repetition_penalty: Repetition penalty (default 2.0 for multilingual)
             top_p: Top-p sampling
+            min_p: Min-p sampling threshold
+            max_new_tokens: Maximum tokens to generate
 
         Returns:
             Tuple: (audio_array, sample_rate)
@@ -1834,6 +1845,9 @@ class TTSManager:
         if seed < 0:
             seed = random.randint(0, 2147483647)
         set_seed(seed)
+
+        min_p = max(0.0, min(0.30, float(min_p)))
+        max_new_tokens = max(256, min(4096, int(max_new_tokens)))
 
         model = self.get_chatterbox_multilingual()
 
@@ -1846,6 +1860,8 @@ class TTSManager:
             temperature=float(temperature),
             repetition_penalty=float(repetition_penalty),
             top_p=float(top_p),
+            min_p=min_p,
+            max_new_tokens=max_new_tokens,
         )
 
         # Output is [1, N] float tensor at 24kHz
@@ -1853,21 +1869,29 @@ class TTSManager:
 
         return audio_data, 24000
 
-    def generate_voice_convert_chatterbox(self, source_audio_path, target_voice_path):
+    def generate_voice_convert_chatterbox(self, source_audio_path, target_voice_path, n_cfm_timesteps=None):
         """Convert voice in source audio to match target voice.
 
         Args:
             source_audio_path: Path to source audio WAV to convert
             target_voice_path: Path to target voice reference WAV
+            n_cfm_timesteps: Optional VC diffusion steps (None = model default)
 
         Returns:
             Tuple: (audio_array, sample_rate)
         """
         model = self.get_chatterbox_vc()
 
+        if n_cfm_timesteps is None:
+            resolved_steps = None
+        else:
+            resolved_steps = int(n_cfm_timesteps)
+            resolved_steps = None if resolved_steps <= 0 else max(1, min(30, resolved_steps))
+
         wav_tensor = model.generate(
             audio=str(source_audio_path),
             target_voice_path=str(target_voice_path),
+            n_cfm_timesteps=resolved_steps,
         )
 
         # Output is [1, N] float tensor at 24kHz

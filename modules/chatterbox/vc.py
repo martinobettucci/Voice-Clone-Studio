@@ -87,6 +87,7 @@ class ChatterboxVC:
         self,
         audio,
         target_voice_path=None,
+        n_cfm_timesteps=None,
     ):
         if target_voice_path:
             self.set_target_voice(target_voice_path)
@@ -101,6 +102,7 @@ class ChatterboxVC:
             wav, _ = self.s3gen.inference(
                 speech_tokens=s3_tokens,
                 ref_dict=self.ref_dict,
+                n_cfm_timesteps=n_cfm_timesteps,
             )
             wav = wav.squeeze(0).detach().cpu().numpy()
             if self.watermarker:
